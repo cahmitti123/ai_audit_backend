@@ -1,0 +1,497 @@
+{
+  "success": true,
+  "message": "Fiche parsed successfully",
+  "information": {
+    "fiche_id": "1762209",
+    "cle": "1c3d83f51c15718553e7de0252a98e9a",
+    "date_insertion": "25/09/2025 10:27",
+    "createur": null,
+    "fiches_associees": null,
+    "nombre_acces": 69,
+    "dernier_acces": "18/10/2025 21:02",
+    "groupe": "NCA R3",
+    "groupe_responsable": "Denis PEREZ",
+    "groupe_gestion": "Réclamation :",
+    "groupe_reclamation": "",
+    "agence_id": "19",
+    "agence_nom": "3-NCAR3",
+    "attribution_user_id": "107",
+    "attribution_user_nom": "Mathieu LAMY",
+    "provenance_id": "118",
+    "provenance_nom": "KEVB",
+    "provenance_numero": null,
+    "provenance_periode_rappel": null,
+    "origine_id": null,
+    "origine_nom": null,
+    "attribution_bis_user_id": null,
+    "attribution_bis_user_nom": null,
+    "refus_demarchage": false,
+    "exception_demarchage": false,
+    "exception_demarchage_commentaire": "",
+    "niveau_interet": null,
+    "nombre_ouverture_mails": 0,
+    "derniere_ouverture_mail": null,
+    "nombre_visualisation_pages": 0,
+    "derniere_visualisation_page": "26/09/2025 16:54",
+    "espace_prospect_url": null,
+    "ferme_espace_prospect": false,
+    "desinscription_mail": false,
+    "corbeille": false,
+    "archive": false,
+    "modules": ["Santé"],
+    "etiquettes": [
+      {
+        "nom": "Ecoute LD",
+        "date": "26/09/2025",
+        "style": "background:#2A8C30;color:#fff;padding:4px;margin:4px;float:left;border-radius:4px;"
+      },
+      {
+        "nom": "Rejet qualité",
+        "date": "10/10/2025",
+        "style": "background:#FF5147;color:#fff;padding:4px;margin:4px;float:left;border-radius:4px;"
+      },
+      {
+        "nom": "Qualité confirmée",
+        "date": "15/10/2025",
+        "style": "background:#4CAF50;color:#fff;padding:4px;margin:4px;float:left;border-radius:4px;"
+      }
+    ]
+  },
+  "prospect": {
+    "prospect_id": "2769549",
+    "civilite": 2,
+    "civilite_text": "Madame",
+    "nom": "BADIN",
+    "prenom": "Christine",
+    "date_naissance": "15/10/1961",
+    "regime": "1",
+    "regime_text": "Régime Général",
+    "telephone": "0676796218",
+    "mobile": null,
+    "telephone_2": null,
+    "mail": "emmanuel83500@hotmail.fr",
+    "mail_2": null,
+    "adresse": "40 chemin des platrieres résidence du parc BAT A1",
+    "code_postal": "83330",
+    "ville": "LE BEAUSSET",
+    "num_secu": null,
+    "num_affiliation": "018310000",
+    "situation_familiale": 6,
+    "situation_familiale_text": "Autre",
+    "madelin": false,
+    "profession": "retraitée",
+    "csp": 6,
+    "csp_text": "Retraité",
+    "fax": null
+  },
+  "conjoint": null,
+  "enfants": [],
+  "mails": [
+    {
+      "date_envoi": "30/09/2025 10:44",
+      "type_mail": "z (Bien venu)",
+      "utilisateur": "",
+      "visualisation_url": "https://www.gestfiches.com/fld-assurances/index.php?p=visualisation-mail&idpropo=3873927&id=1762209&cle=1c3d83f51c15718553e7de0252a98e9a"
+    },
+    {
+      "date_envoi": "26/09/2025 10:20",
+      "type_mail": "z Projet adhésion",
+      "utilisateur": "Mathieu LAMY",
+      "visualisation_url": "https://www.gestfiches.com/fld-assurances/index.php?p=visualisation-mail&idpropo=3870726&id=1762209&cle=1c3d83f51c15718553e7de0252a98e9a"
+    },
+    {
+      "date_envoi": "26/09/2025 10:12",
+      "type_mail": "Mail Devis PersonnaliséCEGEMA Essentiel2 HOSPI",
+      "utilisateur": "Mathieu LAMY",
+      "visualisation_url": "https://www.gestfiches.com/fld-assurances/index.php?p=visualisation-mail&idpropo=3870671&id=1762209&cle=1c3d83f51c15718553e7de0252a98e9a"
+    },
+    {
+      "date_envoi": "26/09/2025 10:12",
+      "type_mail": "Mail Devis PersonnaliséAPIVIA VITAMIN3 Hospi H1CEGEMA Essentiel2 HOSPICEGEMA Vitanéor3 HOSPI",
+      "utilisateur": "Mathieu LAMY",
+      "visualisation_url": "https://www.gestfiches.com/fld-assurances/index.php?p=visualisation-mail&idpropo=3870670&id=1762209&cle=1c3d83f51c15718553e7de0252a98e9a"
+    },
+    {
+      "date_envoi": "25/09/2025 19:19",
+      "type_mail": "Mail Devis PersonnaliséCEGEMA Essentiel2 HOSPI",
+      "utilisateur": "Mathieu LAMY",
+      "visualisation_url": "https://www.gestfiches.com/fld-assurances/index.php?p=visualisation-mail&idpropo=3870444&id=1762209&cle=1c3d83f51c15718553e7de0252a98e9a"
+    }
+  ],
+  "rendez_vous": [],
+  "commentaires": [
+    {
+      "commentaire_id": "comm_0",
+      "date": "15/10/2025 11:14",
+      "utilisateur": "Unknown",
+      "texte": "Rejet traité"
+    },
+    {
+      "commentaire_id": "comm_1",
+      "date": "13/10/2025 15:05",
+      "utilisateur": "Denis PEREZ",
+      "texte": "Rejet traité"
+    },
+    {
+      "commentaire_id": "comm_2",
+      "date": "10/10/2025 17:05",
+      "utilisateur": "Unknown",
+      "texte": "Vérification de la présentation cabinet et agent avec annonce de la réforme du courtage complète Avant la découverte et la proposition (Pas d'obligation LD Si Appel entrant ou portefeuille uniquement) : OK -Vérification et confirmation des informations : OK -Vérification si résident en EHPAD, proposition Apivia Spéciale EHPAS: Néant -Vérification de l'ancienne couverture (+12mois ou -12 mois) : Aucune -Vérification du type de résiliation (RIA, Échéance, Châtel, Augmentation Cot, etc..): Aucune -Motivation du changement ou de la demande : Prix et Prestations Cliente na pas de mutuelle souhaite être bien couverte pour le volet hospitalisation avec chambre particulière, Mme est en ALD et en invalidité. -Vérification de cotisation actuelle : Formule CEGEMA Essentiel2 HOSPI à 23,64 €/mois -Vérification si MGO, portabilité, CSS, CMU : OK -Vérification de la date d'effet validée : 01/10/2025 -Vérification si devis dentaire, optique, hospi communiqué: OK -Vérification du choix de la formule : OK - Explication détaillé de la garantie : OK -Vérification de l'annonce des limitations et exclusions de la garantie : OK -Explication RAC0 (100% santé) si nécessaire Correctement ou pas : OK -Vérification si défaut de conseil: OK -Vérification si déclaration des frais de dossier, frais de courtage, AGIS, GPMA, etc : OK -Délais de rétractation : OK -Observation qualiticien et évaluation : Rejet qualité Note Imp 25 sept. 2025 à 18:45 / 25 sept. 2025 à 18:47 00 min 17 s / 08 min 41 s Cliente confirme au début d’appel qu’elle à souscrit un contrat auprès de la MMA une proposition avec une cotisation de 26.18 €/avec l’hospitalisation et l’optique, mois par la suite elle confirme lors de la signature du contrat proposé quel na pas donner suite a la première proposition proposé de la part de la MMA Merci de s’assurer si Mme a souscrit le contrat auprès de la compagnie MMA à fin de faire le nécessaire. 26 sept. 2025 à 10:08 14 min 25 s Agent confirme a la cliente que la CEGEMA c’est le centre relationnel maladie et Chirurgie et que c’est une filial de suisse life . Mme confirme au début de la communication qu’elle souhaite avoir une formule avec l’hospitalisation et l’optique, par contre vis avis le prix qui était élevé pour une formule complète  et du que son besoin pour le volet  optique n’était pas  prévu prochainement elle a donné son Ok pour la proposition proposé."
+    },
+    {
+      "commentaire_id": "comm_3",
+      "date": "08/10/2025 17:15",
+      "utilisateur": "Unknown",
+      "texte": "Rappel validation , sonneries sans réponses et aucune messagerie déclenchée meme après 50 secondes"
+    },
+    {
+      "commentaire_id": "comm_5",
+      "date": "06/10/2025 10:21",
+      "utilisateur": "Unknown",
+      "texte": "AS--Client injoignable"
+    },
+    {
+      "commentaire_id": "comm_6",
+      "date": "04/10/2025 11:25",
+      "utilisateur": "Unknown",
+      "texte": "Rappel validation ,répondeur , msg déposé ."
+    },
+    {
+      "commentaire_id": "comm_7",
+      "date": "30/09/2025 10:43",
+      "utilisateur": "Unknown",
+      "texte": "Appel validation , sonneries , aucune messagerie ne se déclenche , mail inj envoyé"
+    },
+    {
+      "commentaire_id": "comm_8",
+      "date": "26/09/2025 18:56",
+      "utilisateur": "Unknown",
+      "texte": "La dame m'indiquer qu'elle a trompe de numéro"
+    },
+    {
+      "commentaire_id": "comm_9",
+      "date": "26/09/2025 18:55",
+      "utilisateur": "Unknown",
+      "texte": "CLIENTE INJOIGNABLE"
+    },
+    {
+      "commentaire_id": "comm_10",
+      "date": "26/09/2025 18:45",
+      "utilisateur": "Unknown",
+      "texte": "AS--Client injoignable"
+    },
+    {
+      "commentaire_id": "comm_11",
+      "date": "26/09/2025 17:00",
+      "utilisateur": "Unknown",
+      "texte": "Vous venez de valider le(s) contrat(s) suivant(s) : Contrat Santé Cegema Essentiel² : 10055158"
+    },
+    {
+      "commentaire_id": "comm_12",
+      "date": "26/09/2025 11:40",
+      "utilisateur": "Unknown",
+      "texte": "Date enregistrement et min de l'annonce LD 25 sept. 2025 à 18:45 02 min 08 s -Vérification si annonce de la LD avant la découverte et la proposition : OK -Vérification de la Présentation Agent et cabinet : OK 00 min 06 s -Vérification déclaration N° Orias déclaré : OK -Vérification de l’enregistrement de l'appel conformément à la réforme du courtage : OK -Vérification le droit de s'y opposer : OK -Vérification de l'accord client : OK -Vérification de la conservation de l'appel pendant 2 ans et le droit de l'avoir sur simple demande: OK -Statut LD : LD Conforme"
+    },
+    {
+      "commentaire_id": "comm_13",
+      "date": "26/09/2025 10:46",
+      "utilisateur": "Mathieu LAMY",
+      "texte": "Mutuelle Actuelle:  sans mutuelle - Assuré principal mutuelle actuelle: Mme BADIN Christine - Objet de Résiliation (Echéance, Chatel,Infra-annuelle.....etc.) :  N/A - Résiliation Infra-Annuelle par Assuré ou Assureur : - Date fictive de résiliation: - Raison & choix de garanties (besoins et budget ): - Nombre d'assuré: 1 - Date d'effet souhaitée: 01/10/2025 - Document complémentaire à demander ou reçu:"
+    }
+  ],
+  "elements_souscription": {
+    "souscription_id": "159297",
+    "date_souscription": "2025-09-26 10:20:11",
+    "date_signature": "2025-09-26 10:26:28",
+    "date_validation": null,
+    "num_contrat": "10055158",
+    "annulation_contrat": false,
+    "type_vente": "1",
+    "vente_a_froid": "3",
+    "vf_accept": "0",
+    "ancien_contrat": {
+      "deja_assure": false,
+      "plus_12_mois": false,
+      "ria_requested": false,
+      "assureur": "",
+      "code_assureur": "",
+      "adresse": "",
+      "code_postal": "",
+      "ville": "",
+      "date_souscription": "",
+      "date_echeance": "30/09/2025",
+      "num_contrat": "",
+      "formule": "",
+      "cotisation": ""
+    },
+    "produit": {
+      "date_effet": null,
+      "date_effet_modifiable": "",
+      "formule": "CEGEMA Essentiel2HOSPIà23,64€/mois",
+      "groupe_nom": "CEGEMA",
+      "gamme_nom": "Essentiel2",
+      "formule_nom": "HOSPI",
+      "cotisation": "23.64",
+      "type_contrat": null,
+      "type_client": null,
+      "logo_url": null,
+      "garanties_url": "https://www.gestfiches.com/documents/cegema/essentiel2/garanties.pdf",
+      "dipa_url": "https://www.gestfiches.com/documents/cegema/essentiel2/dipa.pdf",
+      "conditions_generales_url": "https://www.gestfiches.com/documents/cegema/essentiel2/cg.pdf",
+      "bulletin_adhesion_url": "https://www.gestfiches.com/documents/cegema/essentiel2/ba.pdf",
+      "devoir_conseil_url": "https://www.gestfiches.com/fld-assurances/ws/index.php?ws=devoir-conseil&groupe=cegema&gamme=essentiel2&id=1762209&cle=10835e4c19fe8060499044f60905da7d&prod=9,362,4479&f=HOSPI&cotis=23.64&cc=64fc8b4af4b0dbae84e4a847d95cd1b9"
+    },
+    "paiement": {
+      "mode_paiement": "Prélèvement",
+      "prelevement_le": "12",
+      "periodicite": "mensuel",
+      "pas_coord_bancaires": false,
+      "compte_prelevement": {
+        "account_id": "328094",
+        "titulaire_nom": "BADIN",
+        "titulaire_prenom": "Christine",
+        "titulaire_adresse": "40 chemin des platrieres résidance du parc BAT A1",
+        "titulaire_cp": "83330",
+        "titulaire_ville": "LE BEAUSSET"
+      },
+      "compte_virement": {
+        "account_id": "328095",
+        "titulaire_nom": "BADIN",
+        "titulaire_prenom": "Christine",
+        "titulaire_adresse": "40 chemin des platrieres résidance du parc BAT A1",
+        "titulaire_cp": "83330",
+        "titulaire_ville": "LE BEAUSSET"
+      }
+    },
+    "questions_complementaires": {
+      "Département de naissance (les 2 premiers chiffres du code postal": "38700",
+      "Commune de naissance": "La Tronche",
+      "Pays de naissance": "FRANCE",
+      "Nationalité": "Française",
+      "Nom de naissance": "BADIN"
+    },
+    "questions_conseil": {
+      "Vous souhaitez privilégier un contrat": "Non Responsable",
+      "Après avoir fait le choix d’un contrat responsable ou non responsable, vous pouvez opter à un niveau de couverture": "Au meilleur prix",
+      "Etes-vous bénéficiaire d’une aide à la Complémentaire Santé Solidaire (CSS) ou en avez-vous formulé une demande ?": "Non",
+      "Bénéficiez-vous actuellement d’une complémentaire santé ?": "Non",
+      "S’agit-il d’un contrat complémentaire santé obligatoire mis en place par votre employeur ?": "Non",
+      "Bénéficiez-vous du maintien de votre contrat complémentaire santé, dans le cadre de la portabilité ?": "Non",
+      "Bénéficiez-vous d’une prise en charge thérapeutique à 100% (ALD) ?": "Oui",
+      "Faites-vous l’objet d’une mesure de curatelle ou de tutelle ?": "Non",
+      "Avez-vous réfléchi à un budget mensuel de cotisation ?": "Non",
+      "Vos garanties actuelles vous conviennent-elles ?": "Non",
+      "Connaissez-vous les conditions de résiliation de votre contrat complémentaire santé actuel ?": "Non",
+      "Vous chargez-vous d’adresser la lettre de résiliation en respectant les conditions, à votre assureur ou mutuelle actuelle ?": "Non",
+      "Souhaitez-vous que nous nous chargions d’expédier, en votre nom et pour votre compte, la lettre de résiliation en respectant les conditions de\r                        votre assureur ou mutuelle actuelle ?": "Non",
+      "Hospitalisation. Votre besoin en cas d’hospitalisation, c’est :": "Prendre en charge tous les frais y compris de la quasi-totalité des dépassements d’honoraires",
+      "En résumé, votre complémentaire santé, c’est :": "Un protection santé optimale"
+    },
+    "raw_data": {}
+  },
+  "tarification": [],
+  "reclamations": [],
+  "autres_contrats": [],
+  "documents": [],
+  "alertes": [
+    {
+      "alerte_id": "311694",
+      "etat": "Traitée",
+      "date": "26/09/2025",
+      "etiquette": null,
+      "libelle": "SIGNASSUR",
+      "deposee_le": "",
+      "deposee_par": "",
+      "commentaire": "Récupération 1762209_159297_cegema_essentiel2.pdf, à 10:26",
+      "attribuee_a": null,
+      "traitee_le": "26/09/2025",
+      "traitee_par": null,
+      "commentaire_traitement": "Vous venez de valider le(s) contrat(s) suivant(s) :\n\nContrat Santé Cegema Essentiel² : 10055158"
+    },
+    {
+      "alerte_id": "311690",
+      "etat": "Traitée",
+      "date": "26/09/2025",
+      "etiquette": null,
+      "libelle": "SIGNASSUR",
+      "deposee_le": "",
+      "deposee_par": "",
+      "commentaire": "Dossier 176220920250926102502 signatory.email_sent (L'email a été envoyé au signataire) 10:25",
+      "attribuee_a": null,
+      "traitee_le": null,
+      "traitee_par": null,
+      "commentaire_traitement": null
+    },
+    {
+      "alerte_id": "311688",
+      "etat": "Traitée",
+      "date": "26/09/2025",
+      "etiquette": null,
+      "libelle": "SIGNASSUR",
+      "deposee_le": "26/09/2025",
+      "deposee_par": "Mathieu LAMY",
+      "commentaire": "Envoi 1762209_159297_cegema_essentiel2.pdf, à 10:25",
+      "attribuee_a": "Mathieu LAMY",
+      "traitee_le": null,
+      "traitee_par": null,
+      "commentaire_traitement": null
+    },
+    {
+      "alerte_id": "311687",
+      "etat": "Traitée",
+      "date": "26/09/2025",
+      "etiquette": null,
+      "libelle": "APSCAN",
+      "deposee_le": "26/09/2025",
+      "deposee_par": "Mathieu LAMY",
+      "commentaire": "A 10:20 : OK",
+      "attribuee_a": null,
+      "traitee_le": null,
+      "traitee_par": null,
+      "commentaire_traitement": null
+    }
+  ],
+  "recordings": [
+    {
+      "call_id": "11769866880550143060",
+      "start_time": "2025-10-13T14:41:05.454463+00:00",
+      "duration_seconds": 86,
+      "direction": "out",
+      "from_number": "33755520797",
+      "to_number": "33676796218",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797-120091/6e85f049-1b2e-4ab4-a3a9-19af4d0a31cb-13-10-25-14h41-33755520797-33676796218.mp3"
+    },
+    {
+      "call_id": "16796313627560242179",
+      "start_time": "2025-10-13T13:02:21.191002+00:00",
+      "duration_seconds": 148,
+      "direction": "out",
+      "from_number": "33755520797",
+      "to_number": "33676796218",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797-120091/0c047b2d-1079-4fc4-bd13-b00eb56f4c65-13-10-25-13h02-33755520797-33676796218.mp3"
+    },
+    {
+      "call_id": "15430987046664521502",
+      "start_time": "2025-10-04T09:24:17.393093+00:00",
+      "duration_seconds": 96,
+      "direction": "out",
+      "from_number": "33755503977",
+      "to_number": "33676796218",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797-1000937/7e28c34b-9a0a-43ab-b6f2-18edbd695ac1-04-10-25-09h24-33755503977-33676796218.mp3"
+    },
+    {
+      "call_id": "14438251673911763825",
+      "start_time": "2025-10-03T15:59:38.704034+00:00",
+      "duration_seconds": 79,
+      "direction": "out",
+      "from_number": "33980802107",
+      "to_number": "33676796218",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797-114562/65a8d0d4-4b0f-479a-9fe8-ebca46e37d54-03-10-25-15h59-33980802107-33676796218.mp3"
+    },
+    {
+      "call_id": "8601225497684684041",
+      "start_time": "2025-09-30T08:42:25.116733+00:00",
+      "duration_seconds": 58,
+      "direction": "out",
+      "from_number": "33755503977",
+      "to_number": "33676796218",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797-1000937/ab7cab5e-aeff-4f46-a5b2-eb9aceda6833-30-09-25-08h42-33755503977-33676796218.mp3"
+    },
+    {
+      "call_id": "3414438745228287982",
+      "start_time": "2025-09-26T17:00:48.981048+00:00",
+      "duration_seconds": 454,
+      "direction": "in",
+      "from_number": "33676796218",
+      "to_number": "33980802107",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797-114562/279b82db-c048-47c1-8308-7e8209787f70-26-09-25-17h00-33676796218-33980802107.mp3"
+    },
+    {
+      "call_id": "11009241763712183538",
+      "start_time": "2025-09-26T16:54:40.272377+00:00",
+      "duration_seconds": 61,
+      "direction": "out",
+      "from_number": "33183889733",
+      "to_number": "33676796218",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797-1000938/d6ca6939-6ceb-42a7-b968-89a429011c13-26-09-25-16h54-33183889733-33676796218.mp3"
+    },
+    {
+      "call_id": "12061079943103700126",
+      "start_time": "2025-09-26T16:44:20.642841+00:00",
+      "duration_seconds": 231,
+      "direction": "out",
+      "from_number": "33980802107",
+      "to_number": "33676796218",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797-114562/61689681-347d-4bd1-9022-592c67f76dbf-26-09-25-16h44-33980802107-33676796218.mp3"
+    },
+    {
+      "call_id": "12161979872763860038",
+      "start_time": "2025-09-26T16:43:39.643462+00:00",
+      "duration_seconds": 10,
+      "direction": "in",
+      "from_number": "33676796218",
+      "to_number": "33183889733",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797/ff1e871c-e582-4a45-9662-6cde832d2bc7-26-09-25-16h43-33183889733.mp3"
+    },
+    {
+      "call_id": "15402545172264541264",
+      "start_time": "2025-09-26T08:08:20.119304+00:00",
+      "duration_seconds": 1331,
+      "direction": "out",
+      "from_number": "33980802107",
+      "to_number": "33676796218",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797-114562/6533334a-43d3-44cb-afcc-e93973dde840-26-09-25-08h08-33980802107-33676796218.mp3"
+    },
+    {
+      "call_id": "15552553241224172010",
+      "start_time": "2025-09-26T07:47:58.818878+00:00",
+      "duration_seconds": 59,
+      "direction": "out",
+      "from_number": "33980802107",
+      "to_number": "33676796218",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797-114562/d48b2460-d481-42f6-9e09-038d957ab000-26-09-25-07h47-33980802107-33676796218.mp3"
+    },
+    {
+      "call_id": "15524508306010199083",
+      "start_time": "2025-09-25T16:47:12.422002+00:00",
+      "duration_seconds": 992,
+      "direction": "in",
+      "from_number": "33676796218",
+      "to_number": "33980802107",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797-114562/5d512e70-9cd0-460c-acd1-440965d79234-25-09-25-16h47-33676796218-33980802107.mp3"
+    },
+    {
+      "call_id": "10859005406650172269",
+      "start_time": "2025-09-25T16:45:13.073915+00:00",
+      "duration_seconds": 95,
+      "direction": "in",
+      "from_number": "33676796218",
+      "to_number": "33980802107",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797-114562/2e413276-e7ed-492b-b86d-8c853cbb8fb4-25-09-25-16h45-33676796218-33980802107.mp3"
+    },
+    {
+      "call_id": "13679706794275157138",
+      "start_time": "2025-10-18T19:15:46.847653",
+      "duration_seconds": 121,
+      "direction": "out",
+      "from_number": "33980802107",
+      "to_number": "33676796218",
+      "answered": true,
+      "recording_url": "https://cdn.ringover.com/records/22797-114562/cf451e5a-8f6e-44dc-8bb5-ffbf0ddea717-25-09-25-10h16-33980802107-33676796218.mp3"
+    }
+  ],
+  "raw_sections": {}
+}

@@ -1,0 +1,48 @@
+{
+  "name": "ai-audit-system",
+  "version": "2.3.0",
+  "description": "**REST API for AI-powered audit system with GPT-5 and Prisma.**",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "setup.js",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "dev": "tsx watch src/server.ts",
+    "inngest": "npx inngest-cli@latest dev -u http://localhost:3002/api/inngest",
+    "pipeline": "tsx src/main-pipeline.ts",
+    "audit": "tsx src/main.ts",
+    "build": "tsc",
+    "setup": "node setup.js",
+    "prisma:generate": "prisma generate",
+    "prisma:push": "prisma db push",
+    "prisma:studio": "prisma studio",
+    "seed": "tsx scripts/seed-audit-config.ts",
+    "postinstall": "prisma generate",
+    "test:db": "tsx scripts/test-db-connection.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^1.0.0",
+    "@prisma/client": "^5.20.0",
+    "ai": "^4.0.0",
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "elevenlabs": "^0.9.0",
+    "express": "^4.18.2",
+    "inngest": "^3.44.3",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.0",
+    "@types/swagger-jsdoc": "^6.0.4",
+    "@types/swagger-ui-express": "^4.1.8",
+    "prisma": "^5.20.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

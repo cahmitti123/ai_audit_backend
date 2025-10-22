@@ -1,0 +1,599 @@
+{
+  "name": "Audit Complet - Complémentaire Santé NCA",
+  "description": "Audit qualité complet et exhaustif pour les appels de vente de complémentaire santé NCA. Couvre les 18 points de contrôle obligatoires (version 10/05/2025) pour assurer la conformité réglementaire maximale, éthique commerciale et protection client.",
+  "systemPrompt": "Vous êtes un expert en contrôle qualité pour les ventes de complémentaire santé. Votre rôle est d'analyser un enregistrement d'appel commercial et de vérifier la conformité avec les 18 points de contrôle obligatoires de NCA (Net Courtage Assurance).\n\nPrincipes directeurs:\n- Intérêt du client d'abord : conseil adapté au besoin, pas de survente, clarté des limites/exclusions\n- Transparence légale : annonce de l'enregistrement, droit d'opposition, conservation 2 ans, ORIAS, identité NCA\n- Traçabilité : tout engagement et consentement tracé\n- Protection des données : collecte minimale, sécurité RIB, aucun identifiant/MDP\n\nPour chaque point, évaluez:\n1. Si le point est traité (Traité/Non traité)\n2. Le minutage exact où il apparaît\n3. Si le traitement est conforme aux exigences\n4. Commentaires détaillés\n\nCas de rejet automatique:\n- IBAN demandé avant présentation ≥70% garanties\n- Fausse présentation (mutuelle/organisme externe)\n- Refus explicite client\n- Contrat non responsable sans explication RAC0\n- CSS/CMU/AME/MGO → vente interdite\n- Identifiants/mots de passe demandés (Ameli, etc.)\n- Répétition orale du RIB",
+  "version": "2025-10-05",
+  "totalSteps": 18,
+  "isActive": true,
+  "auditSteps": [
+    {
+      "position": 1,
+      "name": "Présentation du Cabinet et de l'Agent / Réforme du Courtage",
+      "description": "Vérifier que le conseiller présente correctement son identité, NCA, le numéro ORIAS, et annonce les obligations légales de l'enregistrement",
+      "prompt": "Vérifier que le conseiller:\n- Se présente avec son prénom/nom\n- Mentionne \"Net Courtage Assurance\" ou \"NCA\"\n- Donne le numéro ORIAS\n- Annonce que l'appel est enregistré\n- Mentionne le droit d'opposition du client\n- Indique la conservation 2 ans de l'enregistrement\n- Informe du droit de copie\n- Arrête immédiatement si refus d'enregistrement",
+      "controlPoints": [
+        "Identité du conseiller (prénom + nom)",
+        "Mention explicite de 'Net Courtage Assurance' ou 'NCA'",
+        "Numéro ORIAS communiqué",
+        "Annonce 'appel enregistré'",
+        "Droit d'opposition mentionné",
+        "Conservation 2 ans mentionnée",
+        "Droit de copie mentionné",
+        "Réaction appropriée en cas de refus"
+      ],
+      "keywords": [
+        "ORIAS",
+        "Net Courtage",
+        "NCA",
+        "enregistré",
+        "opposition",
+        "2 ans",
+        "conservation",
+        "réforme courtage",
+        "Bloctel"
+      ],
+      "severityLevel": "CRITICAL",
+      "isCritical": true,
+      "chronologicalImportant": true,
+      "weight": 10,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 2,
+      "name": "Vérification & Confirmation des informations",
+      "description": "Vérifier que le conseiller confirme l'exactitude des informations signalétiques, professionnelles et familiales du client",
+      "prompt": "Vérifier que le conseiller confirme:\n- Nom et prénom du client\n- Date de naissance\n- Adresse postale complète\n- Téléphone\n- Email\n- Situation professionnelle (régime)\n- Composition familiale",
+      "controlPoints": [
+        "Nom et prénom confirmés",
+        "Date de naissance vérifiée",
+        "Adresse postale complète",
+        "Numéro de téléphone validé",
+        "Email confirmé",
+        "Régime professionnel (salarié/indépendant/retraité/etc.)",
+        "Composition du foyer (solo/couple/famille)"
+      ],
+      "keywords": [
+        "adresse",
+        "email",
+        "téléphone",
+        "date de naissance",
+        "régime",
+        "salarié",
+        "indépendant",
+        "famille",
+        "conjoint",
+        "enfants"
+      ],
+      "severityLevel": "HIGH",
+      "isCritical": false,
+      "chronologicalImportant": true,
+      "weight": 7,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 3,
+      "name": "Résidence EHPAD & options dédiées",
+      "description": "Vérifier si le client réside en EHPAD et si des options dédiées sont proposées le cas échéant",
+      "prompt": "Vérifier:\n- Si la question EHPAD est posée\n- Si oui: orientation vers options adaptées\n- Si non applicable: passage rapide au point suivant",
+      "controlPoints": [
+        "Question posée sur résidence EHPAD",
+        "Traitement approprié de la réponse",
+        "Options dédiées proposées si oui"
+      ],
+      "keywords": [
+        "EHPAD",
+        "résidence",
+        "établissement",
+        "maison de retraite"
+      ],
+      "severityLevel": "LOW",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 2,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 4,
+      "name": "Ancienne couverture & délais",
+      "description": "Vérifier l'ancienneté du contrat actuel (≥/< 12 mois) pour déterminer les possibilités de résiliation",
+      "prompt": "Vérifier que le conseiller interroge sur:\n- La compagnie actuelle\n- Depuis combien de temps (> ou < 12 mois)\n- Si le contrat a été renouvelé\n- Les délais de résiliation\n- La conformité avec la loi Chatel",
+      "controlPoints": [
+        "Compagnie actuelle identifiée",
+        "Ancienneté du contrat (≥12 mois ou <12 mois)",
+        "Statut du renouvellement",
+        "Délais de résiliation vérifiés",
+        "Conformité légale validée"
+      ],
+      "keywords": [
+        "mutuelle actuelle",
+        "depuis quand",
+        "12 mois",
+        "ancienneté",
+        "renouvellement",
+        "contrat",
+        "compagnie"
+      ],
+      "severityLevel": "HIGH",
+      "isCritical": true,
+      "chronologicalImportant": false,
+      "weight": 8,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 5,
+      "name": "Type de résiliation",
+      "description": "Identifier et valider le type de résiliation (Chatel, hausse de tarif, échéance) et les preuves nécessaires",
+      "prompt": "Vérifier:\n- Le type de résiliation (Chatel/hausse/échéance/portabilité)\n- Les délais de préavis respectés\n- Les documents justificatifs évoqués\n- Absence de rétractation d'un autre contrat en cours",
+      "controlPoints": [
+        "Type de résiliation identifié",
+        "Préavis respecté",
+        "Documents justificatifs mentionnés",
+        "Pas de conflit avec rétractation en cours"
+      ],
+      "keywords": [
+        "résiliation",
+        "Chatel",
+        "hausse",
+        "échéance",
+        "préavis",
+        "portabilité",
+        "rétractation"
+      ],
+      "severityLevel": "HIGH",
+      "isCritical": true,
+      "chronologicalImportant": false,
+      "weight": 8,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 6,
+      "name": "Cotisation actuelle",
+      "description": "Relever le montant de la cotisation actuelle et son évolution récente",
+      "prompt": "Vérifier que le conseiller demande:\n- Le montant actuel de la cotisation\n- Si une hausse récente a été notifiée\n- La fréquence de paiement (mensuel/trimestriel/annuel)",
+      "controlPoints": [
+        "Montant actuel relevé",
+        "Évolution récente (hausse) identifiée",
+        "Fréquence de paiement notée"
+      ],
+      "keywords": [
+        "cotisation",
+        "montant",
+        "prix",
+        "tarif",
+        "hausse",
+        "augmentation",
+        "par mois",
+        "mensuel"
+      ],
+      "severityLevel": "MEDIUM",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 5,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 7,
+      "name": "Dispositifs spécifiques (CSS/CMU/MGO/Portabilité)",
+      "description": "Vérifier impérativement si le client bénéficie de CSS, CMU, MGO ou portabilité - VENTE INTERDITE si CSS/CMU",
+      "prompt": "CRITIQUE: Vérifier la question sur:\n- CSS (Complémentaire Santé Solidaire)\n- CMU (Couverture Maladie Universelle)\n- MGO (Maintien Gratuit Obligatoire)\n- Portabilité\n\n⚠️ REJET AUTOMATIQUE si CSS/CMU/AME → vente illégale",
+      "controlPoints": [
+        "Question CSS/CMU posée",
+        "Question MGO posée",
+        "Question portabilité posée",
+        "Arrêt de la vente si CSS/CMU détecté"
+      ],
+      "keywords": [
+        "CSS",
+        "CMU",
+        "MGO",
+        "portabilité",
+        "AME",
+        "complémentaire santé solidaire",
+        "aide sociale"
+      ],
+      "severityLevel": "CRITICAL",
+      "isCritical": true,
+      "chronologicalImportant": false,
+      "weight": 10,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 8,
+      "name": "Motivation & besoins détaillés",
+      "description": "Comprendre la motivation du client et identifier ses urgences médicales (optique, dentaire, hospitalisation, dépassements, médecine douce, auditif)",
+      "prompt": "Vérifier que le conseiller identifie:\n- La motivation principale (économies/garanties/les deux)\n- Le budget maximal acceptable\n- Les urgences de soins:\n  * Optique (verres, monture, fréquence)\n  * Dentaire (prothèses, implants, devis en cours)\n  * Hospitalisation (chambre particulière prévue)\n  * Dépassements d'honoraires (OPTAM/hors OPTAM)\n  * Médecine douce (ostéo, pédicure, etc.)\n  * Auditif (appareil prévu)\n  * Autres spécificités",
+      "controlPoints": [
+        "Motivation principale identifiée",
+        "Budget maximum établi",
+        "Urgences optique explorées",
+        "Besoins dentaire évalués",
+        "Hospitalisation discutée",
+        "Dépassements d'honoraires évoqués",
+        "Médecine douce questionnée",
+        "Auditif abordé si pertinent"
+      ],
+      "keywords": [
+        "budget",
+        "optique",
+        "lunettes",
+        "dentaire",
+        "prothèse",
+        "implant",
+        "hospitalisation",
+        "chambre",
+        "dépassement",
+        "OPTAM",
+        "ostéopathe",
+        "médecine douce",
+        "auditif",
+        "appareil auditif"
+      ],
+      "severityLevel": "HIGH",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 9,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 9,
+      "name": "Date d'effet validée",
+      "description": "Valider que la date d'effet souhaitée est cohérente avec la résiliation du contrat sortant",
+      "prompt": "Vérifier:\n- La date d'effet proposée\n- La cohérence avec l'échéance/résiliation du contrat actuel\n- Respect des délais de préavis\n- Absence de chevauchement ou trou de couverture",
+      "controlPoints": [
+        "Date d'effet mentionnée",
+        "Cohérence avec résiliation vérifiée",
+        "Délais de préavis respectés",
+        "Continuité de couverture assurée"
+      ],
+      "keywords": [
+        "date d'effet",
+        "mise en place",
+        "début",
+        "échéance",
+        "continuité"
+      ],
+      "severityLevel": "HIGH",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 7,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 10,
+      "name": "Devis santé fournis",
+      "description": "Vérifier si le client a des devis de soins (dentaire, optique, hospitalisation) et s'ils sont pris en compte dans le conseil",
+      "prompt": "Vérifier:\n- Si la question est posée sur les devis existants\n- Type de devis (dentaire/optique/hospitalisation)\n- Montant des devis\n- Prise en compte dans la simulation de remboursement",
+      "controlPoints": [
+        "Question posée sur devis existants",
+        "Type de devis identifié",
+        "Montant relevé",
+        "Simulation de remboursement faite si applicable"
+      ],
+      "keywords": [
+        "devis",
+        "devis dentaire",
+        "devis optique",
+        "simulation",
+        "remboursement",
+        "reste à charge"
+      ],
+      "severityLevel": "MEDIUM",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 6,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 11,
+      "name": "Choix de la formule & contrat responsable",
+      "description": "Vérifier l'adéquation entre les besoins et la formule choisie, et l'explication du contrat responsable/100% Santé ou non responsable",
+      "prompt": "Vérifier:\n- Que la formule correspond aux besoins exprimés\n- Si contrat responsable: explication du 100% Santé (RAC0)\n- Si non responsable: explication de l'absence de RAC0 + non-éligibilité Madelin (si indépendant)\n- Reformulation de la formule par le conseiller",
+      "controlPoints": [
+        "Adéquation formule/besoins",
+        "Type de contrat annoncé (responsable/non responsable)",
+        "Explication 100% Santé si responsable",
+        "Explication limites si non responsable",
+        "Info Madelin si indépendant + non responsable"
+      ],
+      "keywords": [
+        "formule",
+        "contrat responsable",
+        "100% Santé",
+        "RAC0",
+        "reste à charge zéro",
+        "Madelin",
+        "garanties"
+      ],
+      "severityLevel": "CRITICAL",
+      "isCritical": true,
+      "chronologicalImportant": false,
+      "weight": 10,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 12,
+      "name": "Frais annexes (courtage, AGIS, GPMA)",
+      "description": "Vérifier que tous les frais annexes sont annoncés clairement et figurent dans le devis",
+      "prompt": "Vérifier que sont mentionnés:\n- Frais de courtage\n- Frais AGIS\n- Frais GPMA\n- Que ces frais sont inclus dans le devis envoyé",
+      "controlPoints": [
+        "Frais de courtage mentionnés",
+        "Frais AGIS mentionnés",
+        "Frais GPMA mentionnés",
+        "Confirmation que les frais sont dans le devis"
+      ],
+      "keywords": [
+        "frais",
+        "courtage",
+        "AGIS",
+        "GPMA",
+        "frais de dossier",
+        "transparence"
+      ],
+      "severityLevel": "HIGH",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 7,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 13,
+      "name": "Devoir de conseil (garanties détaillées)",
+      "description": "Vérifier que le conseiller explique en détail les garanties sur tous les postes importants",
+      "prompt": "Vérifier l'explication des garanties sur:\n- Hospitalisation (honoraires, chambre particulière)\n- Dentaire (soins courants, prothèses, plafonds, exclusion implants)\n- Optique (verres simples/progressifs, monture, lentilles, chirurgie réfractive)\n- Médecine douce (forfaits)\n- Auditif (forfait par oreille)\n- Dépassements d'honoraires\n- Pharmacie",
+      "controlPoints": [
+        "Garanties hospitalisation expliquées",
+        "Garanties dentaire détaillées",
+        "Garanties optique présentées",
+        "Médecine douce mentionnée",
+        "Auditif abordé si pertinent",
+        "Dépassements d'honoraires traités",
+        "Pharmacie évoquée"
+      ],
+      "keywords": [
+        "garanties",
+        "hospitalisation",
+        "dentaire",
+        "optique",
+        "remboursement",
+        "plafond",
+        "couverture",
+        "prise en charge"
+      ],
+      "severityLevel": "HIGH",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 9,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 14,
+      "name": "Explication RAC0 (100% Santé)",
+      "description": "Vérifier que le dispositif 100% Santé / RAC0 est clairement expliqué si contrat responsable",
+      "prompt": "Si contrat responsable, vérifier:\n- Explication du panier 100% Santé\n- RAC0 sur optique (verres + monture)\n- RAC0 sur dentaire (prothèses)\n- RAC0 sur auditif (appareils)\n- Conditions d'accès (professionnels partenaires)",
+      "controlPoints": [
+        "Concept 100% Santé/RAC0 expliqué",
+        "Optique RAC0 mentionné",
+        "Dentaire RAC0 mentionné",
+        "Auditif RAC0 mentionné",
+        "Conditions d'accès précisées"
+      ],
+      "keywords": [
+        "100% Santé",
+        "RAC0",
+        "reste à charge zéro",
+        "panier",
+        "réforme"
+      ],
+      "severityLevel": "HIGH",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 8,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 15,
+      "name": "Limites & exclusions de garantie",
+      "description": "Vérifier que les limites et exclusions importantes sont clairement communiquées",
+      "prompt": "Vérifier que sont mentionnées:\n- Exclusions importantes (ex: implants dentaires souvent non couverts)\n- Plafonds annuels ou par acte\n- Délais de carence s'il y en a\n- Franchises éventuelles\n- Conditions particulières",
+      "controlPoints": [
+        "Exclusions principales communiquées",
+        "Plafonds annoncés",
+        "Délais de carence mentionnés si applicables",
+        "Franchises évoquées si présentes",
+        "Compréhension client vérifiée"
+      ],
+      "keywords": [
+        "exclusion",
+        "limite",
+        "plafond",
+        "délai de carence",
+        "franchise",
+        "non couvert",
+        "non remboursé"
+      ],
+      "severityLevel": "HIGH",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 8,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 16,
+      "name": "Observation qualitative de l'entretien",
+      "description": "Évaluation qualitative globale: clarté, compréhension client, rythme, attitude du conseiller",
+      "prompt": "Évaluer:\n- Clarté des explications\n- Adaptation au niveau du client\n- Rythme de l'appel (ni trop rapide, ni trop lent)\n- Écoute active du conseiller\n- Reformulations régulières\n- Vérification de compréhension\n- Attitude professionnelle et courtoise\n- Absence de pression commerciale",
+      "controlPoints": [
+        "Clarté et pédagogie",
+        "Adaptation au client",
+        "Rythme approprié",
+        "Écoute active démontrée",
+        "Reformulations présentes",
+        "Vérifications de compréhension",
+        "Professionnalisme",
+        "Absence de pression"
+      ],
+      "keywords": [
+        "compréhension",
+        "clair",
+        "reformulation",
+        "question",
+        "d'accord",
+        "ok",
+        "bien compris"
+      ],
+      "severityLevel": "MEDIUM",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 6,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 17,
+      "name": "Notes complémentaires",
+      "description": "Espace pour noter tout élément pertinent: incidents, pièces reçues, particularités du dossier",
+      "prompt": "Noter:\n- Tout incident ou difficulté rencontrée\n- Documents reçus ou envoyés\n- Particularités du dossier\n- Éléments nécessitant un suivi\n- Remarques du client",
+      "controlPoints": [
+        "Incidents éventuels documentés",
+        "Documents tracés",
+        "Particularités notées",
+        "Points de suivi identifiés"
+      ],
+      "keywords": [
+        "note",
+        "remarque",
+        "incident",
+        "document",
+        "suivi",
+        "particularité"
+      ],
+      "severityLevel": "LOW",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 3,
+      "verifyProductInfo": false
+    },
+    {
+      "position": 18,
+      "name": "Autres besoins (après signature uniquement)",
+      "description": "Vérifier que les autres besoins (prêt, auto, MRH, décennale) ne sont évoqués QU'APRÈS signature et sans pression",
+      "prompt": "Vérifier:\n- Que les autres besoins ne sont abordés qu'APRÈS souscription complète\n- Pas de pression commerciale\n- Simple ouverture de possibilité\n- Respect si le client refuse",
+      "controlPoints": [
+        "Évoqué uniquement après souscription",
+        "Aucune pression",
+        "Proposition optionnelle",
+        "Respect du refus"
+      ],
+      "keywords": [
+        "prêt",
+        "auto",
+        "MRH",
+        "habitation",
+        "décennale",
+        "autre besoin",
+        "intéressé"
+      ],
+      "severityLevel": "LOW",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 2,
+      "verifyProductInfo": false
+    }
+  ],
+  "automaticRejectionCriteria": [
+    {
+      "criterion": "IBAN demandé avant présentation ≥70% garanties",
+      "severity": "CRITICAL",
+      "reason": "Non-respect du processus de vente éthique"
+    },
+    {
+      "criterion": "Fausse présentation (mutuelle/organisme externe)",
+      "severity": "CRITICAL",
+      "reason": "Tromperie et fraude commerciale"
+    },
+    {
+      "criterion": "Refus explicite client",
+      "severity": "CRITICAL",
+      "reason": "Non-respect du consentement"
+    },
+    {
+      "criterion": "Contrat non responsable sans explication RAC0",
+      "severity": "CRITICAL",
+      "reason": "Défaut de conseil et information incomplète"
+    },
+    {
+      "criterion": "CSS/CMU/AME/MGO détecté",
+      "severity": "CRITICAL",
+      "reason": "Vente illégale - dispositifs exclusifs"
+    },
+    {
+      "criterion": "Identifiants/mots de passe demandés (Ameli, etc.)",
+      "severity": "CRITICAL",
+      "reason": "Violation sécurité et protection données"
+    },
+    {
+      "criterion": "Répétition orale du RIB",
+      "severity": "CRITICAL",
+      "reason": "Violation sécurité bancaire"
+    }
+  ],
+  "severityLevels": {
+    "CRITICAL": {
+      "weight": 10,
+      "weightRange": "10",
+      "description": "Points bloquants - Non-conformité = rejet automatique",
+      "color": "#DC2626"
+    },
+    "HIGH": {
+      "weight": 8,
+      "weightRange": "7-9",
+      "description": "Points importants - Non-conformité = pénalité majeure",
+      "color": "#F59E0B"
+    },
+    "MEDIUM": {
+      "weight": 5,
+      "weightRange": "5-6",
+      "description": "Points significatifs - Non-conformité = pénalité modérée",
+      "color": "#3B82F6"
+    },
+    "LOW": {
+      "weight": 3,
+      "weightRange": "2-4",
+      "description": "Points secondaires - Non-conformité = note d'attention",
+      "color": "#10B981"
+    }
+  },
+  "complianceThresholds": {
+    "excellent": {
+      "minScore": 90,
+      "description": "Conformité excellente",
+      "allCriticalPointsMustPass": true
+    },
+    "good": {
+      "minScore": 75,
+      "description": "Conformité satisfaisante",
+      "allCriticalPointsMustPass": true
+    },
+    "acceptable": {
+      "minScore": 60,
+      "description": "Conformité acceptable avec réserves",
+      "allCriticalPointsMustPass": true
+    },
+    "insufficient": {
+      "maxScore": 59,
+      "description": "Conformité insuffisante - Formation requise",
+      "allCriticalPointsMustPass": false
+    },
+    "rejected": {
+      "description": "Non-conforme - Un ou plusieurs critères de rejet automatique",
+      "anyCriticalPointFailed": true
+    }
+  },
+  "metadata": {
+    "createdAt": "2025-10-05",
+    "version": "1.0.0",
+    "regulatory": "Loi Chatel, Réforme du courtage, 100% Santé, RGPD",
+    "applicableTo": "Ventes de complémentaire santé - France",
+    "reviewFrequency": "Trimestrielle",
+    "lastReviewDate": "2025-10-05"
+  }
+}

@@ -1,0 +1,273 @@
+// Backend Database Schema - AI Audit System
+// ==========================================
+// Main database for the audit backend service
+
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider  = "postgresql"
+    url       = env("DATABASE_URL")
+    directUrl = env("DIRECT_URL")
+}
+
+model AuditConfig {
+    id           BigInt  @id @default(autoincrement())
+    name         String
+    description  String? @db.Text
+    systemPrompt String? @map("system_prompt") @db.Text
+
+    isActive  Boolean  @default(true) @map("is_active")
+    createdBy String?  @map("created_by")
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    audits Audit[]
+    steps  AuditStep[]
+
+    @@index([isActive])
+    @@index([createdAt])
+    @@map("audit_configs")
+}
+
+model AuditStep {
+    id            BigInt      @id @default(autoincrement())
+    auditConfigId BigInt      @map("audit_config_id")
+    auditConfig   AuditConfig @relation(fields: [auditConfigId], references: [id], onDelete: Cascade)
+
+    name                   String
+    description            String?       @db.Text
+    prompt                 String        @db.Text
+    controlPoints          String[]      @map("control_points")
+    keywords               String[]
+    severityLevel          AuditSeverity @map("severity_level")
+    isCritical             Boolean       @default(false) @map("is_critical")
+    position               Int
+    chronologicalImportant Boolean       @default(false) @map("chronological_important")
+    weight                 Int           @default(5)
+    verifyProductInfo      Boolean       @default(false) @map("verify_product_info")
+
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    @@index([auditConfigId])
+    @@index([position])
+    @@map("audit_steps")
+}
+
+enum AuditSeverity {
+    LOW
+    MEDIUM
+    HIGH
+    CRITICAL
+}
+
+model FicheCache {
+    id             BigInt  @id @default(autoincrement())
+    ficheId        String  @unique @map("fiche_id")
+    groupe         String?
+    agenceNom      String? @map("agence_nom")
+    prospectNom    String? @map("prospect_nom")
+    prospectPrenom String? @map("prospect_prenom")
+    prospectEmail  String? @map("prospect_email")
+    prospectTel    String? @map("prospect_tel")
+
+    rawData         Json     @map("raw_data")
+    hasRecordings   Boolean  @default(false) @map("has_recordings")
+    recordingsCount Int?     @map("recordings_count")
+    fetchedAt       DateTime @default(now()) @map("fetched_at")
+    expiresAt       DateTime @map("expires_at")
+    createdAt       DateTime @default(now()) @map("created_at")
+    updatedAt       DateTime @updatedAt @map("updated_at")
+
+    audits     Audit[]
+    recordings Recording[]
+
+    @@index([ficheId])
+    @@index([expiresAt])
+    @@index([groupe])
+    @@map("fiche_cache")
+}
+
+model Recording {
+    id           BigInt     @id @default(autoincrement())
+    ficheCacheId BigInt     @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    callId            String    @map("call_id")
+    recordingUrl      String    @map("recording_url")
+    recordingDate     String?   @map("recording_date")
+    recordingTime     String?   @map("recording_time")
+    fromNumber        String?   @map("from_number")
+    toNumber          String?   @map("to_number")
+    uuid              String?
+    direction         String?
+    answered          Boolean?
+    startTime         DateTime? @map("start_time")
+    durationSeconds   Int?      @map("duration_seconds")
+    transcriptionId   String?   @map("transcription_id")
+    transcriptionText String?   @map("transcription_text") @db.Text
+    hasTranscription  Boolean   @default(false) @map("has_transcription")
+    transcribedAt     DateTime? @map("transcribed_at")
+    createdAt         DateTime  @default(now()) @map("created_at")
+    updatedAt         DateTime  @updatedAt @map("updated_at")
+
+    @@unique([ficheCacheId, callId])
+    @@index([ficheCacheId])
+    @@index([callId])
+    @@index([recordingDate])
+    @@map("recordings")
+}
+
+model Audit {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId  BigInt      @map("fiche_cache_id")
+    ficheCache    FicheCache  @relation(fields: [ficheCacheId], references: [id])
+    auditConfigId BigInt      @map("audit_config_id")
+    auditConfig   AuditConfig @relation(fields: [auditConfigId], references: [id])
+
+    overallScore    Decimal @map("overall_score") @db.Decimal(5, 2)
+    scorePercentage Decimal @map("score_percentage") @db.Decimal(5, 2)
+    niveau          String
+    isCompliant     Boolean @map("is_compliant")
+    criticalPassed  Int     @map("critical_passed")
+    criticalTotal   Int     @map("critical_total")
+
+    status       String    @default("pending")
+    startedAt    DateTime? @map("started_at")
+    completedAt  DateTime? @map("completed_at")
+    durationMs   Int?      @map("duration_ms")
+    errorMessage String?   @map("error_message") @db.Text
+
+    totalTokens     Int? @map("total_tokens")
+    successfulSteps Int? @map("successful_steps")
+    failedSteps     Int? @map("failed_steps")
+    recordingsCount Int? @map("recordings_count")
+    timelineChunks  Int? @map("timeline_chunks")
+
+    resultData Json?   @map("result_data")
+    version    Int     @default(1)
+    isLatest   Boolean @default(true) @map("is_latest")
+
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    stepResults AuditStepResult[]
+
+    @@index([ficheCacheId])
+    @@index([auditConfigId])
+    @@index([status])
+    @@index([isCompliant])
+    @@index([createdAt])
+    @@index([isLatest])
+    @@map("audits")
+}
+
+model AuditStepResult {
+    id      BigInt @id @default(autoincrement())
+    auditId BigInt @map("audit_id")
+    audit   Audit  @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+    stepPosition                 Int      @map("step_position")
+    stepName                     String   @map("step_name")
+    severityLevel                String   @map("severity_level")
+    isCritical                   Boolean  @map("is_critical")
+    weight                       Int
+    traite                       Boolean
+    conforme                     String
+    score                        Int
+    niveauConformite             String   @map("niveau_conformite")
+    commentaireGlobal            String   @map("commentaire_global") @db.Text
+    motsClesTrouves              String[] @map("mots_cles_trouves")
+    minutages                    String[]
+    erreursTranscriptionTolerees Int      @default(0) @map("erreurs_transcription_tolerees")
+    totalCitations               Int      @default(0) @map("total_citations")
+    totalTokens                  Int      @default(0) @map("total_tokens")
+    createdAt                    DateTime @default(now()) @map("created_at")
+
+    controlPoints ControlPointResult[]
+    citations     Citation[]
+
+    @@index([auditId])
+    @@index([stepPosition])
+    @@index([conforme])
+    @@map("audit_step_results")
+}
+
+model ControlPointResult {
+    id           BigInt          @id @default(autoincrement())
+    stepResultId BigInt          @map("step_result_id")
+    stepResult   AuditStepResult @relation(fields: [stepResultId], references: [id], onDelete: Cascade)
+
+    point                       String
+    pointIndex                  Int      @map("point_index")
+    statut                      String
+    commentaire                 String   @db.Text
+    erreurTranscriptionNotee    Boolean  @map("erreur_transcription_notee")
+    variationPhonetiqueUtilisee String?  @map("variation_phonetique_utilisee")
+    minutages                   String[]
+    createdAt                   DateTime @default(now()) @map("created_at")
+
+    citations Citation[]
+
+    @@index([stepResultId])
+    @@index([pointIndex])
+    @@map("control_point_results")
+}
+
+model Citation {
+    id             BigInt              @id @default(autoincrement())
+    stepResultId   BigInt              @map("step_result_id")
+    stepResult     AuditStepResult     @relation(fields: [stepResultId], references: [id], onDelete: Cascade)
+    controlPointId BigInt?             @map("control_point_id")
+    controlPoint   ControlPointResult? @relation(fields: [controlPointId], references: [id], onDelete: Cascade)
+
+    texte            String   @db.Text
+    recordingIndex   Int      @map("recording_index")
+    chunkIndex       Int      @map("chunk_index")
+    minutage         String
+    minutageSecondes Decimal  @map("minutage_secondes") @db.Decimal(10, 2)
+    speaker          String
+    recordingDate    String?  @map("recording_date")
+    recordingTime    String?  @map("recording_time")
+    createdAt        DateTime @default(now()) @map("created_at")
+
+    @@index([stepResultId])
+    @@index([controlPointId])
+    @@index([recordingIndex])
+    @@map("citations")
+}
+
+model AuditLog {
+    id        BigInt   @id @default(autoincrement())
+    auditId   BigInt   @map("audit_id")
+    level     String
+    message   String   @db.Text
+    metadata  Json?    @default("{}")
+    timestamp DateTime @default(now())
+
+    @@index([auditId])
+    @@index([level])
+    @@index([timestamp])
+    @@map("audit_logs")
+}
+
+model ApiRequestLog {
+    id         BigInt   @id @default(autoincrement())
+    endpoint   String
+    method     String
+    params     Json?
+    statusCode Int      @map("status_code")
+    success    Boolean
+    duration   Int
+    timestamp  DateTime @default(now())
+    userId     String?  @map("user_id")
+    ipAddress  String?  @map("ip_address")
+
+    @@index([endpoint])
+    @@index([timestamp])
+    @@index([success])
+    @@map("api_request_logs")
+}

@@ -36,6 +36,7 @@ export function createApp() {
         "http://localhost:3001",
         "http://localhost:5173", // Vite default
         "http://localhost:5174",
+        "https://qa-nca-latest.vercel.app", // Production frontend
       ],
       credentials: true,
     })

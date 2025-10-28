@@ -232,6 +232,7 @@ model Citation {
     speaker          String
     recordingDate    String?  @map("recording_date")
     recordingTime    String?  @map("recording_time")
+    recordingUrl     String?  @map("recording_url") @db.Text
     createdAt        DateTime @default(now()) @map("created_at")
 
     @@index([stepResultId])

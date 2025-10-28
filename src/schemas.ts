@@ -1,10 +1,86 @@
 /**
- * Schémas Zod pour l'Audit
- * =========================
- * Définitions type-safe pour toutes les structures de données
+ * Zod Schemas & Type Definitions
+ * ===============================
+ * All schemas and types inferred from Zod (single source of truth)
  */
 
 import { z } from "zod";
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRANSCRIPTION TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const TranscriptionWordSchema = z.object({
+  text: z.string(),
+  start: z.number(),
+  end: z.number(),
+  type: z.string(),
+  speaker_id: z.string().optional(),
+  logprob: z.number().optional(),
+});
+
+export const TranscriptionSchema = z.object({
+  recording_url: z.string(),
+  transcription_id: z.string().optional(),
+  call_id: z.string().optional(),
+  recording: z.any(),
+  transcription: z.object({
+    text: z.string(),
+    language_code: z.string().optional(),
+    language_probability: z.number().optional(),
+    words: z.array(TranscriptionWordSchema),
+  }),
+});
+
+export const ConversationChunkSchema = z.object({
+  chunk_index: z.number().int(),
+  start_timestamp: z.number(),
+  end_timestamp: z.number(),
+  message_count: z.number().int(),
+  speakers: z.array(z.string()),
+  full_text: z.string(),
+});
+
+export const TimelineRecordingSchema = z.object({
+  recording_index: z.number().int(),
+  call_id: z.string().optional(),
+  start_time: z.string().optional(),
+  duration_seconds: z.number().optional(),
+  recording_url: z.string(),
+  recording_date: z.string().optional(),
+  recording_time: z.string().optional(),
+  from_number: z.string().optional(),
+  to_number: z.string().optional(),
+  total_chunks: z.number().int(),
+  chunks: z.array(ConversationChunkSchema),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AUDIT TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const AuditStepConfigSchema = z.object({
+  position: z.number().int(),
+  name: z.string(),
+  description: z.string(),
+  prompt: z.string(),
+  controlPoints: z.array(z.string()),
+  keywords: z.array(z.string()),
+  severityLevel: z.enum(["CRITICAL", "HIGH", "MEDIUM", "LOW"]),
+  isCritical: z.boolean(),
+  chronologicalImportant: z.boolean(),
+  weight: z.number().int(),
+});
+
+export const AuditConfigSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  systemPrompt: z.string(),
+  version: z.string(),
+  totalSteps: z.number().int(),
+  isActive: z.boolean(),
+  auditSteps: z.array(AuditStepConfigSchema),
+});
 
 // Citation avec traçabilité complète
 export const EvidenceCitationSchema = z.object({
@@ -20,6 +96,11 @@ export const EvidenceCitationSchema = z.object({
   recording_time: z
     .string()
     .describe("Heure HH:MM depuis l'en-tête de l'enregistrement"),
+  recording_url: z
+    .string()
+    .describe(
+      "URL complète de l'enregistrement audio (sera enrichi automatiquement). Indiquez 'N/A' si inconnue lors de l'analyse, sera mise à jour après."
+    ),
 });
 
 // Point de contrôle avec preuves
@@ -66,8 +147,17 @@ export const EnhancedQuerySchema = z.object({
   probable_speakers: z.array(z.string()).describe("Speakers probables"),
 });
 
-// Types TypeScript inférés
+// ═══════════════════════════════════════════════════════════════════════════════
+// INFERRED TYPESCRIPT TYPES (Single Source of Truth)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export type TranscriptionWord = z.infer<typeof TranscriptionWordSchema>;
+export type Transcription = z.infer<typeof TranscriptionSchema>;
+export type ConversationChunk = z.infer<typeof ConversationChunkSchema>;
+export type TimelineRecording = z.infer<typeof TimelineRecordingSchema>;
+export type AuditStep = z.infer<typeof AuditStepConfigSchema>;
+export type AuditConfig = z.infer<typeof AuditConfigSchema>;
 export type EvidenceCitation = z.infer<typeof EvidenceCitationSchema>;
 export type ControlPoint = z.infer<typeof ControlPointSchema>;
-export type AuditStep = z.infer<typeof AuditStepSchema>;
+export type AuditStepResult = z.infer<typeof AuditStepSchema>;
 export type EnhancedQuery = z.infer<typeof EnhancedQuerySchema>;

@@ -1,54 +1,131 @@
-# Environment variables
-.env
-.env.local
-.env.*.local
-
 # Dependencies
 node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
 
-# Build output
+# Environment variables (NEVER commit these!)
+.env
+.env.local
+.env.production
+.env.development
+.env.test
+
+# Keep example files
+!.env.example
+!.env.docker
+
+# Build outputs
 dist/
 build/
 *.tsbuildinfo
-
-# Data files
-data/
-*.json
-!package.json
-!package-lock.json
-!tsconfig.json
-!config/*.json
 
 # Logs
 logs/
 *.log
 npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+pids/
+*.pid
+*.seed
+*.pid.lock
 
-# OS files
-.DS_Store
-Thumbs.db
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
 
-# IDE
+# Testing
+coverage/
+.nyc_output/
+*.lcov
+
+# IDEs and editors
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
+*.swn
+.DS_Store
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
 
-# Prisma
-prisma/migrations/
-.env.prisma
-
-# Cache
-.cache/
-*.cache
-
-# Testing
-coverage/
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
 
 # Temporary files
 tmp/
 temp/
 *.tmp
+*.bak
+*.cache
+
+# Data files (optional - uncomment if you don't want to track data)
+data/*.json
+!data/.gitkeep
+
+# Prisma
+# Keep schema.prisma but ignore generated client
+# node_modules/@prisma/client already in node_modules
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Inngest local development
+.inngest/
+
+# SQLite databases (if running Inngest with SQLite)
+*.db
+*.db-shm
+*.db-wal
+
+# Misc
+.cache/
+.parcel-cache/
+.next/
+.nuxt/
+.vercel/
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Output of 'npm pack'
+*.tgz
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Serverless directories
+.serverless/
+
+# FuseBox cache
+.fusebox/
+
+# DynamoDB Local files
+.dynamodb/
+
+# TernJS port file
+.tern-port
+
+# Stores VSCode versions used for testing VSCode extensions
+.vscode-test
+
+# yarn v2
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*

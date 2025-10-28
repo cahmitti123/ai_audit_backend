@@ -1,6 +1,5 @@
-import { AuditSeverity, PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { AuditSeverity } from "@prisma/client";
+import { prisma } from "./src/shared/prisma.js";
 
 async function main() {
   console.log("🌱 Starting database seed...");
@@ -1181,5 +1180,6 @@ main()
     process.exit(1);
   })
   .finally(async () => {
-    await prisma.$disconnect();
+    const { disconnectDb } = await import("./src/shared/prisma.js");
+    await disconnectDb();
   });

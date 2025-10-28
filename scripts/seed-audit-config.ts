@@ -5,7 +5,7 @@
  */
 
 import { AuditSeverity } from "@prisma/client";
-import { prisma } from "../src/services/database.js";
+import { prisma } from "../src/shared/prisma.js";
 import "dotenv/config";
 
 async function main() {

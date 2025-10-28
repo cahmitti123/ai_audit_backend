@@ -1,0 +1,80 @@
+/**
+ * Express Application Factory
+ * ============================
+ * Creates and configures the Express app with all routes and middleware
+ */
+
+import express from "express";
+import cors from "cors";
+import swaggerUi from "swagger-ui-express";
+import { serve } from "inngest/express";
+import "dotenv/config";
+
+// Inngest
+import { inngest } from "./inngest/client.js";
+import { functions } from "./inngest/index.js";
+
+// Module routers
+import { fichesRouter } from "./modules/fiches/index.js";
+import { recordingsRouter } from "./modules/recordings/index.js";
+import { transcriptionsRouter } from "./modules/transcriptions/index.js";
+import { auditConfigsRouter } from "./modules/audit-configs/index.js";
+import { auditsRouter } from "./modules/audits/index.js";
+import { webhooksRoutes } from "./modules/webhooks/index.js";
+
+// Config
+import { swaggerSpec } from "./config/swagger.js";
+
+export function createApp() {
+  const app = express();
+
+  // Middleware
+  app.use(
+    cors({
+      origin: [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:5173", // Vite default
+        "http://localhost:5174",
+      ],
+      credentials: true,
+    })
+  );
+  app.use(express.json({ limit: "50mb" })); // Increase limit for Inngest workflows with large timelines
+
+  // Inngest endpoint
+  app.use(
+    "/api/inngest",
+    serve({
+      client: inngest,
+      functions,
+      servePath: "/api/inngest",
+    })
+  );
+
+  // Swagger UI
+  app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+  app.get("/api-docs.json", (req, res) => {
+    res.json(swaggerSpec);
+  });
+
+  // Health check
+  app.get("/health", (req, res) => {
+    res.json({
+      status: "ok",
+      timestamp: new Date().toISOString(),
+      service: "ai-audit-system",
+      version: "2.3.0",
+    });
+  });
+
+  // Register module routes
+  app.use("/api/fiches", fichesRouter);
+  app.use("/api/recordings", recordingsRouter);
+  app.use("/api/transcriptions", transcriptionsRouter);
+  app.use("/api/audit-configs", auditConfigsRouter);
+  app.use("/api/audits", auditsRouter);
+  app.use("/api/webhooks", webhooksRoutes);
+
+  return app;
+}

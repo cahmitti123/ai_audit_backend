@@ -1,0 +1,250 @@
+/**
+ * Vector Store Service
+ * ====================
+ * Integration with OpenAI Vector Store for product information verification
+ */
+
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+const VECTOR_STORE_ID =
+  process.env.VECTOR_STORE_ID || "vs_68e5139a7f848191af1a05a7e5d3452d";
+const MAX_RESULTS = parseInt(process.env.VECTOR_STORE_MAX_RESULTS || "5", 10);
+
+export interface VectorSearchResult {
+  content: string;
+  file_name?: string;
+  score?: number;
+  metadata?: Record<string, any>;
+}
+
+export interface ProductVerificationContext {
+  checkpointName: string;
+  relevantDocumentation: VectorSearchResult[];
+  searchQuery: string;
+}
+
+/**
+ * Search vector store for relevant product documentation
+ */
+export async function searchVectorStore(
+  query: string,
+  maxResults: number = MAX_RESULTS
+): Promise<VectorSearchResult[]> {
+  try {
+    console.log(`🔍 Searching vector store for: "${query}"`);
+
+    // Create a thread with vector store attached
+    const thread = await openai.beta.threads.create({
+      tool_resources: {
+        file_search: {
+          vector_store_ids: [VECTOR_STORE_ID],
+        },
+      },
+    });
+
+    // Create a message with the query
+    await openai.beta.threads.messages.create(thread.id, {
+      role: "user",
+      content: query,
+    });
+
+    // Create an assistant for this search
+    const assistant = await openai.beta.assistants.create({
+      model: "gpt-4o-mini",
+      tools: [{ type: "file_search" }],
+    });
+
+    // Run the search
+    const run = await openai.beta.threads.runs.create(thread.id, {
+      assistant_id: assistant.id,
+    });
+
+    // Wait for completion
+    let runStatus = await openai.beta.threads.runs.retrieve(thread.id, run.id);
+
+    while (runStatus.status !== "completed" && runStatus.status !== "failed") {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      runStatus = await openai.beta.threads.runs.retrieve(thread.id, run.id);
+    }
+
+    if (runStatus.status === "failed") {
+      console.error("❌ Vector store search failed:", runStatus.last_error);
+      return [];
+    }
+
+    // Get the messages with the search results
+    const messages = await openai.beta.threads.messages.list(thread.id);
+
+    const results: VectorSearchResult[] = [];
+
+    // Extract content and citations
+    for (const message of messages.data) {
+      if (message.role === "assistant" && message.content) {
+        for (const content of message.content) {
+          if (content.type === "text") {
+            // Extract annotations (citations)
+            const annotations = content.text.annotations || [];
+
+            for (const annotation of annotations) {
+              if (
+                annotation.type === "file_citation" &&
+                annotation.file_citation
+              ) {
+                try {
+                  const file = await openai.files.retrieve(
+                    annotation.file_citation.file_id
+                  );
+                  results.push({
+                    content: content.text.value,
+                    file_name: file.filename,
+                    metadata: {
+                      file_id: file.id,
+                    },
+                  });
+                } catch (error) {
+                  console.error("Error retrieving file:", error);
+                }
+              }
+            }
+
+            // If no annotations, still include the content
+            if (annotations.length === 0 && content.text.value) {
+              results.push({
+                content: content.text.value,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Cleanup
+    await openai.beta.assistants.del(assistant.id);
+    await openai.beta.threads.del(thread.id);
+
+    console.log(`✅ Found ${results.length} relevant documents`);
+    return results.slice(0, maxResults);
+  } catch (error) {
+    console.error("❌ Error searching vector store:", error);
+    return [];
+  }
+}
+
+/**
+ * Get product verification context for all checkpoints in a step
+ */
+export async function getProductVerificationContext(
+  step: any
+): Promise<ProductVerificationContext[]> {
+  const contexts: ProductVerificationContext[] = [];
+
+  console.log(
+    `\n🔍 Retrieving product verification context for step: ${step.name}`
+  );
+
+  for (const checkpoint of step.controlPoints) {
+    // Build search query combining step context and checkpoint
+    const searchQuery = buildProductSearchQuery(step, checkpoint);
+
+    // Search vector store
+    const relevantDocs = await searchVectorStore(searchQuery, 3);
+
+    contexts.push({
+      checkpointName: checkpoint,
+      relevantDocumentation: relevantDocs,
+      searchQuery,
+    });
+
+    // Add small delay to avoid rate limits
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  return contexts;
+}
+
+/**
+ * Build optimized search query for product information
+ */
+function buildProductSearchQuery(step: any, checkpoint: string): string {
+  // Combine step context with checkpoint for targeted search
+  const stepKeywords = step.keywords.slice(0, 5).join(" ");
+
+  return `Produit d'assurance santé complémentaire: ${checkpoint}. 
+Contexte: ${step.name}. 
+Mots-clés: ${stepKeywords}. 
+Recherche garanties, conditions, exclusions, plafonds, remboursements.`;
+}
+
+/**
+ * Format verification context for prompt inclusion
+ */
+export function formatVerificationContextForPrompt(
+  contexts: ProductVerificationContext[]
+): string {
+  if (contexts.length === 0) {
+    return "";
+  }
+
+  let text = `\n${"═".repeat(80)}\n`;
+  text += "DOCUMENTATION PRODUIT (depuis Vector Store)\n";
+  text += `${"═".repeat(80)}\n\n`;
+  text +=
+    "⚠️ VÉRIFICATION OBLIGATOIRE: Les affirmations du conseiller doivent être conformes\n";
+  text +=
+    "à la documentation officielle ci-dessous. Toute divergence doit être signalée.\n\n";
+
+  for (const context of contexts) {
+    if (context.relevantDocumentation.length > 0) {
+      text += `\n${"─".repeat(80)}\n`;
+      text += `Point de contrôle: ${context.checkpointName}\n`;
+      text += `${"─".repeat(80)}\n\n`;
+
+      for (const doc of context.relevantDocumentation) {
+        text += `📄 Source: ${doc.file_name || "Documentation produit"}\n`;
+        text += `${doc.content}\n\n`;
+      }
+    }
+  }
+
+  text += `${"═".repeat(80)}\n\n`;
+  return text;
+}
+
+/**
+ * Verify checkpoint compliance against vector store documentation
+ */
+export async function verifyCheckpointAgainstDocumentation(
+  checkpoint: string,
+  advisorStatement: string,
+  stepContext: any
+): Promise<{
+  compliant: boolean;
+  confidence: "high" | "medium" | "low";
+  discrepancies: string[];
+  supportingDocs: VectorSearchResult[];
+}> {
+  // Build verification query
+  const query = `Vérifier conformité: ${checkpoint}
+Déclaration du conseiller: "${advisorStatement}"
+Contexte: ${stepContext.name}
+Est-ce que cette affirmation est conforme aux garanties et conditions du produit?`;
+
+  // Search for relevant documentation
+  const docs = await searchVectorStore(query, 5);
+
+  // Basic compliance check (can be enhanced with GPT analysis)
+  const hasRelevantDocs = docs.length > 0;
+
+  return {
+    compliant: hasRelevantDocs,
+    confidence: hasRelevantDocs
+      ? "medium"
+      : ("low" as "high" | "medium" | "low"),
+    discrepancies: [],
+    supportingDocs: docs,
+  };
+}

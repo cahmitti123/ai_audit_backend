@@ -2,92 +2,37 @@
  * Inngest Client
  * ==============
  * Event-driven workflow client with typed event schemas
+ *
+ * Event schemas are imported from domain modules to maintain
+ * domain-driven architecture. Each module defines its own events.
  */
 
 import { Inngest, EventSchemas } from "inngest";
+import type { FichesEvents } from "../modules/fiches/fiches.events.js";
+import type { TranscriptionsEvents } from "../modules/transcriptions/transcriptions.events.js";
+import type { AuditsEvents } from "../modules/audits/audits.events.js";
 
 /**
- * Event Type Definitions
- * ======================
- * All events in the system with their payload schemas
+ * Combined Event Type Definitions
+ * ================================
+ * Aggregates all domain events into single type
  */
 type Events = {
-  // Fiche fetch events
-  "fiche/fetch": {
-    data: {
-      fiche_id: string;
-      cle?: string;
-      force_refresh?: boolean;
-    };
-  };
-  "fiche/fetched": {
-    data: {
-      fiche_id: string;
-      cache_id: string;
-      recordings_count: number;
-      cached: boolean;
-    };
-  };
+  // Fiches domain events
+  "fiche/fetch": { data: FichesEvents["fiche/fetch"] };
+  "fiche/fetched": { data: FichesEvents["fiche/fetched"] };
+  "fiche/cache.expired": { data: FichesEvents["fiche/cache.expired"] };
 
-  // Transcription events
-  "fiche/transcribe": {
-    data: {
-      fiche_id: string;
-      priority?: "high" | "normal" | "low";
-    };
-  };
-  "fiche/transcribed": {
-    data: {
-      fiche_id: string;
-      transcribed_count: number;
-      cached_count: number;
-      failed_count: number;
-    };
-  };
+  // Transcriptions domain events
+  "fiche/transcribe": { data: TranscriptionsEvents["fiche/transcribe"] };
+  "fiche/transcribed": { data: TranscriptionsEvents["fiche/transcribed"] };
 
-  // Audit events
-  "audit/run": {
-    data: {
-      fiche_id: string;
-      audit_config_id: number;
-      user_id?: string;
-    };
-  };
-  "audit/completed": {
-    data: {
-      fiche_id: string;
-      audit_id: string;
-      audit_config_id: number;
-      score: number;
-      niveau: string;
-      duration_ms: number;
-    };
-  };
-  "audit/failed": {
-    data: {
-      fiche_id: string;
-      audit_config_id: number;
-      error: string;
-      retry_count: number;
-    };
-  };
-
-  // Batch events
-  "audit/batch": {
-    data: {
-      fiche_ids: string[];
-      audit_config_id?: number;
-      user_id?: string;
-    };
-  };
-  "audit/batch.completed": {
-    data: {
-      total: number;
-      succeeded: number;
-      failed: number;
-      audit_config_id?: number;
-    };
-  };
+  // Audits domain events
+  "audit/run": { data: AuditsEvents["audit/run"] };
+  "audit/completed": { data: AuditsEvents["audit/completed"] };
+  "audit/failed": { data: AuditsEvents["audit/failed"] };
+  "audit/batch": { data: AuditsEvents["audit/batch"] };
+  "audit/batch.completed": { data: AuditsEvents["audit/batch.completed"] };
 };
 
 /**

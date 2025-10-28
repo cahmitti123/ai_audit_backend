@@ -4,6 +4,12 @@
  * Collects all workflow functions from domain modules
  */
 
-// Placeholder - will be populated as modules are created
-export const functions: any[] = [];
+import { fichesFunctions } from "../modules/fiches/index.js";
+import { transcriptionsFunctions } from "../modules/transcriptions/index.js";
+import { auditsFunctions } from "../modules/audits/index.js";
 
+export const functions = [
+  ...fichesFunctions,
+  ...transcriptionsFunctions,
+  ...auditsFunctions,
+];

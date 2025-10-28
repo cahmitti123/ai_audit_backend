@@ -19,12 +19,14 @@ const options: swaggerJsdoc.Options = {
     ],
     tags: [
       { name: "Health", description: "Health check endpoints" },
+      { name: "Fiches", description: "Fiche data and caching" },
+      { name: "Recordings", description: "Recording management" },
+      { name: "Transcriptions", description: "Audio transcription" },
       { name: "Audit Configs", description: "Audit configuration management" },
-      { name: "Audits", description: "Run and manage audits" },
-      { name: "Fiches", description: "Fiche-related operations" },
+      { name: "Audits", description: "Audit execution and results" },
     ],
   },
-  apis: ["./src/server.ts"],
+  apis: ["./src/app.ts", "./src/modules/**/*.routes.ts"],
 };
 
 export const swaggerSpec = swaggerJsdoc(options);

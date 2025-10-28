@@ -115,16 +115,48 @@ export function getCallDirection(
 
 /**
  * Enrich recording with parsed information
+ * Handles both snake_case (API) and camelCase (Database) field names
+ * ALWAYS returns recording_url in snake_case for consistency
  */
 export function enrichRecording(recording: any): any {
-  const parsed = parseRecordingUrl(recording.recording_url || "");
+  // Handle both formats: recording_url (API) and recordingUrl (DB)
+  const url = recording.recording_url || recording.recordingUrl || "";
+  const callId = recording.call_id || recording.callId || "";
+
+  console.log(`📍 [enrichRecording] Processing recording:`, {
+    call_id: callId,
+    has_recording_url: Boolean(recording.recording_url),
+    has_recordingUrl: Boolean(recording.recordingUrl),
+    final_url: url ? `${url.substring(0, 50)}...` : "MISSING",
+  });
+
+  const parsed = parseRecordingUrl(url);
 
   if (!parsed) {
-    return recording;
+    console.warn(
+      `⚠️  [enrichRecording] Failed to parse URL for call_id: ${callId}`
+    );
+    return {
+      ...recording,
+      // Normalize field names to snake_case
+      recording_url: url,
+      call_id: callId,
+      parsed: null,
+    };
   }
+
+  console.log(`✓ [enrichRecording] Successfully enriched:`, {
+    call_id: callId,
+    date: parsed.date,
+    time: parsed.time,
+    url_length: url.length,
+  });
 
   return {
     ...recording,
+    // Normalize field names to snake_case (critical for timeline generation)
+    recording_url: url,
+    call_id: callId,
     parsed: {
       uuid: parsed.uuid,
       date: parsed.date,

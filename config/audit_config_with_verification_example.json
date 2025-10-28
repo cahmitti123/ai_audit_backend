@@ -1,0 +1,137 @@
+{
+  "name": "Audit Complet - Avec Vérification Produit",
+  "description": "Exemple de configuration d'audit avec vérification produit activée sur les étapes critiques",
+  "systemPrompt": "Vous êtes un expert en contrôle qualité pour les ventes de complémentaire santé...",
+  "version": "2025-10-27",
+  "totalSteps": 18,
+  "isActive": true,
+  "auditSteps": [
+    {
+      "position": 11,
+      "name": "Choix de la formule & contrat responsable",
+      "description": "Vérifier l'adéquation entre les besoins et la formule choisie, et l'explication du contrat responsable",
+      "prompt": "Vérifier que la formule correspond aux besoins et que le type de contrat (responsable/non responsable) est correctement expliqué avec ses implications.",
+      "controlPoints": [
+        "Adéquation formule/besoins",
+        "Type de contrat annoncé (responsable/non responsable)",
+        "Explication 100% Santé si responsable",
+        "Explication limites si non responsable",
+        "Info Madelin si indépendant + non responsable"
+      ],
+      "keywords": [
+        "formule",
+        "contrat responsable",
+        "100% Santé",
+        "RAC0",
+        "Madelin"
+      ],
+      "severityLevel": "CRITICAL",
+      "isCritical": true,
+      "chronologicalImportant": false,
+      "weight": 10,
+      "verifyProductInfo": true,
+      "verificationNote": "⚠️ Cette étape vérifie automatiquement que les déclarations sur le contrat responsable et le 100% Santé correspondent aux documents produits officiels"
+    },
+    {
+      "position": 13,
+      "name": "Devoir de conseil (garanties détaillées)",
+      "description": "Vérifier que le conseiller explique en détail les garanties sur tous les postes importants",
+      "prompt": "Vérifier l'explication détaillée des garanties: hospitalisation, dentaire, optique, médecine douce, auditif, dépassements d'honoraires.",
+      "controlPoints": [
+        "Garanties hospitalisation expliquées",
+        "Garanties dentaire détaillées",
+        "Garanties optique présentées",
+        "Médecine douce mentionnée",
+        "Auditif abordé si pertinent",
+        "Dépassements d'honoraires traités",
+        "Pharmacie évoquée"
+      ],
+      "keywords": [
+        "garanties",
+        "hospitalisation",
+        "dentaire",
+        "optique",
+        "remboursement",
+        "plafond",
+        "couverture"
+      ],
+      "severityLevel": "HIGH",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 9,
+      "verifyProductInfo": true,
+      "verificationNote": "⚠️ Cette étape compare TOUTES les garanties annoncées avec la documentation produit officielle. Les plafonds, taux de remboursement et conditions doivent être exacts."
+    },
+    {
+      "position": 14,
+      "name": "Explication RAC0 (100% Santé)",
+      "description": "Vérifier que le dispositif 100% Santé / RAC0 est clairement expliqué si contrat responsable",
+      "prompt": "Si contrat responsable, vérifier l'explication du panier 100% Santé avec RAC0 sur optique, dentaire et auditif.",
+      "controlPoints": [
+        "Concept 100% Santé/RAC0 expliqué",
+        "Optique RAC0 mentionné",
+        "Dentaire RAC0 mentionné",
+        "Auditif RAC0 mentionné",
+        "Conditions d'accès précisées"
+      ],
+      "keywords": [
+        "100% Santé",
+        "RAC0",
+        "reste à charge zéro",
+        "panier",
+        "réforme"
+      ],
+      "severityLevel": "HIGH",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 8,
+      "verifyProductInfo": true,
+      "verificationNote": "⚠️ Vérifie que les explications sur le RAC0 correspondent exactement aux conditions du produit (équipements éligibles, professionnels partenaires, etc.)"
+    },
+    {
+      "position": 15,
+      "name": "Limites & exclusions de garantie",
+      "description": "Vérifier que les limites et exclusions importantes sont clairement communiquées",
+      "prompt": "Vérifier que les exclusions importantes, plafonds annuels, délais de carence et franchises sont mentionnés.",
+      "controlPoints": [
+        "Exclusions principales communiquées",
+        "Plafonds annoncés",
+        "Délais de carence mentionnés si applicables",
+        "Franchises évoquées si présentes",
+        "Compréhension client vérifiée"
+      ],
+      "keywords": [
+        "exclusion",
+        "limite",
+        "plafond",
+        "délai de carence",
+        "franchise",
+        "non couvert"
+      ],
+      "severityLevel": "HIGH",
+      "isCritical": false,
+      "chronologicalImportant": false,
+      "weight": 8,
+      "verifyProductInfo": true,
+      "verificationNote": "⚠️ CRITIQUE: Vérifie que TOUTES les exclusions importantes (ex: implants dentaires, cures thermales) sont mentionnées selon la documentation produit"
+    }
+  ],
+  "verificationConfiguration": {
+    "enabled": true,
+    "vectorStoreId": "vs_68e5139a7f848191af1a05a7e5d3452d",
+    "maxResultsPerCheckpoint": 5,
+    "verificationMode": "strict",
+    "description": "Cette configuration active la vérification automatique des informations produit sur les étapes critiques. Le système recherche dans le vector store les documents officiels et compare les déclarations du conseiller avec la documentation."
+  },
+  "notes": {
+    "verificationBehavior": "Lorsque verifyProductInfo=true, le système va automatiquement chercher dans le vector store la documentation officielle pour chaque point de contrôle et l'inclure dans le prompt d'analyse. Le modèle GPT-5 comparera alors les déclarations du conseiller avec cette documentation.",
+    "recommendedSteps": [
+      "Step 11: Vérification contrat responsable et Madelin",
+      "Step 13: Vérification garanties détaillées",
+      "Step 14: Vérification RAC0/100% Santé",
+      "Step 15: Vérification exclusions et limites"
+    ],
+    "performance": "Chaque étape avec vérification ajoute ~10-25 secondes au temps d'analyse (recherche dans le vector store). Utilisez uniquement sur les étapes critiques.",
+    "tokenUsage": "La vérification produit ajoute 500-2000 tokens supplémentaires au prompt par étape selon le nombre de documents trouvés."
+  }
+}

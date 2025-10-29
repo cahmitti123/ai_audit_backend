@@ -184,8 +184,46 @@ export async function getFicheWithCache(ficheId: string, cle?: string) {
   return ficheData;
 }
 
+/**
+ * Force refresh fiche from API and upsert to database
+ * This bypasses the cache and always fetches fresh data
+ */
+export async function refreshFicheFromApi(ficheId: string, cle?: string) {
+  console.log("Force refreshing fiche from API", {
+    fiche_id: ficheId,
+    has_cle: Boolean(cle),
+  });
+  logger.info("Force refreshing fiche from API", {
+    fiche_id: ficheId,
+    has_cle: Boolean(cle),
+  });
+
+  // Always fetch from API
+  console.log("Fetching fresh fiche details from API", { fiche_id: ficheId });
+  const ficheData = await fetchApiFicheDetails(ficheId, cle);
+
+  // Import repository and upsert to database
+  console.log("Importing repository functions");
+  const { cacheFiche } = await import("./fiches.repository.js");
+  
+  console.log("Upserting fresh fiche data to database", { fiche_id: ficheId });
+  await cacheFiche(ficheData);
+
+  console.log("Fiche refreshed and upserted successfully", {
+    fiche_id: ficheId,
+    recordings_count: ficheData.recordings?.length || 0,
+  });
+  logger.info("Fiche refreshed and upserted successfully", {
+    fiche_id: ficheId,
+    recordings_count: ficheData.recordings?.length || 0,
+  });
+
+  return ficheData;
+}
+
 export const FichesService = {
   fetchApiSales,
   fetchApiFicheDetails,
   getFicheWithCache,
+  refreshFicheFromApi,
 };

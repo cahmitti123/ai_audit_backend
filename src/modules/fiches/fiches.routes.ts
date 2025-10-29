@@ -5,7 +5,7 @@
  */
 
 import { Router, Request, Response } from "express";
-import { fetchApiSales, getFicheWithCache } from "./fiches.service.js";
+import { fetchApiSales, getFicheWithCache, refreshFicheFromApi } from "./fiches.service.js";
 import { getCachedFiche } from "./fiches.repository.js";
 
 export const fichesRouter = Router();
@@ -62,7 +62,7 @@ fichesRouter.get("/search", async (req: Request, res: Response) => {
  * /api/fiches/{fiche_id}:
  *   get:
  *     tags: [Fiches]
- *     summary: Get fiche details with recordings (auto-cached)
+ *     summary: Get fiche details with recordings (auto-cached or force refresh)
  *     parameters:
  *       - in: path
  *         name: fiche_id
@@ -73,6 +73,11 @@ fichesRouter.get("/search", async (req: Request, res: Response) => {
  *         name: cle
  *         schema:
  *           type: string
+ *       - in: query
+ *         name: refresh
+ *         schema:
+ *           type: string
+ *         description: Set to "true" to force refresh from external API and upsert to database
  *     responses:
  *       200:
  *         description: Fiche details
@@ -80,21 +85,40 @@ fichesRouter.get("/search", async (req: Request, res: Response) => {
 fichesRouter.get("/:fiche_id", async (req: Request, res: Response) => {
   try {
     const { fiche_id } = req.params;
-    const { cle } = req.query;
+    const { cle, refresh } = req.query;
+    const shouldRefresh = refresh === "true";
+    
     console.log("Received fiche details request", {
       fiche_id,
       has_cle: Boolean(cle),
+      refresh: shouldRefresh,
     });
 
-    console.log("Fetching fiche with cache", { fiche_id });
-    const ficheDetails = await getFicheWithCache(
-      fiche_id,
-      cle as string | undefined
-    );
-    console.log("Fiche details fetched from cache/API", {
-      fiche_id,
-      has_data: Boolean(ficheDetails),
-    });
+    let ficheDetails;
+    
+    if (shouldRefresh) {
+      // Force refresh from external API and upsert to database
+      console.log("Force refreshing fiche from API", { fiche_id });
+      ficheDetails = await refreshFicheFromApi(
+        fiche_id,
+        cle as string | undefined
+      );
+      console.log("Fiche details refreshed from API and upserted to DB", {
+        fiche_id,
+        has_data: Boolean(ficheDetails),
+      });
+    } else {
+      // Use cache (or fetch and cache if not cached)
+      console.log("Fetching fiche with cache", { fiche_id });
+      ficheDetails = await getFicheWithCache(
+        fiche_id,
+        cle as string | undefined
+      );
+      console.log("Fiche details fetched from cache/API", {
+        fiche_id,
+        has_data: Boolean(ficheDetails),
+      });
+    }
 
     // Serialize BigInt values to strings for JSON
     console.log("Serializing BigInt values for JSON response");
@@ -106,6 +130,7 @@ fichesRouter.get("/:fiche_id", async (req: Request, res: Response) => {
 
     console.log("Successfully fetched fiche details, sending response", {
       fiche_id,
+      refreshed: shouldRefresh,
     });
     return res.json(serializable);
   } catch (error: any) {

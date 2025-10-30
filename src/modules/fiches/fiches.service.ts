@@ -32,17 +32,24 @@ export async function fetchApiSales(date: string): Promise<SalesResponse> {
       force_new_session: "false",
     });
 
-    console.log("fetchApiSales - Request params", { params: params.toString() });
-    console.log("fetchApiSales - API URL", { url: `${apiBase}/fiches/search/by-date?${params}` });
-
-    const response = await axios.get(`${apiBase}/fiches/search/by-date?${params}`, {
-      timeout: 60000,
+    console.log("fetchApiSales - Request params", {
+      params: params.toString(),
+    });
+    console.log("fetchApiSales - API URL", {
+      url: `${apiBase}/fiches/search/by-date?${params}`,
     });
 
-    console.log("fetchApiSales - Response received", { 
+    const response = await axios.get(
+      `${apiBase}/fiches/search/by-date?${params}`,
+      {
+        timeout: 60000,
+      }
+    );
+
+    console.log("fetchApiSales - Response received", {
       status: response.status,
       dataKeys: Object.keys(response.data || {}),
-      fichesLength: response.data?.fiches?.length 
+      fichesLength: response.data?.fiches?.length,
     });
 
     const fiches = response.data?.fiches || [];
@@ -63,7 +70,7 @@ export async function fetchApiSales(date: string): Promise<SalesResponse> {
       date,
       status: error.response?.status,
       message: error.message,
-      stack: error.stack
+      stack: error.stack,
     });
     logger.error("Failed to fetch sales", {
       date,
@@ -86,16 +93,19 @@ export async function fetchApiFicheDetails(
   });
 
   try {
-    const params: any = { 
+    const params: any = {
       include_recordings: "true",
-      include_transcriptions: "false"
+      include_transcriptions: "false",
     };
     if (cle) params.cle = cle;
 
     const query = new URLSearchParams(params);
-    const response = await axios.get(`${apiBase}/fiches/by-id/${ficheId}?${query}`, {
-      timeout: 30000,
-    });
+    const response = await axios.get(
+      `${apiBase}/fiches/by-id/${ficheId}?${query}`,
+      {
+        timeout: 30000,
+      }
+    );
 
     if (!response.data || !response.data.success) {
       throw new Error("Fiche not found");
@@ -205,7 +215,7 @@ export async function refreshFicheFromApi(ficheId: string, cle?: string) {
   // Import repository and upsert to database
   console.log("Importing repository functions");
   const { cacheFiche } = await import("./fiches.repository.js");
-  
+
   console.log("Upserting fresh fiche data to database", { fiche_id: ficheId });
   await cacheFiche(ficheData);
 

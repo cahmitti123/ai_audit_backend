@@ -5,7 +5,11 @@
  */
 
 import { Router, Request, Response } from "express";
-import { fetchApiSales, getFicheWithCache, refreshFicheFromApi } from "./fiches.service.js";
+import {
+  fetchApiSales,
+  getFicheWithCache,
+  refreshFicheFromApi,
+} from "./fiches.service.js";
 import { getCachedFiche } from "./fiches.repository.js";
 
 export const fichesRouter = Router();
@@ -87,7 +91,7 @@ fichesRouter.get("/:fiche_id", async (req: Request, res: Response) => {
     const { fiche_id } = req.params;
     const { cle, refresh } = req.query;
     const shouldRefresh = refresh === "true";
-    
+
     console.log("Received fiche details request", {
       fiche_id,
       has_cle: Boolean(cle),
@@ -95,7 +99,7 @@ fichesRouter.get("/:fiche_id", async (req: Request, res: Response) => {
     });
 
     let ficheDetails;
-    
+
     if (shouldRefresh) {
       // Force refresh from external API and upsert to database
       console.log("Force refreshing fiche from API", { fiche_id });

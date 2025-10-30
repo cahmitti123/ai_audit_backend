@@ -38,13 +38,13 @@ export async function getAuditConfigById(id: bigint) {
 }
 
 /**
- * Create new audit configuration with steps
+ * Create new audit configuration with optional steps
  */
 export async function createAuditConfig(data: {
   name: string;
   description?: string;
   systemPrompt?: string;
-  steps: Array<{
+  steps?: Array<{
     name: string;
     description?: string;
     prompt: string;
@@ -57,6 +57,7 @@ export async function createAuditConfig(data: {
     chronologicalImportant?: boolean;
     verifyProductInfo?: boolean;
   }>;
+  isActive?: boolean;
   createdBy?: string;
 }) {
   return await prisma.auditConfig.create({
@@ -64,22 +65,25 @@ export async function createAuditConfig(data: {
       name: data.name,
       description: data.description,
       systemPrompt: data.systemPrompt,
+      isActive: data.isActive ?? true,
       createdBy: data.createdBy,
-      steps: {
-        create: data.steps.map((step) => ({
-          name: step.name,
-          description: step.description,
-          prompt: step.prompt,
-          controlPoints: step.controlPoints,
-          keywords: step.keywords,
-          severityLevel: step.severityLevel as any,
-          isCritical: step.isCritical,
-          position: step.position,
-          weight: step.weight,
-          chronologicalImportant: step.chronologicalImportant ?? false,
-          verifyProductInfo: step.verifyProductInfo ?? false,
-        })),
-      },
+      ...(data.steps && data.steps.length > 0 && {
+        steps: {
+          create: data.steps.map((step) => ({
+            name: step.name,
+            description: step.description,
+            prompt: step.prompt,
+            controlPoints: step.controlPoints,
+            keywords: step.keywords,
+            severityLevel: step.severityLevel as any,
+            isCritical: step.isCritical,
+            position: step.position,
+            weight: step.weight,
+            chronologicalImportant: step.chronologicalImportant ?? false,
+            verifyProductInfo: step.verifyProductInfo ?? false,
+          })),
+        },
+      }),
     },
     include: {
       steps: {

@@ -1,0 +1,138 @@
+============================================================
+AI AUDIT BACKEND - VPS DEPLOYMENT COMMANDS
+============================================================
+
+Copy and paste these commands one by one in your VPS terminal:
+
+-----------------------------------------------------------
+STEP 1: Install Docker & Docker Compose
+-----------------------------------------------------------
+
+# Update system
+apt-get update
+
+# Install Docker
+curl -fsSL https://get.docker.com -o get-docker.sh
+sh get-docker.sh
+
+# Install Docker Compose
+apt-get install -y docker-compose-plugin
+
+# Verify installation
+docker --version
+docker-compose --version
+
+-----------------------------------------------------------
+STEP 2: Clone Repository
+-----------------------------------------------------------
+
+# Clone your GitHub repo
+cd /root
+git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+cd YOUR_REPO
+
+-----------------------------------------------------------
+STEP 3: Configure Environment
+-----------------------------------------------------------
+
+# Copy environment template
+cp .env.example .env
+
+# Edit environment file
+nano .env
+
+# Update these values in the nano editor:
+#
+# DATABASE_URL="postgresql://USER:PASSWORD@HOST:PORT/DATABASE?pgbouncer=true"
+# DIRECT_URL="postgresql://USER:PASSWORD@HOST:PORT/DATABASE"
+# OPENAI_API_KEY="sk-..."
+# ELEVENLABS_API_KEY="sk_..."
+# FICHE_API_URL="https://api.example.com"
+# FICHE_API_AUTH_TOKEN="your-token-here"
+# INNGEST_EVENT_KEY="production-key-12345"
+# INNGEST_SIGNING_KEY="(generate with: openssl rand -hex 32)"
+# VECTOR_STORE_ID="vs_..."
+#
+# Press Ctrl+X, then Y, then Enter to save
+
+-----------------------------------------------------------
+STEP 4: Generate Inngest Keys (Optional - if not set)
+-----------------------------------------------------------
+
+# Generate secure signing key
+openssl rand -hex 32
+
+# Copy the output and add to .env file
+
+-----------------------------------------------------------
+STEP 5: Deploy with Docker
+-----------------------------------------------------------
+
+# Build and start containers
+docker-compose -f docker-compose.prod.yml up -d --build
+
+# Wait for containers to start (about 2 minutes)
+sleep 120
+
+# Check container status
+docker-compose -f docker-compose.prod.yml ps
+
+-----------------------------------------------------------
+STEP 6: Verify Deployment
+-----------------------------------------------------------
+
+# Test health endpoints
+curl http://localhost:3002/health
+curl http://localhost:8288/health
+
+# View logs
+docker-compose -f docker-compose.prod.yml logs -f server
+
+# Press Ctrl+C to stop viewing logs
+
+-----------------------------------------------------------
+STEP 7: Open Firewall (for external access)
+-----------------------------------------------------------
+
+# Allow API port
+ufw allow 3002/tcp
+
+# Allow Inngest port (optional)
+ufw allow 8288/tcp
+
+# Enable firewall
+ufw enable
+
+-----------------------------------------------------------
+STEP 8: Access Your API
+-----------------------------------------------------------
+
+From anywhere:
+- API: http://YOUR_SERVER_IP:3002
+- Swagger Docs: http://YOUR_SERVER_IP:3002/api-docs
+- Inngest UI: http://YOUR_SERVER_IP:8288
+
+-----------------------------------------------------------
+USEFUL COMMANDS
+-----------------------------------------------------------
+
+# View container status
+docker-compose -f docker-compose.prod.yml ps
+
+# View logs
+docker-compose -f docker-compose.prod.yml logs -f
+
+# Restart services
+docker-compose -f docker-compose.prod.yml restart
+
+# Stop all
+docker-compose -f docker-compose.prod.yml down
+
+# Update after code changes
+git pull
+docker-compose -f docker-compose.prod.yml up -d --build
+
+============================================================
+Ready! Start with STEP 1 on your VPS terminal.
+============================================================
+

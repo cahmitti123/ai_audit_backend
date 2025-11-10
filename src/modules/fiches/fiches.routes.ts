@@ -9,6 +9,10 @@ import {
   fetchApiSales,
   getFicheWithCache,
   refreshFicheFromApi,
+  getFicheStatus,
+  getFichesStatus,
+  getFichesByDateWithStatus,
+  getFichesByDateRangeWithStatus,
 } from "./fiches.service.js";
 import { getCachedFiche } from "./fiches.repository.js";
 
@@ -19,7 +23,7 @@ export const fichesRouter = Router();
  * /api/fiches/search:
  *   get:
  *     tags: [Fiches]
- *     summary: Search fiches by date
+ *     summary: Search fiches by date with status information
  *     parameters:
  *       - in: query
  *         name: date
@@ -28,13 +32,19 @@ export const fichesRouter = Router();
  *           type: string
  *           format: date
  *         description: Date in YYYY-MM-DD format
+ *       - in: query
+ *         name: includeStatus
+ *         schema:
+ *           type: boolean
+ *           default: true
+ *         description: Include transcription and audit status
  *     responses:
  *       200:
- *         description: List of fiches
+ *         description: List of fiches with status information
  */
 fichesRouter.get("/search", async (req: Request, res: Response) => {
   try {
-    const { date } = req.query;
+    const { date, includeStatus } = req.query;
     console.log("Received search request with date:", date);
 
     if (!date || typeof date !== "string") {
@@ -51,6 +61,54 @@ fichesRouter.get("/search", async (req: Request, res: Response) => {
       "Successfully fetched sales, count:",
       sales?.fiches?.length || 0
     );
+
+    // Include status information if requested (default: true)
+    const shouldIncludeStatus = includeStatus !== "false";
+
+    if (shouldIncludeStatus && sales.fiches && sales.fiches.length > 0) {
+      console.log("Fetching status information for fiches");
+
+      // Extract fiche IDs from the sales data
+      const ficheIds = sales.fiches
+        .map((fiche: any) => fiche.information?.fiche_id)
+        .filter((id: any) => id);
+
+      if (ficheIds.length > 0) {
+        const statusMap = await getFichesStatus(ficheIds);
+
+        // Enrich fiches with status information
+        sales.fiches = sales.fiches.map((fiche: any) => {
+          const ficheId = fiche.information?.fiche_id;
+          const status = ficheId ? statusMap[ficheId] : null;
+
+          return {
+            ...fiche,
+            status: status || {
+              hasData: false,
+              transcription: {
+                total: 0,
+                transcribed: 0,
+                pending: 0,
+                percentage: 0,
+                isComplete: false,
+              },
+              audit: {
+                total: 0,
+                completed: 0,
+                pending: 0,
+                running: 0,
+                compliant: 0,
+                nonCompliant: 0,
+                averageScore: null,
+              },
+            },
+          };
+        });
+
+        console.log("Status information added to fiches");
+      }
+    }
+
     return res.json(sales);
   } catch (error: any) {
     console.error("Error fetching fiches:", error.message);
@@ -199,3 +257,254 @@ fichesRouter.get("/:fiche_id/cache", async (req: Request, res: Response) => {
     });
   }
 });
+
+/**
+ * @swagger
+ * /api/fiches/{fiche_id}/status:
+ *   get:
+ *     tags: [Fiches]
+ *     summary: Get fiche status (transcription and audit info)
+ *     parameters:
+ *       - in: path
+ *         name: fiche_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Fiche status information
+ *       404:
+ *         description: Fiche not found in database
+ */
+fichesRouter.get("/:fiche_id/status", async (req: Request, res: Response) => {
+  try {
+    const status = await getFicheStatus(req.params.fiche_id);
+
+    if (!status) {
+      return res.status(404).json({
+        success: false,
+        error: "Fiche not found in database",
+        message:
+          "This fiche has not been processed yet. Try fetching it first or run a transcription/audit.",
+      });
+    }
+
+    res.json({
+      success: true,
+      data: status,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch fiche status",
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/fiches/status/batch:
+ *   post:
+ *     tags: [Fiches]
+ *     summary: Get status for multiple fiches
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               ficheIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *     responses:
+ *       200:
+ *         description: Status information for multiple fiches
+ */
+fichesRouter.post("/status/batch", async (req: Request, res: Response) => {
+  try {
+    const { ficheIds } = req.body;
+
+    if (!Array.isArray(ficheIds)) {
+      return res.status(400).json({
+        success: false,
+        error: "ficheIds must be an array",
+      });
+    }
+
+    const statusMap = await getFichesStatus(ficheIds);
+
+    res.json({
+      success: true,
+      data: statusMap,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch fiches status",
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/fiches/status/by-date:
+ *   get:
+ *     tags: [Fiches]
+ *     summary: Get all fiches for a specific date with complete status information
+ *     description: Returns all processed fiches for a date with transcription status, audit results, and recording details. Only returns fiches that exist in the database.
+ *     parameters:
+ *       - in: query
+ *         name: date
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: Date in YYYY-MM-DD format
+ *     responses:
+ *       200:
+ *         description: List of fiches with complete status information
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     date:
+ *                       type: string
+ *                     total:
+ *                       type: integer
+ *                     fiches:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ */
+fichesRouter.get("/status/by-date", async (req: Request, res: Response) => {
+  try {
+    const { date } = req.query;
+
+    if (!date || typeof date !== "string") {
+      return res.status(400).json({
+        success: false,
+        error: "Missing or invalid date parameter (YYYY-MM-DD required)",
+      });
+    }
+
+    // Validate date format
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(date)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid date format. Use YYYY-MM-DD",
+      });
+    }
+
+    console.log("Fetching fiches with status for date:", date);
+    const result = await getFichesByDateWithStatus(date);
+
+    console.log(`Found ${result.total} fiches for date ${date}`);
+
+    res.json({
+      success: true,
+      data: result,
+    });
+  } catch (error: any) {
+    console.error("Error fetching fiches by date with status:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch fiches by date",
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/fiches/status/by-date-range:
+ *   get:
+ *     tags: [Fiches]
+ *     summary: Get all fiches for a date range with complete status information
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: endDate
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: date
+ *     responses:
+ *       200:
+ *         description: List of fiches with complete status information
+ */
+fichesRouter.get(
+  "/status/by-date-range",
+  async (req: Request, res: Response) => {
+    try {
+      const { startDate, endDate } = req.query;
+
+      if (!startDate || typeof startDate !== "string") {
+        return res.status(400).json({
+          success: false,
+          error: "Missing or invalid startDate parameter (YYYY-MM-DD required)",
+        });
+      }
+
+      if (!endDate || typeof endDate !== "string") {
+        return res.status(400).json({
+          success: false,
+          error: "Missing or invalid endDate parameter (YYYY-MM-DD required)",
+        });
+      }
+
+      const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+      if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
+        return res.status(400).json({
+          success: false,
+          error: "Invalid date format. Use YYYY-MM-DD",
+        });
+      }
+
+      // Validate date range
+      if (new Date(startDate) > new Date(endDate)) {
+        return res.status(400).json({
+          success: false,
+          error: "startDate must be before or equal to endDate",
+        });
+      }
+
+      console.log("Fetching fiches with status for date range:", {
+        startDate,
+        endDate,
+      });
+      const result = await getFichesByDateRangeWithStatus(startDate, endDate);
+
+      console.log(
+        `Found ${result.total} fiches for date range ${startDate} to ${endDate}`
+      );
+
+      res.json({
+        success: true,
+        data: result,
+      });
+    } catch (error: any) {
+      console.error("Error fetching fiches by date range with status:", error);
+      res.status(500).json({
+        success: false,
+        error: "Failed to fetch fiches by date range",
+        message: error.message,
+      });
+    }
+  }
+);

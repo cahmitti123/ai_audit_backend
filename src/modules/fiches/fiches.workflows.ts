@@ -167,7 +167,7 @@ export const fetchFicheFunction = inngest.createFunction(
       });
 
       if (recordingsCount > 0) {
-        ficheData.recordings = ficheData.recordings.map((rec, index) => {
+        ficheData.recordings = ficheData.recordings.map((rec: any, index: number) => {
           const enriched = enrichRecording(rec);
 
           // Log first recording as sample

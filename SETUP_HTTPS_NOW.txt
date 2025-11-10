@@ -1,0 +1,71 @@
+================================================================
+HTTPS SETUP FOR qa-audit.site - COPY & PASTE ON VPS
+================================================================
+
+STEP 1: Install Nginx
+-----------------------------------------------------------
+apt-get update
+apt-get install -y nginx
+
+STEP 2: Create Nginx Configuration
+-----------------------------------------------------------
+cat > /etc/nginx/sites-available/ai-audit << 'EOF'
+server {
+    listen 80;
+    server_name qa-audit.site www.qa-audit.site;
+
+    client_max_body_size 50M;
+
+    location / {
+        proxy_pass http://localhost:3002;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        
+        proxy_connect_timeout 600s;
+        proxy_send_timeout 600s;
+        proxy_read_timeout 600s;
+    }
+}
+EOF
+
+STEP 3: Enable Configuration
+-----------------------------------------------------------
+ln -s /etc/nginx/sites-available/ai-audit /etc/nginx/sites-enabled/
+nginx -t
+systemctl reload nginx
+
+STEP 4: Install Certbot & Get SSL Certificate
+-----------------------------------------------------------
+apt-get install -y certbot python3-certbot-nginx
+
+certbot --nginx -d qa-audit.site -d www.qa-audit.site --non-interactive --agree-tos --email your-email@example.com --redirect
+
+# Replace "your-email@example.com" with your real email
+
+STEP 5: Test HTTPS
+-----------------------------------------------------------
+curl https://qa-audit.site/health
+
+================================================================
+DONE! Your API will be at: https://qa-audit.site
+================================================================
+
+Access:
+- API: https://qa-audit.site
+- Swagger: https://qa-audit.site/api-docs
+- Inngest: https://qa-audit.site:8288
+
+================================================================
+
+
+
+
+
+
+

@@ -18,15 +18,17 @@ model AuditConfig {
     description  String? @db.Text
     systemPrompt String? @map("system_prompt") @db.Text
 
-    isActive  Boolean  @default(true) @map("is_active")
-    createdBy String?  @map("created_by")
-    createdAt DateTime @default(now()) @map("created_at")
-    updatedAt DateTime @updatedAt @map("updated_at")
+    isActive         Boolean @default(true) @map("is_active")
+    runAutomatically Boolean @default(false) @map("run_automatically")
+    createdBy        String? @map("created_by")
+    createdAt        DateTime @default(now()) @map("created_at")
+    updatedAt        DateTime @updatedAt @map("updated_at")
 
     audits Audit[]
     steps  AuditStep[]
 
     @@index([isActive])
+    @@index([runAutomatically])
     @@index([createdAt])
     @@map("audit_configs")
 }
@@ -271,4 +273,147 @@ model ApiRequestLog {
     @@index([timestamp])
     @@index([success])
     @@map("api_request_logs")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AUTOMATION SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model AutomationSchedule {
+    id          BigInt   @id @default(autoincrement())
+    name        String
+    description String?  @db.Text
+    isActive    Boolean  @default(true) @map("is_active")
+    createdBy   String?  @map("created_by")
+    createdAt   DateTime @default(now()) @map("created_at")
+    updatedAt   DateTime @updatedAt @map("updated_at")
+
+    // Schedule Configuration
+    scheduleType ScheduleType      @map("schedule_type")
+    cronExpression String?         @map("cron_expression") // For custom cron
+    timezone     String            @default("UTC")
+    timeOfDay    String?           @map("time_of_day") // HH:MM format
+    dayOfWeek    Int?              @map("day_of_week") // 0-6 (Sunday-Saturday)
+    dayOfMonth   Int?              @map("day_of_month") // 1-31
+
+    // Fiche Selection Configuration
+    ficheSelection Json             @map("fiche_selection") // Flexible JSON config
+    // Example JSON structure:
+    // {
+    //   "mode": "date_range" | "manual" | "filter",
+    //   "dateRange": "last_24h" | "yesterday" | "last_week" | "last_month" | "custom",
+    //   "customStartDate": "2024-01-01",
+    //   "customEndDate": "2024-01-31",
+    //   "groupes": ["groupe1", "groupe2"],
+    //   "onlyWithRecordings": true,
+    //   "onlyUnaudited": false,
+    //   "maxFiches": 100,
+    //   "ficheIds": ["123", "456"] // For manual mode
+    // }
+
+    // Transcription Configuration
+    runTranscription      Boolean @default(true) @map("run_transcription")
+    skipIfTranscribed     Boolean @default(true) @map("skip_if_transcribed")
+    transcriptionPriority String  @default("normal") @map("transcription_priority") // normal, high, low
+
+    // Audit Configuration
+    runAudits             Boolean   @default(true) @map("run_audits")
+    useAutomaticAudits    Boolean   @default(true) @map("use_automatic_audits") // Use audits marked as automatic
+    specificAuditConfigs  BigInt[]  @map("specific_audit_configs") // Specific audit config IDs to run
+
+    // Error Handling Configuration
+    continueOnError Boolean @default(true) @map("continue_on_error")
+    retryFailed     Boolean @default(false) @map("retry_failed")
+    maxRetries      Int     @default(0) @map("max_retries")
+
+    // Notification Configuration
+    notifyOnComplete Boolean  @default(true) @map("notify_on_complete")
+    notifyOnError    Boolean  @default(true) @map("notify_on_error")
+    webhookUrl       String?  @map("webhook_url")
+    notifyEmails     String[] @map("notify_emails")
+
+    // External API Configuration
+    externalApiKey String? @map("external_api_key") // Optional per-schedule API key
+
+    // Execution History
+    runs               AutomationRun[]
+    lastRunAt          DateTime?      @map("last_run_at")
+    lastRunStatus      String?        @map("last_run_status") // success, partial, failed
+    totalRuns          Int            @default(0) @map("total_runs")
+    successfulRuns     Int            @default(0) @map("successful_runs")
+    failedRuns         Int            @default(0) @map("failed_runs")
+
+    @@index([isActive])
+    @@index([scheduleType])
+    @@index([lastRunAt])
+    @@index([createdAt])
+    @@map("automation_schedules")
+}
+
+enum ScheduleType {
+    MANUAL       // Trigger manually via API
+    DAILY        // Every day at specified time
+    WEEKLY       // Specific day of week at specified time
+    MONTHLY      // Specific day of month at specified time
+    CRON         // Custom cron expression
+}
+
+model AutomationRun {
+    id         BigInt   @id @default(autoincrement())
+    scheduleId BigInt   @map("schedule_id")
+    schedule   AutomationSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+
+    // Execution Details
+    status          String   @default("running") // running, completed, partial, failed
+    startedAt       DateTime @default(now()) @map("started_at")
+    completedAt     DateTime? @map("completed_at")
+    durationMs      Int?      @map("duration_ms")
+
+    // Execution Stats
+    totalFiches         Int @default(0) @map("total_fiches")
+    successfulFiches    Int @default(0) @map("successful_fiches")
+    failedFiches        Int @default(0) @map("failed_fiches")
+    transcriptionsRun   Int @default(0) @map("transcriptions_run")
+    auditsRun           Int @default(0) @map("audits_run")
+
+    // Error Information
+    errorMessage String? @map("error_message") @db.Text
+    errorDetails Json?   @map("error_details")
+
+    // Configuration Snapshot (what was run)
+    configSnapshot Json @map("config_snapshot")
+
+    // Results Summary
+    resultSummary  Json? @map("result_summary")
+    // Example JSON:
+    // {
+    //   "ficheIds": ["123", "456"],
+    //   "auditIds": [789, 790],
+    //   "errors": [],
+    //   "warnings": []
+    // }
+
+    // Execution Logs
+    logs AutomationLog[]
+
+    @@index([scheduleId])
+    @@index([status])
+    @@index([startedAt])
+    @@map("automation_runs")
+}
+
+model AutomationLog {
+    id    BigInt @id @default(autoincrement())
+    runId BigInt @map("run_id")
+    run   AutomationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+    level     String   // info, warning, error, debug
+    message   String   @db.Text
+    metadata  Json?    @default("{}")
+    timestamp DateTime @default(now())
+
+    @@index([runId])
+    @@index([level])
+    @@index([timestamp])
+    @@map("automation_logs")
 }

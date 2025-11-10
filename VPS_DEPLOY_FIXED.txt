@@ -1,0 +1,65 @@
+============================================================
+CORRECT COMMANDS FOR YOUR VPS
+============================================================
+
+You're already in the right directory: ~/ai_audit_backend
+Environment is already configured: .env
+
+Now run these commands:
+
+-----------------------------------------------------------
+Deploy with Docker Compose (Use "docker compose" not "docker-compose")
+-----------------------------------------------------------
+
+# Build and start containers
+docker compose -f docker-compose.prod.yml up -d --build
+
+# Wait for build to complete (2-3 minutes)
+# You'll see progress messages
+
+-----------------------------------------------------------
+After deployment completes:
+-----------------------------------------------------------
+
+# Check container status
+docker compose -f docker-compose.prod.yml ps
+
+# Test health endpoints
+curl http://localhost:3002/health
+curl http://localhost:8288/health
+
+# View logs
+docker compose -f docker-compose.prod.yml logs -f server
+
+# Press Ctrl+C to stop viewing logs
+
+-----------------------------------------------------------
+Open firewall for external access:
+-----------------------------------------------------------
+
+# Allow API port
+ufw allow 3002/tcp
+
+# Allow Inngest port
+ufw allow 8288/tcp
+
+# Check firewall status
+ufw status
+
+-----------------------------------------------------------
+Access your deployed API:
+-----------------------------------------------------------
+
+From anywhere:
+- API: http://72.61.96.97:3002
+- Swagger: http://72.61.96.97:3002/api-docs
+- Inngest: http://72.61.96.97:8288
+
+============================================================
+
+
+
+
+
+
+

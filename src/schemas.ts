@@ -148,6 +148,139 @@ export const EnhancedQuerySchema = z.object({
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// AUTOMATION TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const ScheduleTypeSchema = z.enum([
+  "MANUAL",
+  "DAILY",
+  "WEEKLY",
+  "MONTHLY",
+  "CRON",
+]);
+
+export const FicheSelectionSchema = z.object({
+  mode: z.enum(["date_range", "manual", "filter"]),
+  dateRange: z
+    .enum(["last_24h", "yesterday", "last_week", "last_month", "custom"])
+    .optional(),
+  customStartDate: z.string().optional(),
+  customEndDate: z.string().optional(),
+  groupes: z.array(z.string()).optional(),
+  onlyWithRecordings: z.boolean().optional().default(false),
+  onlyUnaudited: z.boolean().optional().default(false),
+  maxFiches: z.number().int().positive().optional(),
+  ficheIds: z.array(z.string()).optional(),
+});
+
+export const AutomationScheduleCreateSchema = z.object({
+  name: z.string().min(1).max(255),
+  description: z.string().optional(),
+  isActive: z.boolean().default(true),
+  createdBy: z.string().optional(),
+
+  // Schedule Configuration
+  scheduleType: ScheduleTypeSchema,
+  cronExpression: z.string().optional(),
+  timezone: z.string().default("UTC"),
+  timeOfDay: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/)
+    .optional(), // HH:MM
+  dayOfWeek: z.number().int().min(0).max(6).optional(),
+  dayOfMonth: z.number().int().min(1).max(31).optional(),
+
+  // Fiche Selection
+  ficheSelection: FicheSelectionSchema,
+
+  // Transcription Configuration
+  runTranscription: z.boolean().default(true),
+  skipIfTranscribed: z.boolean().default(true),
+  transcriptionPriority: z.enum(["low", "normal", "high"]).default("normal"),
+
+  // Audit Configuration
+  runAudits: z.boolean().default(true),
+  useAutomaticAudits: z.boolean().default(true),
+  specificAuditConfigs: z.array(z.number().int()).optional(),
+
+  // Error Handling
+  continueOnError: z.boolean().default(true),
+  retryFailed: z.boolean().default(false),
+  maxRetries: z.number().int().min(0).max(5).default(0),
+
+  // Notifications
+  notifyOnComplete: z.boolean().default(true),
+  notifyOnError: z.boolean().default(true),
+  webhookUrl: z.string().url().optional(),
+  notifyEmails: z.array(z.string().email()).optional(),
+
+  // External API
+  externalApiKey: z.string().optional(),
+});
+
+export const AutomationScheduleUpdateSchema =
+  AutomationScheduleCreateSchema.partial();
+
+export const AutomationScheduleResponseSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().nullable(),
+  isActive: z.boolean(),
+  createdBy: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  scheduleType: ScheduleTypeSchema,
+  cronExpression: z.string().nullable(),
+  timezone: z.string(),
+  timeOfDay: z.string().nullable(),
+  dayOfWeek: z.number().nullable(),
+  dayOfMonth: z.number().nullable(),
+  ficheSelection: FicheSelectionSchema,
+  runTranscription: z.boolean(),
+  skipIfTranscribed: z.boolean(),
+  transcriptionPriority: z.string(),
+  runAudits: z.boolean(),
+  useAutomaticAudits: z.boolean(),
+  specificAuditConfigs: z.array(z.number()),
+  continueOnError: z.boolean(),
+  retryFailed: z.boolean(),
+  maxRetries: z.number(),
+  notifyOnComplete: z.boolean(),
+  notifyOnError: z.boolean(),
+  webhookUrl: z.string().nullable(),
+  notifyEmails: z.array(z.string()),
+  externalApiKey: z.string().nullable(),
+  lastRunAt: z.string().nullable(),
+  lastRunStatus: z.string().nullable(),
+  totalRuns: z.number(),
+  successfulRuns: z.number(),
+  failedRuns: z.number(),
+});
+
+export const AutomationRunResponseSchema = z.object({
+  id: z.string(),
+  scheduleId: z.string(),
+  status: z.string(),
+  startedAt: z.string(),
+  completedAt: z.string().nullable(),
+  durationMs: z.number().nullable(),
+  totalFiches: z.number(),
+  successfulFiches: z.number(),
+  failedFiches: z.number(),
+  transcriptionsRun: z.number(),
+  auditsRun: z.number(),
+  errorMessage: z.string().nullable(),
+  errorDetails: z.any().nullable(),
+  configSnapshot: z.any(),
+  resultSummary: z.any().nullable(),
+});
+
+export const TriggerAutomationSchema = z.object({
+  scheduleId: z.number().int().positive(),
+  overrideFicheSelection: FicheSelectionSchema.optional(),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // INFERRED TYPESCRIPT TYPES (Single Source of Truth)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -161,3 +294,16 @@ export type EvidenceCitation = z.infer<typeof EvidenceCitationSchema>;
 export type ControlPoint = z.infer<typeof ControlPointSchema>;
 export type AuditStepResult = z.infer<typeof AuditStepSchema>;
 export type EnhancedQuery = z.infer<typeof EnhancedQuerySchema>;
+export type ScheduleType = z.infer<typeof ScheduleTypeSchema>;
+export type FicheSelection = z.infer<typeof FicheSelectionSchema>;
+export type AutomationScheduleCreate = z.infer<
+  typeof AutomationScheduleCreateSchema
+>;
+export type AutomationScheduleUpdate = z.infer<
+  typeof AutomationScheduleUpdateSchema
+>;
+export type AutomationScheduleResponse = z.infer<
+  typeof AutomationScheduleResponseSchema
+>;
+export type AutomationRunResponse = z.infer<typeof AutomationRunResponseSchema>;
+export type TriggerAutomation = z.infer<typeof TriggerAutomationSchema>;

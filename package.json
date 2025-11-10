@@ -15,6 +15,8 @@
     "test:inngest": "tsx scripts/trigger-inngest-test.ts",
     "test:webhooks": "tsx scripts/test-webhooks.ts",
     "test:transcription-webhooks": "tsx scripts/test-transcription-webhooks.ts",
+    "test:fiche-status": "tsx scripts/test-fiche-status.ts",
+    "test:automation": "tsx scripts/test-automation.ts",
     "get-audit-recordings": "tsx scripts/get-audit-with-recordings.ts",
     "test:direct": "tsx scripts/test-fiche.ts",
     "test:db": "tsx scripts/test-db-connection.ts",

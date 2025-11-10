@@ -231,9 +231,571 @@ export async function refreshFicheFromApi(ficheId: string, cle?: string) {
   return ficheData;
 }
 
+/**
+ * Get fiche status from database (transcription and audit info)
+ */
+export async function getFicheStatus(ficheId: string) {
+  const { prisma } = await import("../../shared/prisma.js");
+
+  const ficheCache = await prisma.ficheCache.findUnique({
+    where: { ficheId },
+    include: {
+      recordings: {
+        select: {
+          id: true,
+          hasTranscription: true,
+          transcribedAt: true,
+        },
+      },
+      audits: {
+        where: { isLatest: true },
+        select: {
+          id: true,
+          overallScore: true,
+          scorePercentage: true,
+          niveau: true,
+          isCompliant: true,
+          status: true,
+          completedAt: true,
+          auditConfig: {
+            select: {
+              name: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      },
+    },
+  });
+
+  if (!ficheCache) {
+    return null;
+  }
+
+  // Calculate transcription status
+  const totalRecordings = ficheCache.recordings.length;
+  const transcribedRecordings = ficheCache.recordings.filter(
+    (r) => r.hasTranscription
+  ).length;
+
+  const transcriptionStatus = {
+    total: totalRecordings,
+    transcribed: transcribedRecordings,
+    pending: totalRecordings - transcribedRecordings,
+    percentage:
+      totalRecordings > 0 ? (transcribedRecordings / totalRecordings) * 100 : 0,
+    isComplete:
+      totalRecordings > 0 && transcribedRecordings === totalRecordings,
+    lastTranscribedAt:
+      ficheCache.recordings
+        .filter((r) => r.transcribedAt)
+        .sort(
+          (a, b) => b.transcribedAt!.getTime() - a.transcribedAt!.getTime()
+        )[0]?.transcribedAt || null,
+  };
+
+  // Calculate audit status
+  const completedAudits = ficheCache.audits.filter(
+    (a) => a.status === "completed"
+  );
+  const compliantAudits = completedAudits.filter((a) => a.isCompliant);
+
+  const auditStatus = {
+    total: ficheCache.audits.length,
+    completed: completedAudits.length,
+    pending: ficheCache.audits.filter((a) => a.status === "pending").length,
+    running: ficheCache.audits.filter((a) => a.status === "running").length,
+    compliant: compliantAudits.length,
+    nonCompliant: completedAudits.length - compliantAudits.length,
+    averageScore:
+      completedAudits.length > 0
+        ? completedAudits.reduce(
+            (sum, a) => sum + Number(a.scorePercentage),
+            0
+          ) / completedAudits.length
+        : null,
+    latestAudit: ficheCache.audits[0]
+      ? {
+          ...ficheCache.audits[0],
+          id: ficheCache.audits[0].id.toString(),
+          auditConfig: ficheCache.audits[0].auditConfig || null,
+        }
+      : null,
+  };
+
+  return {
+    ficheId,
+    hasData: true,
+    transcription: transcriptionStatus,
+    audit: auditStatus,
+  };
+}
+
+/**
+ * Get status for multiple fiches
+ */
+export async function getFichesStatus(ficheIds: string[]) {
+  const { prisma } = await import("../../shared/prisma.js");
+
+  const fichesCache = await prisma.ficheCache.findMany({
+    where: { ficheId: { in: ficheIds } },
+    include: {
+      recordings: {
+        select: {
+          id: true,
+          hasTranscription: true,
+          transcribedAt: true,
+        },
+      },
+      audits: {
+        where: { isLatest: true },
+        select: {
+          id: true,
+          overallScore: true,
+          scorePercentage: true,
+          niveau: true,
+          isCompliant: true,
+          status: true,
+          completedAt: true,
+          auditConfig: {
+            select: {
+              name: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      },
+    },
+  });
+
+  // Create a map of ficheId to status
+  const statusMap: Record<string, any> = {};
+
+  for (const ficheId of ficheIds) {
+    const ficheCache = fichesCache.find((f) => f.ficheId === ficheId);
+
+    if (!ficheCache) {
+      statusMap[ficheId] = {
+        ficheId,
+        hasData: false,
+        transcription: {
+          total: 0,
+          transcribed: 0,
+          pending: 0,
+          percentage: 0,
+          isComplete: false,
+          lastTranscribedAt: null,
+        },
+        audit: {
+          total: 0,
+          completed: 0,
+          pending: 0,
+          running: 0,
+          compliant: 0,
+          nonCompliant: 0,
+          averageScore: null,
+          latestAudit: null,
+        },
+      };
+      continue;
+    }
+
+    // Calculate transcription status
+    const totalRecordings = ficheCache.recordings.length;
+    const transcribedRecordings = ficheCache.recordings.filter(
+      (r) => r.hasTranscription
+    ).length;
+
+    const transcriptionStatus = {
+      total: totalRecordings,
+      transcribed: transcribedRecordings,
+      pending: totalRecordings - transcribedRecordings,
+      percentage:
+        totalRecordings > 0
+          ? (transcribedRecordings / totalRecordings) * 100
+          : 0,
+      isComplete:
+        totalRecordings > 0 && transcribedRecordings === totalRecordings,
+      lastTranscribedAt:
+        ficheCache.recordings
+          .filter((r) => r.transcribedAt)
+          .sort(
+            (a, b) => b.transcribedAt!.getTime() - a.transcribedAt!.getTime()
+          )[0]?.transcribedAt || null,
+    };
+
+    // Calculate audit status
+    const completedAudits = ficheCache.audits.filter(
+      (a) => a.status === "completed"
+    );
+    const compliantAudits = completedAudits.filter((a) => a.isCompliant);
+
+    const auditStatus = {
+      total: ficheCache.audits.length,
+      completed: completedAudits.length,
+      pending: ficheCache.audits.filter((a) => a.status === "pending").length,
+      running: ficheCache.audits.filter((a) => a.status === "running").length,
+      compliant: compliantAudits.length,
+      nonCompliant: completedAudits.length - compliantAudits.length,
+      averageScore:
+        completedAudits.length > 0
+          ? completedAudits.reduce(
+              (sum, a) => sum + Number(a.scorePercentage),
+              0
+            ) / completedAudits.length
+          : null,
+      latestAudit: ficheCache.audits[0]
+        ? {
+            ...ficheCache.audits[0],
+            id: ficheCache.audits[0].id.toString(),
+            auditConfig: ficheCache.audits[0].auditConfig || null,
+          }
+        : null,
+    };
+
+    statusMap[ficheId] = {
+      ficheId,
+      hasData: true,
+      transcription: transcriptionStatus,
+      audit: auditStatus,
+    };
+  }
+
+  return statusMap;
+}
+
+/**
+ * Get all fiches for a date with their statuses from database
+ * This returns cached fiches with their processing status
+ */
+export async function getFichesByDateWithStatus(date: string) {
+  const { prisma } = await import("../../shared/prisma.js");
+
+  // Convert date to start and end of day
+  const startDate = new Date(date);
+  startDate.setHours(0, 0, 0, 0);
+
+  const endDate = new Date(date);
+  endDate.setHours(23, 59, 59, 999);
+
+  const fichesCache = await prisma.ficheCache.findMany({
+    where: {
+      createdAt: {
+        gte: startDate,
+        lte: endDate,
+      },
+    },
+    include: {
+      recordings: {
+        select: {
+          id: true,
+          hasTranscription: true,
+          transcribedAt: true,
+          callId: true,
+          startTime: true,
+          durationSeconds: true,
+        },
+        orderBy: { startTime: "desc" },
+      },
+      audits: {
+        where: { isLatest: true },
+        select: {
+          id: true,
+          overallScore: true,
+          scorePercentage: true,
+          niveau: true,
+          isCompliant: true,
+          status: true,
+          completedAt: true,
+          createdAt: true,
+          auditConfig: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  // Transform to status-focused format
+  const fichesWithStatus = fichesCache.map((ficheCache) => {
+    // Calculate transcription status
+    const totalRecordings = ficheCache.recordings.length;
+    const transcribedRecordings = ficheCache.recordings.filter(
+      (r) => r.hasTranscription
+    ).length;
+
+    const transcriptionStatus = {
+      total: totalRecordings,
+      transcribed: transcribedRecordings,
+      pending: totalRecordings - transcribedRecordings,
+      percentage:
+        totalRecordings > 0
+          ? (transcribedRecordings / totalRecordings) * 100
+          : 0,
+      isComplete:
+        totalRecordings > 0 && transcribedRecordings === totalRecordings,
+      lastTranscribedAt:
+        ficheCache.recordings
+          .filter((r) => r.transcribedAt)
+          .sort(
+            (a, b) => b.transcribedAt!.getTime() - a.transcribedAt!.getTime()
+          )[0]?.transcribedAt || null,
+    };
+
+    // Calculate audit status
+    const completedAudits = ficheCache.audits.filter(
+      (a) => a.status === "completed"
+    );
+    const compliantAudits = completedAudits.filter((a) => a.isCompliant);
+
+    const auditStatus = {
+      total: ficheCache.audits.length,
+      completed: completedAudits.length,
+      pending: ficheCache.audits.filter((a) => a.status === "pending").length,
+      running: ficheCache.audits.filter((a) => a.status === "running").length,
+      compliant: compliantAudits.length,
+      nonCompliant: completedAudits.length - compliantAudits.length,
+      averageScore:
+        completedAudits.length > 0
+          ? completedAudits.reduce(
+              (sum, a) => sum + Number(a.scorePercentage),
+              0
+            ) / completedAudits.length
+          : null,
+      latestAudit: ficheCache.audits[0]
+        ? {
+            ...ficheCache.audits[0],
+            id: ficheCache.audits[0].id.toString(),
+            auditConfig: ficheCache.audits[0].auditConfig
+              ? {
+                  id: ficheCache.audits[0].auditConfig.id.toString(),
+                  name: ficheCache.audits[0].auditConfig.name,
+                }
+              : null,
+          }
+        : null,
+      audits: ficheCache.audits.map((audit) => ({
+        id: audit.id.toString(),
+        overallScore: audit.overallScore.toString(),
+        scorePercentage: audit.scorePercentage.toString(),
+        niveau: audit.niveau,
+        isCompliant: audit.isCompliant,
+        status: audit.status,
+        completedAt: audit.completedAt,
+        createdAt: audit.createdAt,
+        auditConfig: audit.auditConfig
+          ? {
+              id: audit.auditConfig.id.toString(),
+              name: audit.auditConfig.name,
+            }
+          : null,
+      })),
+    };
+
+    return {
+      ficheId: ficheCache.ficheId,
+      groupe: ficheCache.groupe,
+      agenceNom: ficheCache.agenceNom,
+      prospectNom: ficheCache.prospectNom,
+      prospectPrenom: ficheCache.prospectPrenom,
+      prospectEmail: ficheCache.prospectEmail,
+      prospectTel: ficheCache.prospectTel,
+      fetchedAt: ficheCache.fetchedAt,
+      createdAt: ficheCache.createdAt,
+      transcription: transcriptionStatus,
+      audit: auditStatus,
+      recordings: ficheCache.recordings.map((r) => ({
+        id: r.id.toString(),
+        callId: r.callId,
+        hasTranscription: r.hasTranscription,
+        transcribedAt: r.transcribedAt,
+        startTime: r.startTime,
+        durationSeconds: r.durationSeconds,
+      })),
+    };
+  });
+
+  return {
+    date,
+    total: fichesWithStatus.length,
+    fiches: fichesWithStatus,
+  };
+}
+
+/**
+ * Get all fiches for a date range with their statuses from database
+ */
+export async function getFichesByDateRangeWithStatus(
+  startDate: string,
+  endDate: string
+) {
+  const { prisma } = await import("../../shared/prisma.js");
+
+  const start = new Date(startDate);
+  start.setHours(0, 0, 0, 0);
+
+  const end = new Date(endDate);
+  end.setHours(23, 59, 59, 999);
+
+  const fichesCache = await prisma.ficheCache.findMany({
+    where: {
+      createdAt: {
+        gte: start,
+        lte: end,
+      },
+    },
+    include: {
+      recordings: {
+        select: {
+          id: true,
+          hasTranscription: true,
+          transcribedAt: true,
+          callId: true,
+          startTime: true,
+          durationSeconds: true,
+        },
+        orderBy: { startTime: "desc" },
+      },
+      audits: {
+        where: { isLatest: true },
+        select: {
+          id: true,
+          overallScore: true,
+          scorePercentage: true,
+          niveau: true,
+          isCompliant: true,
+          status: true,
+          completedAt: true,
+          createdAt: true,
+          auditConfig: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  const fichesWithStatus = fichesCache.map((ficheCache) => {
+    const totalRecordings = ficheCache.recordings.length;
+    const transcribedRecordings = ficheCache.recordings.filter(
+      (r) => r.hasTranscription
+    ).length;
+
+    const transcriptionStatus = {
+      total: totalRecordings,
+      transcribed: transcribedRecordings,
+      pending: totalRecordings - transcribedRecordings,
+      percentage:
+        totalRecordings > 0
+          ? (transcribedRecordings / totalRecordings) * 100
+          : 0,
+      isComplete:
+        totalRecordings > 0 && transcribedRecordings === totalRecordings,
+      lastTranscribedAt:
+        ficheCache.recordings
+          .filter((r) => r.transcribedAt)
+          .sort(
+            (a, b) => b.transcribedAt!.getTime() - a.transcribedAt!.getTime()
+          )[0]?.transcribedAt || null,
+    };
+
+    const completedAudits = ficheCache.audits.filter(
+      (a) => a.status === "completed"
+    );
+    const compliantAudits = completedAudits.filter((a) => a.isCompliant);
+
+    const auditStatus = {
+      total: ficheCache.audits.length,
+      completed: completedAudits.length,
+      pending: ficheCache.audits.filter((a) => a.status === "pending").length,
+      running: ficheCache.audits.filter((a) => a.status === "running").length,
+      compliant: compliantAudits.length,
+      nonCompliant: completedAudits.length - compliantAudits.length,
+      averageScore:
+        completedAudits.length > 0
+          ? completedAudits.reduce(
+              (sum, a) => sum + Number(a.scorePercentage),
+              0
+            ) / completedAudits.length
+          : null,
+      latestAudit: ficheCache.audits[0]
+        ? {
+            ...ficheCache.audits[0],
+            id: ficheCache.audits[0].id.toString(),
+            auditConfig: ficheCache.audits[0].auditConfig
+              ? {
+                  id: ficheCache.audits[0].auditConfig.id.toString(),
+                  name: ficheCache.audits[0].auditConfig.name,
+                }
+              : null,
+          }
+        : null,
+      audits: ficheCache.audits.map((audit) => ({
+        id: audit.id.toString(),
+        overallScore: audit.overallScore.toString(),
+        scorePercentage: audit.scorePercentage.toString(),
+        niveau: audit.niveau,
+        isCompliant: audit.isCompliant,
+        status: audit.status,
+        completedAt: audit.completedAt,
+        createdAt: audit.createdAt,
+        auditConfig: audit.auditConfig
+          ? {
+              id: audit.auditConfig.id.toString(),
+              name: audit.auditConfig.name,
+            }
+          : null,
+      })),
+    };
+
+    return {
+      ficheId: ficheCache.ficheId,
+      groupe: ficheCache.groupe,
+      agenceNom: ficheCache.agenceNom,
+      prospectNom: ficheCache.prospectNom,
+      prospectPrenom: ficheCache.prospectPrenom,
+      prospectEmail: ficheCache.prospectEmail,
+      prospectTel: ficheCache.prospectTel,
+      fetchedAt: ficheCache.fetchedAt,
+      createdAt: ficheCache.createdAt,
+      transcription: transcriptionStatus,
+      audit: auditStatus,
+      recordings: ficheCache.recordings.map((r) => ({
+        id: r.id.toString(),
+        callId: r.callId,
+        hasTranscription: r.hasTranscription,
+        transcribedAt: r.transcribedAt,
+        startTime: r.startTime,
+        durationSeconds: r.durationSeconds,
+      })),
+    };
+  });
+
+  return {
+    startDate,
+    endDate,
+    total: fichesWithStatus.length,
+    fiches: fichesWithStatus,
+  };
+}
+
 export const FichesService = {
   fetchApiSales,
   fetchApiFicheDetails,
   getFicheWithCache,
   refreshFicheFromApi,
+  getFicheStatus,
+  getFichesStatus,
+  getFichesByDateWithStatus,
+  getFichesByDateRangeWithStatus,
 };

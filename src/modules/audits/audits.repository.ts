@@ -256,3 +256,177 @@ export async function listAudits(filters: ListAuditsFilters = {}) {
 
   return { audits, total, limit, offset };
 }
+
+/**
+ * Get audits grouped by fiches
+ */
+export async function getAuditsGroupedByFiches(
+  filters: ListAuditsFilters = {}
+) {
+  const {
+    ficheIds,
+    status,
+    isCompliant,
+    dateFrom,
+    dateTo,
+    auditConfigIds,
+    sortBy = "created_at",
+    sortOrder = "desc",
+    limit = 100,
+    offset = 0,
+  } = filters;
+
+  // Build where clause for audits
+  const auditWhere: any = {
+    isLatest: true,
+  };
+
+  // Filter by status
+  if (status && status.length > 0) {
+    auditWhere.status = { in: status };
+  }
+
+  // Filter by compliance
+  if (isCompliant !== undefined) {
+    auditWhere.isCompliant = isCompliant;
+  }
+
+  // Filter by date range
+  if (dateFrom || dateTo) {
+    auditWhere.createdAt = {};
+    if (dateFrom) {
+      auditWhere.createdAt.gte = dateFrom;
+    }
+    if (dateTo) {
+      auditWhere.createdAt.lte = dateTo;
+    }
+  }
+
+  // Filter by audit config IDs
+  if (auditConfigIds && auditConfigIds.length > 0) {
+    auditWhere.auditConfigId = {
+      in: auditConfigIds.map((id) => BigInt(id)),
+    };
+  }
+
+  // Build where clause for fiches
+  const ficheWhere: any = {};
+
+  // Filter by fiche IDs
+  if (ficheIds && ficheIds.length > 0) {
+    ficheWhere.ficheId = { in: ficheIds };
+  }
+
+  // Add audit filter to fiche where clause
+  if (Object.keys(auditWhere).length > 0) {
+    ficheWhere.audits = {
+      some: auditWhere,
+    };
+  }
+
+  // Build orderBy for audits
+  const auditOrderBy: any = {};
+  switch (sortBy) {
+    case "created_at":
+      auditOrderBy.createdAt = sortOrder;
+      break;
+    case "completed_at":
+      auditOrderBy.completedAt = sortOrder;
+      break;
+    case "score_percentage":
+      auditOrderBy.scorePercentage = sortOrder;
+      break;
+    case "duration_ms":
+      auditOrderBy.durationMs = sortOrder;
+      break;
+    default:
+      auditOrderBy.createdAt = sortOrder;
+  }
+
+  // Fetch fiches with their audits
+  const [fiches, totalFiches] = await Promise.all([
+    prisma.ficheCache.findMany({
+      where: ficheWhere,
+      include: {
+        audits: {
+          where: auditWhere,
+          include: {
+            auditConfig: {
+              select: {
+                id: true,
+                name: true,
+                description: true,
+              },
+            },
+            stepResults: {
+              select: {
+                id: true,
+                stepPosition: true,
+                stepName: true,
+                conforme: true,
+                score: true,
+                niveauConformite: true,
+              },
+              orderBy: {
+                stepPosition: "asc",
+              },
+            },
+          },
+          orderBy: auditOrderBy,
+        },
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+      take: limit,
+      skip: offset,
+    }),
+    prisma.ficheCache.count({ where: ficheWhere }),
+  ]);
+
+  // Transform to desired format
+  const result = fiches.map((fiche) => ({
+    fiche: {
+      id: fiche.id,
+      ficheId: fiche.ficheId,
+      groupe: fiche.groupe,
+      agenceNom: fiche.agenceNom,
+      prospectNom: fiche.prospectNom,
+      prospectPrenom: fiche.prospectPrenom,
+      prospectEmail: fiche.prospectEmail,
+      prospectTel: fiche.prospectTel,
+      hasRecordings: fiche.hasRecordings,
+      recordingsCount: fiche.recordingsCount,
+      fetchedAt: fiche.fetchedAt,
+      createdAt: fiche.createdAt,
+      updatedAt: fiche.updatedAt,
+    },
+    audits: fiche.audits,
+    summary: {
+      totalAudits: fiche.audits.length,
+      compliantCount: fiche.audits.filter((a) => a.isCompliant).length,
+      averageScore:
+        fiche.audits.length > 0
+          ? fiche.audits.reduce(
+              (sum, a) => sum + Number(a.scorePercentage),
+              0
+            ) / fiche.audits.length
+          : 0,
+      latestAuditDate:
+        fiche.audits.length > 0
+          ? fiche.audits.sort(
+              (a, b) => b.createdAt.getTime() - a.createdAt.getTime()
+            )[0].createdAt
+          : null,
+    },
+  }));
+
+  return {
+    data: result,
+    pagination: {
+      total: totalFiches,
+      limit,
+      offset,
+    },
+  };
+}

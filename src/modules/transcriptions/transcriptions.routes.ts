@@ -130,7 +130,7 @@ transcriptionsRouter.get(
   async (req: Request, res: Response) => {
     try {
       const { fiche_id, call_id } = req.params;
-      
+
       const { prisma } = await import("../../shared/prisma.js");
       const { readFileSync, existsSync } = await import("fs");
 
@@ -158,7 +158,7 @@ transcriptionsRouter.get(
 
       // Try DB first, then file cache fallback
       let transcriptionData;
-      
+
       if (recording.transcriptionText) {
         transcriptionData = {
           text: recording.transcriptionText,

@@ -84,6 +84,26 @@ export async function fetchFichesForDate(
         id: dateFiches[0].id || dateFiches[0].id_fiche,
         keys: Object.keys(dateFiches[0]),
         hasRecordings: Boolean(dateFiches[0].recordings || dateFiches[0].enregistrements),
+        date_insertion: dateFiches[0].date_insertion,
+        date_modification: dateFiches[0].date_modification,
+        statut: dateFiches[0].statut,
+      });
+      
+      // Analyze what dates are actually in the results
+      const dateInsertions = new Set(dateFiches.map((f: any) => f.date_insertion).filter(Boolean));
+      const dateModifications = new Set(dateFiches.map((f: any) => f.date_modification).filter(Boolean));
+      
+      console.log(`📊 Date analysis for ${date}:`, {
+        requested_date: date,
+        total_fiches: dateFiches.length,
+        unique_insertion_dates: Array.from(dateInsertions),
+        unique_modification_dates: Array.from(dateModifications),
+        sample_fiches: dateFiches.slice(0, 5).map((f: any) => ({
+          id: f.id,
+          date_insertion: f.date_insertion,
+          date_modification: f.date_modification,
+          statut: f.statut,
+        })),
       });
     } else {
       console.log(`No fiches returned for ${date}`);

@@ -10,6 +10,11 @@ import {
   ConversationChunk,
 } from "../../schemas.js";
 import { TIMELINE_CHUNK_SIZE } from "../../shared/constants.js";
+import {
+  logPayloadSize,
+  formatBytes,
+  getPayloadSize,
+} from "../../utils/payload-size.js";
 
 export function generateTimeline(
   transcriptions: Transcription[]
@@ -133,6 +138,57 @@ export function generateTimeline(
       chunks,
     });
   }
+
+  // Log timeline size for monitoring
+  const totalChunks = timeline.reduce((sum, r) => sum + r.total_chunks, 0);
+  const timelineSize = getPayloadSize(timeline);
+  const transcriptionsSize = getPayloadSize(transcriptions);
+
+  console.log("\n📊 [Timeline Size Analysis]");
+  console.log(`   Recordings: ${timeline.length}`);
+  console.log(`   Total chunks: ${totalChunks}`);
+  console.log(
+    `   Average chunks per recording: ${(totalChunks / timeline.length).toFixed(
+      1
+    )}`
+  );
+  console.log(`   Input (transcriptions): ${formatBytes(transcriptionsSize)}`);
+  console.log(`   Output (timeline): ${formatBytes(timelineSize)}`);
+  console.log(
+    `   Size ratio: ${((timelineSize / transcriptionsSize) * 100).toFixed(1)}%`
+  );
+
+  // Log detailed size breakdown for first recording (sample)
+  if (timeline.length > 0) {
+    const sampleRecording = timeline[0];
+    const sampleSize = getPayloadSize(sampleRecording);
+    const sampleChunkSizes = sampleRecording.chunks.map((c) => ({
+      chunk: c.chunk_index,
+      size: formatBytes(getPayloadSize(c)),
+      textLength: c.full_text.length,
+    }));
+
+    console.log(`\n   Sample recording #0 breakdown:`);
+    console.log(`     Total size: ${formatBytes(sampleSize)}`);
+    console.log(`     Chunks: ${sampleRecording.chunks.length}`);
+    console.log(
+      `     Avg chunk size: ${formatBytes(
+        sampleSize / sampleRecording.chunks.length
+      )}`
+    );
+    if (sampleChunkSizes.length > 0) {
+      console.log(
+        `     First chunk: ${sampleChunkSizes[0].size} (${sampleChunkSizes[0].textLength} chars)`
+      );
+    }
+  }
+
+  // Warning if timeline is very large
+  logPayloadSize(
+    "Complete Timeline",
+    timeline,
+    50 * 1024 * 1024 // 50MB Express limit
+  );
 
   return timeline;
 }

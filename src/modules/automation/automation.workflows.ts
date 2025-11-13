@@ -390,17 +390,37 @@ export const runAutomationFunction = inngest.createFunction(
           const ficheCle = fichesCles[ficheId];
 
           try {
-            await log("info", `Fetching fiche ${ficheId}`);
-
-            // Step 5a: Fetch/cache fiche using existing tested function
-            // This handles cache check and API fetch with recordings automatically
-            await step.invoke(`fetch-fiche-${ficheId}`, {
-              function: fetchFicheFunction,
-              data: {
-                fiche_id: ficheId,
-                cle: ficheCle || undefined,
-              },
+            // Check cache first to avoid rate limiting
+            const isCached = await step.run(`check-cache-${ficheId}`, async () => {
+              const { getCachedFiche } = await import("../fiches/fiches.repository.js");
+              const cached = await getCachedFiche(ficheId);
+              const isValid = cached && cached.expiresAt > new Date();
+              
+              if (isValid) {
+                await log("info", `Fiche ${ficheId} already cached, skipping fetch`, {
+                  cache_id: String(cached.id),
+                  recordings: cached.recordingsCount,
+                  expires_at: cached.expiresAt,
+                });
+              }
+              
+              return isValid;
             });
+
+            // Only fetch if not cached or expired
+            if (!isCached) {
+              await log("info", `Fetching fiche ${ficheId} from API`);
+
+              // Step 5a: Fetch/cache fiche using existing tested function
+              // This handles cache check and API fetch with recordings automatically
+              await step.invoke(`fetch-fiche-${ficheId}`, {
+                function: fetchFicheFunction,
+                data: {
+                  fiche_id: ficheId,
+                  cle: ficheCle || undefined,
+                },
+              });
+            }
           } catch (error: any) {
             await log(
               "error",
@@ -475,17 +495,16 @@ export const runAutomationFunction = inngest.createFunction(
               let auditConfigIds: number[] = [];
 
               // Log schedule audit configuration for debugging
-              await log(
-                "debug",
-                `Audit configuration for schedule`,
-                {
-                  useAutomaticAudits: schedule.useAutomaticAudits,
-                  specificAuditConfigs: schedule.specificAuditConfigs,
-                  specificAuditConfigsType: typeof schedule.specificAuditConfigs,
-                  specificAuditConfigsIsArray: Array.isArray(schedule.specificAuditConfigs),
-                  specificAuditConfigsLength: schedule.specificAuditConfigs?.length,
-                }
-              );
+              await log("debug", `Audit configuration for schedule`, {
+                useAutomaticAudits: schedule.useAutomaticAudits,
+                specificAuditConfigs: schedule.specificAuditConfigs,
+                specificAuditConfigsType: typeof schedule.specificAuditConfigs,
+                specificAuditConfigsIsArray: Array.isArray(
+                  schedule.specificAuditConfigs
+                ),
+                specificAuditConfigsLength:
+                  schedule.specificAuditConfigs?.length,
+              });
 
               // First, add specific audit configs if provided
               if (
@@ -498,7 +517,7 @@ export const runAutomationFunction = inngest.createFunction(
                   .filter((id) => id !== null && id !== undefined)
                   .map((id) => {
                     // Convert BigInt to Number if needed
-                    if (typeof id === 'bigint') {
+                    if (typeof id === "bigint") {
                       return Number(id);
                     }
                     return Number(id);
@@ -513,14 +532,11 @@ export const runAutomationFunction = inngest.createFunction(
                   { specific_audit_config_ids: specificIds }
                 );
               } else {
-                await log(
-                  "info",
-                  `No specific audit configs configured`,
-                  {
-                    specificAuditConfigsProvided: !!schedule.specificAuditConfigs,
-                    specificAuditConfigsLength: schedule.specificAuditConfigs?.length || 0,
-                  }
-                );
+                await log("info", `No specific audit configs configured`, {
+                  specificAuditConfigsProvided: !!schedule.specificAuditConfigs,
+                  specificAuditConfigsLength:
+                    schedule.specificAuditConfigs?.length || 0,
+                });
               }
 
               // Then, add automatic audits if enabled (and no specific configs were provided)
@@ -532,7 +548,7 @@ export const runAutomationFunction = inngest.createFunction(
                   }
                 );
                 const automaticIds = automaticConfigs.map((c) => Number(c.id));
-                
+
                 if (automaticIds.length > 0) {
                   auditConfigIds.push(...automaticIds);
 
@@ -560,7 +576,8 @@ export const runAutomationFunction = inngest.createFunction(
                   {
                     useAutomaticAudits: schedule.useAutomaticAudits,
                     specificAuditConfigs: schedule.specificAuditConfigs,
-                    troubleshooting: "Please ensure: 1) Specific audit config IDs are saved in the schedule, OR 2) At least one audit config is marked as 'automatic' in the database",
+                    troubleshooting:
+                      "Please ensure: 1) Specific audit config IDs are saved in the schedule, OR 2) At least one audit config is marked as 'automatic' in the database",
                   }
                 );
               } else {

@@ -227,17 +227,18 @@ export const AutomationScheduleCreateSchema = z.object({
   // Audit Configuration
   runAudits: z.boolean().default(true),
   useAutomaticAudits: z.boolean().default(true),
-  specificAuditConfigs: z.preprocess(
-    (val) => {
-      if (!val || !Array.isArray(val)) return undefined;
-      // Convert strings to numbers (handles BigInt serialization)
-      return val.map((id: any) => {
-        if (typeof id === 'string') return parseInt(id, 10);
+  specificAuditConfigs: z.preprocess((val) => {
+    if (!val || !Array.isArray(val)) return undefined;
+    // Filter out null/undefined values and convert strings to numbers
+    const filtered = val
+      .filter((id: any) => id !== null && id !== undefined && id !== "")
+      .map((id: any) => {
+        if (typeof id === "string") return parseInt(id, 10);
         return id;
       });
-    },
-    z.array(z.number().int()).optional()
-  ),
+    // Return undefined if array is empty after filtering
+    return filtered.length > 0 ? filtered : undefined;
+  }, z.array(z.number().int()).optional()),
 
   // Error Handling
   continueOnError: z.boolean().default(true),

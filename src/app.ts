@@ -24,6 +24,12 @@ import { webhooksRoutes } from "./modules/webhooks/index.js";
 import { automationRoutes } from "./modules/automation/index.js";
 import { chatRouter } from "./modules/chat/index.js";
 
+// Middleware
+import {
+  payloadSizeLogger,
+  payloadSizeResponseLogger,
+} from "./middleware/payload-logger.js";
+
 // Config
 import { swaggerSpec } from "./config/swagger.js";
 
@@ -44,6 +50,10 @@ export function createApp() {
     })
   );
   app.use(express.json({ limit: "50mb" })); // Increase limit for Inngest workflows with large timelines
+
+  // Payload size monitoring middleware (logs request/response sizes)
+  app.use(payloadSizeLogger);
+  app.use(payloadSizeResponseLogger);
 
   // Inngest endpoint
   app.use(

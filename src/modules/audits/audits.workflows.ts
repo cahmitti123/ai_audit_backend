@@ -19,6 +19,12 @@ import {
   DEFAULT_AUDIT_CONFIG_ID,
 } from "../../shared/constants.js";
 import { auditWebhooks, batchWebhooks } from "../../shared/webhook.js";
+import {
+  logPayloadSize,
+  getPayloadSize,
+  formatBytes,
+  PAYLOAD_LIMITS,
+} from "../../utils/payload-size.js";
 
 /**
  * Run Audit Function
@@ -358,6 +364,34 @@ export const runAuditFunction = inngest.createFunction(
         );
 
         const timelineText = buildTimelineText(timeline);
+
+        // Log payload sizes for monitoring (Inngest step data limit is 4MB)
+        const transcriptionsSize = getPayloadSize(transcriptions);
+        const timelineSize = getPayloadSize(timeline);
+        const timelineTextSize = getPayloadSize(timelineText);
+        const returnSize = getPayloadSize({ timeline, timelineText });
+
+        logger.info("Timeline data sizes", {
+          transcriptions: formatBytes(transcriptionsSize),
+          timeline: formatBytes(timelineSize),
+          timelineText: formatBytes(timelineTextSize),
+          total_return: formatBytes(returnSize),
+          inngest_step_limit: formatBytes(PAYLOAD_LIMITS.INNGEST_STEP),
+          percentage_of_limit: Math.round(
+            (returnSize / PAYLOAD_LIMITS.INNGEST_STEP) * 100
+          ),
+        });
+
+        // Warn if approaching Inngest step limit
+        if (returnSize > PAYLOAD_LIMITS.INNGEST_STEP * 0.8) {
+          logger.warn("⚠️  Timeline data approaching Inngest step limit!", {
+            size: formatBytes(returnSize),
+            limit: formatBytes(PAYLOAD_LIMITS.INNGEST_STEP),
+            percentage: Math.round(
+              (returnSize / PAYLOAD_LIMITS.INNGEST_STEP) * 100
+            ),
+          });
+        }
 
         return { timeline, timelineText };
       }
@@ -721,6 +755,29 @@ export const runAuditFunction = inngest.createFunction(
         },
       };
 
+      // Log audit result payload size before saving
+      const auditDataSize = getPayloadSize(auditData);
+      const stepsSize = getPayloadSize(enrichedStepResults);
+
+      logger.info("Audit result payload sizes", {
+        total_audit_data: formatBytes(auditDataSize),
+        steps_only: formatBytes(stepsSize),
+        recordings: timeline.length,
+        chunks: auditData.statistics.timeline_chunks,
+        tokens: auditData.statistics.total_tokens,
+      });
+
+      // Warn if audit result is very large (could cause DB issues)
+      if (auditDataSize > 10 * 1024 * 1024) {
+        // 10MB warning threshold
+        logger.warn("⚠️  Large audit result detected!", {
+          size: formatBytes(auditDataSize),
+          fiche_id,
+          recordings: timeline.length,
+          chunks: auditData.statistics.timeline_chunks,
+        });
+      }
+
       const saved = await saveAuditResult(auditData, cached.id);
 
       logger.info("Audit saved to database", {
@@ -780,6 +837,61 @@ export const runAuditFunction = inngest.createFunction(
       duration_ms: duration,
       total_steps: enrichedStepResults.length,
     });
+
+    // Log comprehensive payload size summary
+    console.log("\n" + "=".repeat(80));
+    console.log("📊 AUDIT WORKFLOW - PAYLOAD SIZE SUMMARY");
+    console.log("=".repeat(80));
+    console.log(`Fiche ID: ${fiche_id}`);
+    console.log(`Audit Config: ${auditConfig.name}`);
+    console.log(`Duration: ${durationSeconds}s`);
+    console.log("-".repeat(80));
+    console.log("Timeline Data:");
+    console.log(`  - Recordings: ${timeline.length}`);
+    console.log(
+      `  - Total Chunks: ${timeline.reduce(
+        (sum: number, r: any) => sum + r.total_chunks,
+        0
+      )}`
+    );
+    console.log(`  - Timeline Size: ${formatBytes(getPayloadSize(timeline))}`);
+    console.log(
+      `  - Timeline Text Size: ${formatBytes(getPayloadSize(timelineText))}`
+    );
+    console.log("-".repeat(80));
+    console.log("Audit Results:");
+    console.log(`  - Steps Analyzed: ${enrichedStepResults.length}`);
+    console.log(
+      `  - Total Tokens: ${enrichedStepResults
+        .reduce((sum, r) => sum + (r.usage?.total_tokens || 0), 0)
+        .toLocaleString()}`
+    );
+    console.log(
+      `  - Steps Size: ${formatBytes(getPayloadSize(enrichedStepResults))}`
+    );
+    console.log(
+      `  - Complete Audit Data: ${formatBytes(getPayloadSize(savedAudit))}`
+    );
+    console.log("-".repeat(80));
+    console.log("Limits Check:");
+    const timelineSize = getPayloadSize(timeline);
+    const auditResultSize = getPayloadSize(savedAudit);
+    console.log(
+      `  - Timeline vs Express Limit (50MB): ${Math.round(
+        (timelineSize / PAYLOAD_LIMITS.EXPRESS_DEFAULT) * 100
+      )}%`
+    );
+    console.log(
+      `  - Timeline vs Inngest Step (4MB): ${Math.round(
+        (timelineSize / PAYLOAD_LIMITS.INNGEST_STEP) * 100
+      )}%`
+    );
+    console.log(
+      `  - Audit Result vs Express Limit: ${Math.round(
+        (auditResultSize / PAYLOAD_LIMITS.EXPRESS_DEFAULT) * 100
+      )}%`
+    );
+    console.log("=".repeat(80) + "\n");
 
     return {
       success: true,

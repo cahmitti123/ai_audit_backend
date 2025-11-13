@@ -42,12 +42,43 @@ type Events = {
 };
 
 /**
+ * Inngest Configuration Debugging
+ * ================================
+ */
+const isDevelopment =
+  process.env.INNGEST_DEV === "1" || process.env.NODE_ENV === "development";
+const hasBaseUrl = Boolean(process.env.INNGEST_BASE_URL);
+const hasEventKey = Boolean(process.env.INNGEST_EVENT_KEY);
+
+// Log configuration on startup
+console.log("🔧 Inngest Client Configuration:", {
+  mode: isDevelopment ? "DEVELOPMENT" : hasBaseUrl ? "SELF-HOSTED" : "CLOUD",
+  isDev: isDevelopment,
+  baseUrl: process.env.INNGEST_BASE_URL || "not set (will use cloud)",
+  hasEventKey,
+  nodeEnv: process.env.NODE_ENV,
+});
+
+/**
  * Inngest Client Instance
  * =======================
  * Configured with event schemas for type safety
+ *
+ * Configuration modes:
+ * 1. Development (INNGEST_DEV=1): Uses local dev server, no external dependencies
+ * 2. Self-hosted (INNGEST_BASE_URL set): Connects to your Inngest instance
+ * 3. Cloud (default): Connects to Inngest Cloud (requires event key)
  */
 export const inngest = new Inngest({
   id: "ai-audit-system",
   schemas: new EventSchemas().fromRecord<Events>(),
-  eventKey: process.env.INNGEST_EVENT_KEY, // For production
+  eventKey: process.env.INNGEST_EVENT_KEY,
+
+  // Development mode - no external Inngest server needed
+  isDev: isDevelopment,
+
+  // Self-hosted Inngest server URL (for production)
+  ...(hasBaseUrl && {
+    baseUrl: process.env.INNGEST_BASE_URL,
+  }),
 });

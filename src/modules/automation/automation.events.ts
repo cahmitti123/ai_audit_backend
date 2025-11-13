@@ -40,4 +40,3 @@ export type AutomationEvents = {
     error: string;
   };
 };
-

@@ -336,6 +336,45 @@ export const saleDetailsResponseSchema = z.object({
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// STATUS TYPES (for enriched responses)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const transcriptionStatusSchema = z.object({
+  total: z.number(),
+  transcribed: z.number(),
+  pending: z.number(),
+  percentage: z.number(),
+  isComplete: z.boolean(),
+  lastTranscribedAt: z.date().nullable().optional(),
+});
+
+export const auditStatusSchema = z.object({
+  total: z.number(),
+  completed: z.number(),
+  pending: z.number(),
+  running: z.number(),
+  compliant: z.number(),
+  nonCompliant: z.number(),
+  averageScore: z.number().nullable(),
+  latestAudit: z.any().optional(),
+});
+
+export const ficheStatusSchema = z.object({
+  hasData: z.boolean(),
+  transcription: transcriptionStatusSchema,
+  audit: auditStatusSchema,
+});
+
+export const salesFicheWithStatusSchema = salesFicheSchema.extend({
+  status: ficheStatusSchema,
+});
+
+export const salesResponseWithStatusSchema = z.object({
+  fiches: z.array(salesFicheWithStatusSchema),
+  total: z.number(),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // EXPORTED TYPES
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -365,6 +404,11 @@ export type Transcription = z.infer<typeof transcriptionSchema>;
 export type Recording = z.infer<typeof recordingSchema>;
 export type SaleDetailsResponse = z.infer<typeof saleDetailsResponseSchema>;
 export type FicheDetailsResponse = SaleDetailsResponse;
+export type TranscriptionStatus = z.infer<typeof transcriptionStatusSchema>;
+export type AuditStatus = z.infer<typeof auditStatusSchema>;
+export type FicheStatus = z.infer<typeof ficheStatusSchema>;
+export type SalesFicheWithStatus = z.infer<typeof salesFicheWithStatusSchema>;
+export type SalesResponseWithStatus = z.infer<typeof salesResponseWithStatusSchema>;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // VALIDATORS

@@ -48,11 +48,18 @@ export async function getCachedFiche(ficheId: string) {
 
 /**
  * Cache fiche data in database
+ * @param ficheData - Full fiche details from API
+ * @param expirationHours - Cache expiration time in hours (default: 24)
  */
 export async function cacheFiche(
-  ficheData: any,
+  ficheData: import("./fiches.schemas.js").FicheDetailsResponse,
   expirationHours: number = CACHE_EXPIRATION_HOURS
 ) {
+  // Validate that required information exists
+  if (!ficheData.information) {
+    throw new Error("Cannot cache fiche: missing information object");
+  }
+
   const expiresAt = new Date();
   expiresAt.setHours(expiresAt.getHours() + expirationHours);
 

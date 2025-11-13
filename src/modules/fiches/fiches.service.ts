@@ -6,21 +6,79 @@
 
 import axios from "axios";
 import { logger } from "../../shared/logger.js";
-
-// Types
-export interface SalesResponse {
-  success: boolean;
-  fiches: any[];
-  total: number;
-}
+import {
+  type SalesResponse,
+  type SalesFiche,
+  type FicheDetailsResponse,
+  validateSalesResponse,
+  validateFicheDetailsResponse,
+} from "./fiches.schemas.js";
 
 const baseUrl =
   process.env.FICHE_API_BASE_URL || "https://api.devis-mutuelle-pas-cher.com";
 const apiBase = `${baseUrl}/api`;
 /**
+ * Validate date format (YYYY-MM-DD)
+ */
+function validateDateFormat(date: string): boolean {
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!dateRegex.test(date)) {
+    return false;
+  }
+
+  const [year, month, day] = date.split("-").map(Number);
+
+  // Validate year (reasonable range)
+  if (year < 2000 || year > 2100) {
+    return false;
+  }
+
+  // Validate month
+  if (month < 1 || month > 12) {
+    return false;
+  }
+
+  // Validate day
+  if (day < 1 || day > 31) {
+    return false;
+  }
+
+  // Validate actual date exists
+  const dateObj = new Date(year, month - 1, day);
+  if (
+    dateObj.getFullYear() !== year ||
+    dateObj.getMonth() !== month - 1 ||
+    dateObj.getDate() !== day
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
  * Fetch sales list by date
+ * @param date - Date in YYYY-MM-DD format
+ * @returns Promise<SalesResponse> - Validated sales response with fiches array and total count
+ * @throws Error if date format is invalid, API call fails, or response validation fails
  */
 export async function fetchApiSales(date: string): Promise<SalesResponse> {
+  // Validate date format
+  if (!validateDateFormat(date)) {
+    const error = new Error(
+      `Invalid date format: "${date}". Expected format: YYYY-MM-DD (e.g., 2025-11-12)`
+    );
+    console.error("fetchApiSales - Invalid date format", {
+      date,
+      expected_format: "YYYY-MM-DD",
+    });
+    logger.error("Invalid date format", {
+      date,
+      expected_format: "YYYY-MM-DD",
+    });
+    throw error;
+  }
+
   const formattedDate = date.split("-").reverse().join("/");
   console.log("fetchApiSales - Starting fetch", { date, formattedDate });
   logger.info("Fetching sales list", { date, formatted_date: formattedDate });
@@ -39,7 +97,7 @@ export async function fetchApiSales(date: string): Promise<SalesResponse> {
       url: `${apiBase}/fiches/search/by-date?${params}`,
     });
 
-    const response = await axios.get(
+    const response = await axios.get<SalesResponse>(
       `${apiBase}/fiches/search/by-date?${params}`,
       {
         timeout: 60000,
@@ -50,21 +108,23 @@ export async function fetchApiSales(date: string): Promise<SalesResponse> {
       status: response.status,
       dataKeys: Object.keys(response.data || {}),
       fichesLength: response.data?.fiches?.length,
+      total: response.data?.total,
     });
 
-    const fiches = response.data?.fiches || [];
-    console.log("fetchApiSales - Fiches extracted", { count: fiches.length });
-    logger.info("Sales list fetched", {
+    // Validate response structure at runtime
+    const validatedData = validateSalesResponse(response.data);
+
+    console.log("fetchApiSales - Response validated", {
+      fiches_count: validatedData.fiches.length,
+      total: validatedData.total,
+    });
+    logger.info("Sales list fetched and validated", {
       date,
-      fiches_count: fiches.length,
-      total: fiches.length,
+      fiches_count: validatedData.fiches.length,
+      total: validatedData.total,
     });
 
-    return {
-      success: true,
-      fiches,
-      total: fiches.length,
-    };
+    return validatedData;
   } catch (error: any) {
     console.error("fetchApiSales - Error occurred", {
       date,
@@ -82,25 +142,29 @@ export async function fetchApiSales(date: string): Promise<SalesResponse> {
 }
 /**
  * Fetch fiche details from API
+ * @param ficheId - Fiche ID to fetch
+ * @param cle - Optional authentication key
+ * @returns Promise<FicheDetailsResponse> - Validated fiche details
+ * @throws Error if API call fails, response validation fails, or fiche not found
  */
 export async function fetchApiFicheDetails(
   ficheId: string,
   cle?: string
-): Promise<any> {
+): Promise<FicheDetailsResponse> {
   logger.info("Fetching fiche details", {
     fiche_id: ficheId,
     has_cle: Boolean(cle),
   });
 
   try {
-    const params: any = {
+    const params: Record<string, string> = {
       include_recordings: "true",
       include_transcriptions: "false",
     };
     if (cle) params.cle = cle;
 
     const query = new URLSearchParams(params);
-    const response = await axios.get(
+    const response = await axios.get<FicheDetailsResponse>(
       `${apiBase}/fiches/by-id/${ficheId}?${query}`,
       {
         timeout: 30000,
@@ -111,15 +175,17 @@ export async function fetchApiFicheDetails(
       throw new Error("Fiche not found");
     }
 
-    const ficheData = response.data;
-    logger.info("Fiche details fetched successfully", {
+    // Validate response structure at runtime
+    const validatedData = validateFicheDetailsResponse(response.data);
+
+    logger.info("Fiche details fetched and validated successfully", {
       fiche_id: ficheId,
-      recordings_count: ficheData.recordings?.length || 0,
-      has_prospect: Boolean(ficheData.prospect),
-      groupe: ficheData.information?.groupe,
+      recordings_count: validatedData.recordings?.length || 0,
+      has_prospect: Boolean(validatedData.prospect),
+      groupe: validatedData.information?.groupe,
     });
 
-    return ficheData;
+    return validatedData;
   } catch (error: any) {
     logger.error("Failed to fetch fiche details", {
       fiche_id: ficheId,

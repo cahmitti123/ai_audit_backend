@@ -167,20 +167,22 @@ export const fetchFicheFunction = inngest.createFunction(
       });
 
       if (recordingsCount > 0) {
-        ficheData.recordings = ficheData.recordings.map((rec: any, index: number) => {
-          const enriched = enrichRecording(rec);
+        ficheData.recordings = ficheData.recordings.map(
+          (rec: any, index: number) => {
+            const enriched = enrichRecording(rec);
 
-          // Log first recording as sample
-          if (index === 0) {
-            logger.debug("Sample enriched recording", {
-              call_id: enriched.call_id,
-              has_parsed: Boolean(enriched.parsed),
-              duration: enriched.duration_seconds,
-            });
+            // Log first recording as sample
+            if (index === 0) {
+              logger.debug("Sample enriched recording", {
+                call_id: enriched.call_id,
+                has_parsed: Boolean(enriched.parsed),
+                duration: enriched.duration_seconds,
+              });
+            }
+
+            return enriched;
           }
-
-          return enriched;
-        });
+        );
       }
 
       logger.info("Recordings enriched", {

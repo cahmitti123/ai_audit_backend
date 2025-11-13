@@ -15,6 +15,12 @@ import {
   getFichesByDateRangeWithStatus,
 } from "./fiches.service.js";
 import { getCachedFiche } from "./fiches.repository.js";
+import { jsonResponse } from "../../shared/bigint-serializer.js";
+import type {
+  SalesFiche,
+  SalesResponseWithStatus,
+  FicheStatus,
+} from "./fiches.schemas.js";
 
 export const fichesRouter = Router();
 
@@ -56,6 +62,7 @@ fichesRouter.get("/search", async (req: Request, res: Response) => {
     }
 
     console.log("Fetching sales for date:", date);
+
     const sales = await fetchApiSales(date);
     console.log(
       "Successfully fetched sales, count:",
@@ -70,51 +77,65 @@ fichesRouter.get("/search", async (req: Request, res: Response) => {
 
       // Extract fiche IDs from the sales data
       const ficheIds = sales.fiches
-        .map((fiche: any) => fiche.information?.fiche_id)
-        .filter((id: any) => id);
+        .map((fiche: SalesFiche) => fiche.id)
+        .filter((id): id is string => Boolean(id));
 
       if (ficheIds.length > 0) {
         const statusMap = await getFichesStatus(ficheIds);
 
-        // Enrich fiches with status information
-        sales.fiches = sales.fiches.map((fiche: any) => {
-          const ficheId = fiche.information?.fiche_id;
-          const status = ficheId ? statusMap[ficheId] : null;
+        // Create default status for missing entries
+        const defaultStatus: FicheStatus = {
+          hasData: false,
+          transcription: {
+            total: 0,
+            transcribed: 0,
+            pending: 0,
+            percentage: 0,
+            isComplete: false,
+          },
+          audit: {
+            total: 0,
+            completed: 0,
+            pending: 0,
+            running: 0,
+            compliant: 0,
+            nonCompliant: 0,
+            averageScore: null,
+          },
+        };
 
-          return {
-            ...fiche,
-            status: status || {
-              hasData: false,
-              transcription: {
-                total: 0,
-                transcribed: 0,
-                pending: 0,
-                percentage: 0,
-                isComplete: false,
-              },
-              audit: {
-                total: 0,
-                completed: 0,
-                pending: 0,
-                running: 0,
-                compliant: 0,
-                nonCompliant: 0,
-                averageScore: null,
-              },
-            },
-          };
-        });
+        // Enrich fiches with status information
+        const enrichedResponse: SalesResponseWithStatus = {
+          fiches: sales.fiches.map((fiche: SalesFiche) => {
+            const ficheId = fiche.id;
+            const status = ficheId ? statusMap[ficheId] : null;
+
+            return {
+              ...fiche,
+              status: status || defaultStatus,
+            };
+          }),
+          total: sales.total,
+        };
 
         console.log("Status information added to fiches");
+        return res.json(enrichedResponse);
       }
     }
 
     return res.json(sales);
   } catch (error: any) {
     console.error("Error fetching fiches:", error.message);
-    res.status(500).json({
+
+    // Check if it's a validation error (date format)
+    const isValidationError = error.message?.includes("Invalid date format");
+    const statusCode = isValidationError ? 400 : 500;
+
+    res.status(statusCode).json({
       success: false,
-      error: "Failed to fetch fiches",
+      error: isValidationError
+        ? "Invalid date format"
+        : "Failed to fetch fiches",
       message: error.message,
     });
   }
@@ -182,19 +203,11 @@ fichesRouter.get("/:fiche_id", async (req: Request, res: Response) => {
       });
     }
 
-    // Serialize BigInt values to strings for JSON
-    console.log("Serializing BigInt values for JSON response");
-    const serializable = JSON.parse(
-      JSON.stringify(ficheDetails, (key, value) =>
-        typeof value === "bigint" ? value.toString() : value
-      )
-    );
-
     console.log("Successfully fetched fiche details, sending response", {
       fiche_id,
       refreshed: shouldRefresh,
     });
-    return res.json(serializable);
+    return jsonResponse(res, ficheDetails);
   } catch (error: any) {
     console.error("Error fetching fiche details:", error.message, {
       fiche_id: req.params.fiche_id,

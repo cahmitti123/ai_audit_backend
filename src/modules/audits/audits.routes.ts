@@ -14,6 +14,7 @@ import {
   getAuditsGroupedByFiches,
   ListAuditsFilters,
 } from "./audits.repository.js";
+import { jsonResponse } from "../../shared/bigint-serializer.js";
 
 export const auditsRouter = Router();
 
@@ -808,14 +809,11 @@ auditsRouter.get("/by-fiche/:fiche_id", async (req: Request, res: Response) => {
     const includeDetails = req.query.include_details === "true";
     const audits = await getAuditsByFiche(req.params.fiche_id, includeDetails);
 
-    // Convert BigInt to string for JSON serialization
-    const serializable = JSON.parse(
-      JSON.stringify(audits, (key, value) =>
-        typeof value === "bigint" ? value.toString() : value
-      )
-    );
-
-    res.json({ success: true, data: serializable, count: audits.length });
+    return jsonResponse(res, { 
+      success: true, 
+      data: audits, 
+      count: audits.length 
+    });
   } catch (error: any) {
     res.status(500).json({
       success: false,
@@ -843,14 +841,10 @@ auditsRouter.get("/:audit_id", async (req: Request, res: Response) => {
       });
     }
 
-    // Convert BigInt to string for JSON serialization
-    const serializable = JSON.parse(
-      JSON.stringify(audit, (key, value) =>
-        typeof value === "bigint" ? value.toString() : value
-      )
-    );
-
-    res.json({ success: true, data: serializable });
+    return jsonResponse(res, { 
+      success: true, 
+      data: audit 
+    });
   } catch (error: any) {
     res.status(500).json({
       success: false,

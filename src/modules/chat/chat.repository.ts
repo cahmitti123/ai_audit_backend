@@ -9,7 +9,10 @@ import { prisma } from "../../shared/prisma.js";
 /**
  * Get or create conversation for audit
  */
-export async function getOrCreateAuditConversation(auditId: bigint, ficheId: string) {
+export async function getOrCreateAuditConversation(
+  auditId: bigint,
+  ficheId: string
+) {
   return await prisma.chatConversation.upsert({
     where: {
       ficheId_auditId: {
@@ -91,6 +94,3 @@ export async function getConversationHistory(conversationId: bigint) {
     orderBy: { timestamp: "asc" },
   });
 }
-
-
-

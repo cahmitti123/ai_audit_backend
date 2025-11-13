@@ -87,8 +87,10 @@ export async function transcribeFicheRecordings(
   const transcriptionService = new TranscriptionService(apiKey);
 
   // Transcribe recordings in parallel
-  console.log(`🚀 Starting parallel transcription of ${untranscribed.length} recordings...`);
-  
+  console.log(
+    `🚀 Starting parallel transcription of ${untranscribed.length} recordings...`
+  );
+
   const results = [];
   const failures: Array<{ callId: string; error: string }> = [];
   let completedCount = 0;
@@ -116,7 +118,7 @@ export async function transcribeFicheRecordings(
       if (!rec.recordingUrl) {
         const errorMsg = "No recording URL available";
         console.log(`  ⚠️  ${errorMsg}`);
-        
+
         // Send recording failed webhook
         await transcriptionWebhooks.recordingFailed(
           ficheId,
@@ -125,7 +127,7 @@ export async function transcribeFicheRecordings(
           i + 1,
           untranscribed.length
         );
-        
+
         return { success: false, callId: rec.callId, error: errorMsg };
       }
 
@@ -285,9 +287,11 @@ export async function batchTranscribeFiches(
   });
 
   const results = await Promise.all(transcriptionPromises);
-  
-  const successCount = results.filter(r => r.success).length;
-  console.log(`✅ Batch transcription complete: ${successCount}/${ficheIds.length} successful`);
+
+  const successCount = results.filter((r) => r.success).length;
+  console.log(
+    `✅ Batch transcription complete: ${successCount}/${ficheIds.length} successful`
+  );
 
   return results;
 }

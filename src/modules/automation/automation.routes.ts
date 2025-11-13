@@ -22,48 +22,27 @@ import {
 } from "./automation.repository.js";
 import { inngest } from "../../inngest/client.js";
 import { logger } from "../../shared/logger.js";
+import {
+  serializeBigInt,
+  jsonResponse,
+} from "../../shared/bigint-serializer.js";
 
 const router = Router();
 
 /**
- * Helper function to serialize BigInt fields to strings
+ * DEPRECATED: Use serializeBigInt from bigint-serializer.ts instead
+ * These are kept for backward compatibility but now use the universal serializer
  */
 function serializeSchedule(schedule: any) {
-  const { id, scheduleId, specificAuditConfigs, ...rest } = schedule;
-  return {
-    ...(id && { id: String(id) }),
-    ...(scheduleId && { scheduleId: String(scheduleId) }),
-    // Always include specificAuditConfigs, even if it's an empty array
-    specificAuditConfigs: specificAuditConfigs
-      ? specificAuditConfigs.map((configId: any) => String(configId))
-      : [],
-    ...rest,
-  };
+  return serializeBigInt(schedule);
 }
 
 function serializeRun(run: any) {
-  const { id, scheduleId, ...rest } = run;
-  return {
-    id: String(id),
-    scheduleId: String(scheduleId),
-    ...rest,
-    ...(run.logs && {
-      logs: run.logs.map((log: any) => ({
-        id: String(log.id),
-        runId: String(log.runId),
-        ...log,
-      })),
-    }),
-  };
+  return serializeBigInt(run);
 }
 
 function serializeLog(log: any) {
-  const { id, runId, ...rest } = log;
-  return {
-    id: String(id),
-    runId: String(runId),
-    ...rest,
-  };
+  return serializeBigInt(log);
 }
 
 /**
@@ -92,10 +71,14 @@ router.post("/schedules", async (req: Request, res: Response) => {
       name: schedule.name,
     });
 
-    res.status(201).json({
-      success: true,
-      data: serializeSchedule(schedule),
-    });
+    return jsonResponse(
+      res,
+      {
+        success: true,
+        data: serializeSchedule(schedule),
+      },
+      201
+    );
   } catch (error: any) {
     logger.error("Failed to create automation schedule", {
       error: error.message,
@@ -127,7 +110,7 @@ router.get("/schedules", async (req: Request, res: Response) => {
     const includeInactive = req.query.include_inactive === "true";
     const schedules = await getAllAutomationSchedules(includeInactive);
 
-    res.json({
+    return jsonResponse(res, {
       success: true,
       data: schedules.map(serializeSchedule),
       count: schedules.length,
@@ -173,8 +156,8 @@ router.get("/schedules/:id", async (req: Request, res: Response) => {
 
     // Enhanced response with diagnostic information
     const serialized = serializeSchedule(schedule);
-    
-    res.json({
+
+    return jsonResponse(res, {
       success: true,
       data: {
         ...serialized,
@@ -182,10 +165,12 @@ router.get("/schedules/:id", async (req: Request, res: Response) => {
         // Add diagnostic info for troubleshooting
         _diagnostic: {
           specificAuditConfigsCount: schedule.specificAuditConfigs?.length || 0,
-          specificAuditConfigsRaw: schedule.specificAuditConfigs,
+          specificAuditConfigsRaw: schedule.specificAuditConfigs
+            ? schedule.specificAuditConfigs.map((id: bigint) => String(id))
+            : [],
           useAutomaticAudits: schedule.useAutomaticAudits,
           runAudits: schedule.runAudits,
-        }
+        },
       },
     });
   } catch (error: any) {
@@ -224,7 +209,7 @@ router.patch("/schedules/:id", async (req: Request, res: Response) => {
       name: schedule.name,
     });
 
-    res.json({
+    return jsonResponse(res, {
       success: true,
       data: serializeSchedule(schedule),
     });
@@ -262,7 +247,7 @@ router.delete("/schedules/:id", async (req: Request, res: Response) => {
 
     logger.info("Automation schedule deleted", { id: String(id) });
 
-    res.json({
+    return jsonResponse(res, {
       success: true,
       message: "Schedule deleted successfully",
     });
@@ -302,8 +287,19 @@ router.post("/trigger", async (req: Request, res: Response) => {
   try {
     const data = TriggerAutomationSchema.parse(req.body);
 
+    logger.info("Triggering automation", {
+      schedule_id: data.scheduleId,
+      has_override: Boolean(data.overrideFicheSelection),
+      inngest_config: {
+        base_url: process.env.INNGEST_BASE_URL || "cloud",
+        is_dev: process.env.INNGEST_DEV,
+        has_event_key: Boolean(process.env.INNGEST_EVENT_KEY),
+        node_env: process.env.NODE_ENV,
+      },
+    });
+
     // Send event to Inngest
-    await inngest.send({
+    const result = await inngest.send({
       name: "automation/run" as "automation/run",
       data: {
         schedule_id: data.scheduleId,
@@ -311,19 +307,117 @@ router.post("/trigger", async (req: Request, res: Response) => {
       },
     });
 
-    logger.info("Automation triggered", {
+    logger.info("Automation triggered successfully", {
       schedule_id: data.scheduleId,
-      has_override: Boolean(data.overrideFicheSelection),
+      event_ids: result.ids,
     });
 
-    res.json({
+    return jsonResponse(res, {
       success: true,
       message: "Automation triggered successfully",
       schedule_id: data.scheduleId,
+      event_ids: result.ids,
     });
   } catch (error: any) {
-    logger.error("Failed to trigger automation", { error: error.message });
-    res.status(400).json({
+    logger.error("Failed to trigger automation", {
+      error: error.message,
+      error_stack: error.stack,
+      error_name: error.name,
+      error_cause: error.cause,
+      inngest_debug: {
+        base_url: process.env.INNGEST_BASE_URL,
+        is_dev: process.env.INNGEST_DEV,
+        has_event_key: Boolean(process.env.INNGEST_EVENT_KEY),
+        has_signing_key: Boolean(process.env.INNGEST_SIGNING_KEY),
+      },
+    });
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      debug: {
+        inngest_mode:
+          process.env.INNGEST_DEV === "1" ? "development" : "production",
+        inngest_configured: Boolean(
+          process.env.INNGEST_DEV === "1" || process.env.INNGEST_BASE_URL
+        ),
+      },
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/automation/diagnostic:
+ *   get:
+ *     summary: Get Inngest configuration diagnostic
+ *     tags: [Automation]
+ *     responses:
+ *       200:
+ *         description: Diagnostic information
+ */
+router.get("/diagnostic", async (req: Request, res: Response) => {
+  try {
+    const isDev =
+      process.env.INNGEST_DEV === "1" || process.env.NODE_ENV === "development";
+    const hasBaseUrl = Boolean(process.env.INNGEST_BASE_URL);
+    const hasEventKey = Boolean(process.env.INNGEST_EVENT_KEY);
+    const hasSigningKey = Boolean(process.env.INNGEST_SIGNING_KEY);
+
+    const mode = isDev ? "DEVELOPMENT" : hasBaseUrl ? "SELF-HOSTED" : "CLOUD";
+
+    let recommendations: string[] = [];
+    let warnings: string[] = [];
+
+    if (!isDev && !hasBaseUrl && !hasEventKey) {
+      warnings.push("⚠️ No Inngest configuration detected. Events will fail.");
+      recommendations.push(
+        "Set INNGEST_DEV=1 for local development (recommended)"
+      );
+      recommendations.push("OR set INNGEST_BASE_URL and keys for self-hosted");
+      recommendations.push("OR set INNGEST_EVENT_KEY for cloud");
+    }
+
+    if (mode === "DEVELOPMENT") {
+      recommendations.push(
+        "✅ Development mode enabled - Inngest works locally without external server"
+      );
+      recommendations.push("View dev UI at: http://localhost:3002/api/inngest");
+    }
+
+    if (mode === "SELF-HOSTED" && !hasSigningKey) {
+      warnings.push(
+        "⚠️ INNGEST_SIGNING_KEY not set (required for self-hosted)"
+      );
+      recommendations.push("Generate with: openssl rand -hex 32");
+    }
+
+    if (mode === "CLOUD" && !hasEventKey) {
+      warnings.push("⚠️ INNGEST_EVENT_KEY not set (required for cloud)");
+    }
+
+    return jsonResponse(res, {
+      success: true,
+      inngest: {
+        mode,
+        status: warnings.length === 0 ? "✅ CONFIGURED" : "⚠️ NEEDS ATTENTION",
+        configuration: {
+          isDev,
+          nodeEnv: process.env.NODE_ENV,
+          baseUrl: process.env.INNGEST_BASE_URL || null,
+          hasEventKey,
+          hasSigningKey,
+        },
+        recommendations,
+        warnings,
+      },
+      endpoints: {
+        inngest_ui: isDev ? "http://localhost:3002/api/inngest" : null,
+        trigger: "POST /api/automation/trigger",
+      },
+    });
+  } catch (error: any) {
+    logger.error("Failed to get diagnostic info", { error: error.message });
+    res.status(500).json({
       success: false,
       error: error.message,
     });
@@ -360,7 +454,7 @@ router.get("/schedules/:id/runs", async (req: Request, res: Response) => {
 
     const runs = await getAutomationRuns(id, limit, offset);
 
-    res.json({
+    return jsonResponse(res, {
       success: true,
       data: runs.map(serializeRun),
       count: runs.length,
@@ -402,7 +496,7 @@ router.get("/runs/:id", async (req: Request, res: Response) => {
       });
     }
 
-    res.json({
+    return jsonResponse(res, {
       success: true,
       data: serializeRun(run),
     });
@@ -440,7 +534,7 @@ router.get("/runs/:id/logs", async (req: Request, res: Response) => {
 
     const logs = await getAutomationLogs(id, level);
 
-    res.json({
+    return jsonResponse(res, {
       success: true,
       data: logs.map(serializeLog),
       count: logs.length,

@@ -13,7 +13,11 @@ import { getRecordingsByFiche } from "../recordings/recordings.repository.js";
 import { readFileSync, existsSync } from "fs";
 import { generateTimeline } from "../audits/audits.timeline.js";
 import { buildTimelineText } from "../audits/audits.prompts.js";
-import type { TimelineRecording, Transcription, ChatCitation } from "../../schemas.js";
+import type {
+  TimelineRecording,
+  Transcription,
+  ChatCitation,
+} from "../../schemas.js";
 
 const TRANSCRIPTION_CACHE_FILE = "./data/transcription_cache.json";
 
@@ -43,14 +47,17 @@ function parseRecordingMetadata(filename: string): {
   // Format: YYYYMMDD-HHMMSS-from-to.mp3
   const regex = /(\d{8})-(\d{6})-([^-]+)-([^.]+)\./;
   const match = filename.match(regex);
-  
+
   if (match) {
     const [, dateStr, timeStr, from, to] = match;
     // Parse: YYYYMMDD -> DD/MM/YYYY
-    const date = `${dateStr.slice(6, 8)}/${dateStr.slice(4, 6)}/${dateStr.slice(0, 4)}`;
+    const date = `${dateStr.slice(6, 8)}/${dateStr.slice(4, 6)}/${dateStr.slice(
+      0,
+      4
+    )}`;
     // Parse: HHMMSS -> HH:MM
     const time = `${timeStr.slice(0, 2)}:${timeStr.slice(2, 4)}`;
-    
+
     return {
       date,
       time,
@@ -58,7 +65,7 @@ function parseRecordingMetadata(filename: string): {
       to_number: to,
     };
   }
-  
+
   return null;
 }
 
@@ -75,7 +82,10 @@ interface FicheContextResult {
 /**
  * Build context for audit-specific chat
  */
-export async function buildAuditContext(auditId: bigint, ficheId: string): Promise<AuditContextResult> {
+export async function buildAuditContext(
+  auditId: bigint,
+  ficheId: string
+): Promise<AuditContextResult> {
   const [audit, fiche, recordings] = await Promise.all([
     getAuditById(auditId),
     getCachedFiche(ficheId),
@@ -111,7 +121,7 @@ export async function buildAuditContext(auditId: bigint, ficheId: string): Promi
       const cachedTranscription = transcriptionCache[rec.recordingUrl];
       if (cachedTranscription) {
         // Parse recording metadata from filename
-        const urlParts = rec.recordingUrl.split('/');
+        const urlParts = rec.recordingUrl.split("/");
         const filename = urlParts[urlParts.length - 1];
         const parsed = parseRecordingMetadata(filename);
 
@@ -140,22 +150,31 @@ export async function buildAuditContext(auditId: bigint, ficheId: string): Promi
 
 **Fiche Information:**
 - ID: ${ficheId}
-- Prospect: ${ficheData.prospect?.prenom || ''} ${ficheData.prospect?.nom || ''}
-- Groupe: ${ficheData.information?.groupe || 'N/A'}
+- Prospect: ${ficheData.prospect?.prenom || ""} ${ficheData.prospect?.nom || ""}
+- Groupe: ${ficheData.information?.groupe || "N/A"}
 - Recordings: ${recordings.length} total (${transcriptions.length} transcribed)
 
 **Audit Results:**
-- Config: ${auditData.audit?.config?.name || 'N/A'}
+- Config: ${auditData.audit?.config?.name || "N/A"}
 - Score: ${audit.scorePercentage}% - ${audit.niveau}
 - Compliant: ${audit.isCompliant ? "YES" : "NO"}
 - Critical Points: ${audit.criticalPassed}/${audit.criticalTotal}
-- Steps: ${audit.successfulSteps || 0} successful, ${audit.failedSteps || 0} failed
+- Steps: ${audit.successfulSteps || 0} successful, ${
+      audit.failedSteps || 0
+    } failed
 - Tokens Used: ${audit.totalTokens?.toLocaleString() || 0}
 
 **Step Results:**
-${auditData.audit?.results?.steps?.map((s, i) => 
-  `${i + 1}. ${s.step_metadata?.name || 'Unknown'}: ${s.conforme || 'N/A'} (${s.score || 0}/${s.step_metadata?.weight || 0})`
-).join('\n') || 'No step results'}
+${
+  auditData.audit?.results?.steps
+    ?.map(
+      (s, i) =>
+        `${i + 1}. ${s.step_metadata?.name || "Unknown"}: ${
+          s.conforme || "N/A"
+        } (${s.score || 0}/${s.step_metadata?.weight || 0})`
+    )
+    .join("\n") || "No step results"
+}
 
 ${timelineText}
 
@@ -192,7 +211,9 @@ ALWAYS include citations when referencing specific moments.`,
 /**
  * Build context for fiche-level chat
  */
-export async function buildFicheContext(ficheId: string): Promise<FicheContextResult> {
+export async function buildFicheContext(
+  ficheId: string
+): Promise<FicheContextResult> {
   const [fiche, recordings, audits] = await Promise.all([
     getCachedFiche(ficheId),
     getRecordingsByFiche(ficheId),
@@ -206,7 +227,12 @@ export async function buildFicheContext(ficheId: string): Promise<FicheContextRe
   if (!fiche) throw new Error("Fiche not found");
 
   const ficheData = fiche.rawData as {
-    prospect?: { prenom?: string; nom?: string; mail?: string; telephone?: string };
+    prospect?: {
+      prenom?: string;
+      nom?: string;
+      mail?: string;
+      telephone?: string;
+    };
     information?: { groupe?: string };
   };
 
@@ -219,7 +245,7 @@ export async function buildFicheContext(ficheId: string): Promise<FicheContextRe
       const cachedTranscription = transcriptionCache[rec.recordingUrl];
       if (cachedTranscription) {
         // Parse recording metadata from filename
-        const urlParts = rec.recordingUrl.split('/');
+        const urlParts = rec.recordingUrl.split("/");
         const filename = urlParts[urlParts.length - 1];
         const parsed = parseRecordingMetadata(filename);
 
@@ -243,17 +269,20 @@ export async function buildFicheContext(ficheId: string): Promise<FicheContextRe
   const timeline = generateTimeline(transcriptions);
   const timelineText = buildTimelineText(timeline);
 
-  const totalDuration = recordings.reduce((sum, r) => sum + (r.durationSeconds || 0), 0);
-  
+  const totalDuration = recordings.reduce(
+    (sum, r) => sum + (r.durationSeconds || 0),
+    0
+  );
+
   return {
     systemPrompt: `You are an expert audit analyst helping review a client fiche and its audits.
 
 **Fiche Information:**
 - ID: ${ficheId}
-- Prospect: ${ficheData.prospect?.prenom || ''} ${ficheData.prospect?.nom || ''}
-- Email: ${ficheData.prospect?.mail || 'N/A'}
-- Phone: ${ficheData.prospect?.telephone || 'N/A'}
-- Groupe: ${ficheData.information?.groupe || 'N/A'}
+- Prospect: ${ficheData.prospect?.prenom || ""} ${ficheData.prospect?.nom || ""}
+- Email: ${ficheData.prospect?.mail || "N/A"}
+- Phone: ${ficheData.prospect?.telephone || "N/A"}
+- Groupe: ${ficheData.information?.groupe || "N/A"}
 
 **Recordings:**
 - Total: ${recordings.length}
@@ -263,15 +292,23 @@ export async function buildFicheContext(ficheId: string): Promise<FicheContextRe
 ${timelineText}
 
 **Audits History:**
-${audits.length > 0 
-  ? audits.map((a, i) => {
-      const auditData = a.resultData as { audit?: { config?: { name?: string } } };
-      return `${i + 1}. ${auditData.audit?.config?.name || 'Unknown'} - ${a.scorePercentage}% (${a.niveau})
-   - Date: ${a.createdAt.toISOString().split('T')[0]}
+${
+  audits.length > 0
+    ? audits
+        .map((a, i) => {
+          const auditData = a.resultData as {
+            audit?: { config?: { name?: string } };
+          };
+          return `${i + 1}. ${auditData.audit?.config?.name || "Unknown"} - ${
+            a.scorePercentage
+          }% (${a.niveau})
+   - Date: ${a.createdAt.toISOString().split("T")[0]}
    - Compliant: ${a.isCompliant ? "YES" : "NO"}
    - Critical: ${a.criticalPassed}/${a.criticalTotal}`;
-    }).join('\n')
-  : 'No audits performed yet'}
+        })
+        .join("\n")
+    : "No audits performed yet"
+}
 
 **IMPORTANT: When referencing specific moments in the recordings, you MUST include structured citations using this EXACT JSON format:**
 
@@ -306,7 +343,10 @@ ALWAYS include citations when referencing specific moments.`,
 /**
  * Extract citations from AI response text
  */
-export function extractCitations(text: string, timeline: TimelineRecording[]): ChatCitation[] {
+export function extractCitations(
+  text: string,
+  timeline: TimelineRecording[]
+): ChatCitation[] {
   const citations: ChatCitation[] = [];
   const citationRegex = /\[CITATION:(\{[^}]+\})\]/g;
   let match;
@@ -319,7 +359,7 @@ export function extractCitations(text: string, timeline: TimelineRecording[]): C
   while ((match = citationRegex.exec(text)) !== null) {
     try {
       const citationData = JSON.parse(match[1]);
-      
+
       // Enrich with recording URL from timeline
       const recordingMeta = timelineMap.get(citationData.recording_index);
       if (recordingMeta) {
@@ -345,7 +385,7 @@ export function extractCitations(text: string, timeline: TimelineRecording[]): C
  * Remove citation markers from text
  */
 export function removeCitationMarkers(text: string): string {
-  return text.replace(/\[CITATION:\{[^}]+\}\]/g, '');
+  return text.replace(/\[CITATION:\{[^}]+\}\]/g, "");
 }
 
 interface ChatStreamResult {
@@ -386,7 +426,9 @@ export async function createChatStream(
     return fullResponse;
   })();
 
-  const citationsPromise = fullTextPromise.then((text) => extractCitations(text, timeline));
+  const citationsPromise = fullTextPromise.then((text) =>
+    extractCitations(text, timeline)
+  );
 
   return {
     textStream: result.textStream,

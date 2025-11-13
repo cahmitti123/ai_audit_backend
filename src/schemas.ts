@@ -148,6 +148,32 @@ export const EnhancedQuerySchema = z.object({
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// CHAT TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const ChatCitationSchema = z.object({
+  texte: z.string().describe("Quoted text from the conversation"),
+  minutage: z.string().describe("Timestamp in MM:SS format"),
+  minutage_secondes: z.number().describe("Timestamp in seconds"),
+  speaker: z.string().describe("Speaker ID (speaker_0, speaker_1, etc.)"),
+  recording_index: z.number().int().describe("Recording index (0-based)"),
+  chunk_index: z.number().int().describe("Chunk index (0-based)"),
+  recording_date: z.string().describe("Recording date DD/MM/YYYY"),
+  recording_time: z.string().describe("Recording time HH:MM"),
+  recording_url: z.string().describe("URL of the recording"),
+});
+
+export type ChatCitation = z.infer<typeof ChatCitationSchema>;
+
+export const ChatMessageSchema = z.object({
+  role: z.enum(["user", "assistant", "system"]),
+  content: z.string(),
+  citations: z.array(ChatCitationSchema).optional(),
+});
+
+export type ChatMessage = z.infer<typeof ChatMessageSchema>;
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // AUTOMATION TYPES
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -201,7 +227,17 @@ export const AutomationScheduleCreateSchema = z.object({
   // Audit Configuration
   runAudits: z.boolean().default(true),
   useAutomaticAudits: z.boolean().default(true),
-  specificAuditConfigs: z.array(z.number().int()).optional(),
+  specificAuditConfigs: z.preprocess(
+    (val) => {
+      if (!val || !Array.isArray(val)) return undefined;
+      // Convert strings to numbers (handles BigInt serialization)
+      return val.map((id: any) => {
+        if (typeof id === 'string') return parseInt(id, 10);
+        return id;
+      });
+    },
+    z.array(z.number().int()).optional()
+  ),
 
   // Error Handling
   continueOnError: z.boolean().default(true),
@@ -211,8 +247,14 @@ export const AutomationScheduleCreateSchema = z.object({
   // Notifications
   notifyOnComplete: z.boolean().default(true),
   notifyOnError: z.boolean().default(true),
-  webhookUrl: z.string().url().optional(),
-  notifyEmails: z.array(z.string().email()).optional(),
+  webhookUrl: z.preprocess(
+    (val) => (!val || val === "" ? undefined : val),
+    z.string().url().optional()
+  ),
+  notifyEmails: z.preprocess((val) => {
+    if (!val || !Array.isArray(val)) return [];
+    return val.filter((email: any) => email && email.trim() !== "");
+  }, z.array(z.string().email()).optional()),
 
   // External API
   externalApiKey: z.string().optional(),

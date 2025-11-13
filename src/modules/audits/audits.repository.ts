@@ -87,17 +87,7 @@ export async function getAuditsByFiche(
           description: true,
         },
       },
-      stepResults: includeDetails
-        ? {
-            include: {
-              controlPoints: {
-                include: {
-                  citations: true,
-                },
-              },
-            },
-          }
-        : true,
+      stepResults: true,
     },
     orderBy: {
       createdAt: "desc",
@@ -121,14 +111,6 @@ export async function getAuditById(auditId: bigint) {
         },
       },
       stepResults: {
-        include: {
-          controlPoints: {
-            include: {
-              citations: true,
-            },
-          },
-          citations: true,
-        },
         orderBy: {
           stepPosition: "asc",
         },
@@ -343,8 +325,8 @@ export async function getAuditsGroupedByFiches(
       auditOrderBy.createdAt = sortOrder;
   }
 
-  // Fetch fiches with their audits
-  const [fiches, totalFiches] = await Promise.all([
+  // Fetch ALL fiches with their audits (we'll sort and paginate in memory)
+  const [allFiches, totalFiches] = await Promise.all([
     prisma.ficheCache.findMany({
       where: ficheWhere,
       include: {
@@ -375,51 +357,67 @@ export async function getAuditsGroupedByFiches(
           orderBy: auditOrderBy,
         },
       },
-      orderBy: {
-        createdAt: "desc",
-      },
-      take: limit,
-      skip: offset,
     }),
     prisma.ficheCache.count({ where: ficheWhere }),
   ]);
 
-  // Transform to desired format
-  const result = fiches.map((fiche) => ({
-    fiche: {
-      id: fiche.id,
-      ficheId: fiche.ficheId,
-      groupe: fiche.groupe,
-      agenceNom: fiche.agenceNom,
-      prospectNom: fiche.prospectNom,
-      prospectPrenom: fiche.prospectPrenom,
-      prospectEmail: fiche.prospectEmail,
-      prospectTel: fiche.prospectTel,
-      hasRecordings: fiche.hasRecordings,
-      recordingsCount: fiche.recordingsCount,
-      fetchedAt: fiche.fetchedAt,
-      createdAt: fiche.createdAt,
-      updatedAt: fiche.updatedAt,
-    },
-    audits: fiche.audits,
-    summary: {
-      totalAudits: fiche.audits.length,
-      compliantCount: fiche.audits.filter((a) => a.isCompliant).length,
-      averageScore:
-        fiche.audits.length > 0
-          ? fiche.audits.reduce(
-              (sum, a) => sum + Number(a.scorePercentage),
-              0
-            ) / fiche.audits.length
-          : 0,
-      latestAuditDate:
-        fiche.audits.length > 0
-          ? fiche.audits.sort(
-              (a, b) => b.createdAt.getTime() - a.createdAt.getTime()
-            )[0].createdAt
-          : null,
-    },
-  }));
+  // Transform to desired format with latest audit date
+  const fichesWithLatestAudit = allFiches.map((fiche) => {
+    const latestAuditDate =
+      fiche.audits.length > 0
+        ? fiche.audits.reduce((latest, audit) => {
+            return audit.createdAt > latest ? audit.createdAt : latest;
+          }, fiche.audits[0].createdAt)
+        : null;
+
+    return {
+      fiche: {
+        id: fiche.id,
+        ficheId: fiche.ficheId,
+        groupe: fiche.groupe,
+        agenceNom: fiche.agenceNom,
+        prospectNom: fiche.prospectNom,
+        prospectPrenom: fiche.prospectPrenom,
+        prospectEmail: fiche.prospectEmail,
+        prospectTel: fiche.prospectTel,
+        hasRecordings: fiche.hasRecordings,
+        recordingsCount: fiche.recordingsCount,
+        fetchedAt: fiche.fetchedAt,
+        createdAt: fiche.createdAt,
+        updatedAt: fiche.updatedAt,
+      },
+      audits: fiche.audits,
+      summary: {
+        totalAudits: fiche.audits.length,
+        compliantCount: fiche.audits.filter((a) => a.isCompliant).length,
+        averageScore:
+          fiche.audits.length > 0
+            ? fiche.audits.reduce(
+                (sum, a) => sum + Number(a.scorePercentage),
+                0
+              ) / fiche.audits.length
+            : 0,
+        latestAuditDate,
+      },
+      _latestAuditTime: latestAuditDate?.getTime() || 0,
+    };
+  });
+
+  // Sort by latest audit date (most recent first)
+  fichesWithLatestAudit.sort((a, b) => {
+    // Fiches with audits come before fiches without audits
+    if (a._latestAuditTime === 0 && b._latestAuditTime === 0) return 0;
+    if (a._latestAuditTime === 0) return 1;
+    if (b._latestAuditTime === 0) return -1;
+    // Sort by most recent audit first
+    return b._latestAuditTime - a._latestAuditTime;
+  });
+
+  // Apply pagination after sorting
+  const paginatedFiches = fichesWithLatestAudit.slice(offset, offset + limit);
+
+  // Remove the temporary sorting field
+  const result = paginatedFiches.map(({ _latestAuditTime, ...fiche }) => fiche);
 
   return {
     data: result,

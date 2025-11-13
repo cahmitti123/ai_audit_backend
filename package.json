@@ -12,6 +12,8 @@
     "inngest": "npx inngest-cli@latest dev -u http://localhost:3002/api/inngest",
     "test:api": "tsx scripts/test-api-endpoints.ts",
     "test:audits": "tsx scripts/test-all-audit-endpoints.ts",
+    "generate:types": "tsx scripts/generate-endpoint-types.ts",
+    "generate:types:fallback": "tsx scripts/generate-endpoint-types-fallback.ts",
     "test:inngest": "tsx scripts/trigger-inngest-test.ts",
     "test:webhooks": "tsx scripts/test-webhooks.ts",
     "test:transcription-webhooks": "tsx scripts/test-transcription-webhooks.ts",

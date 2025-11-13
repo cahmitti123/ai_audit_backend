@@ -218,18 +218,23 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
   );
   console.log(`✓ Transcriptions completed: ${transcriptions.length}`);
 
-  // Update database with transcription IDs
+  // Update database with transcription IDs in parallel
   if (ficheCache) {
-    for (const t of transcriptions) {
-      if (t.transcription_id && t.call_id) {
-        await updateRecordingTranscription(
+    const dbUpdatePromises = transcriptions
+      .filter((t) => t.transcription_id && t.call_id)
+      .map((t) =>
+        updateRecordingTranscription(
           ficheCache.id,
-          t.call_id,
-          t.transcription_id
-        );
-      }
-    }
-    console.log(`✓ Transcription IDs saved to database`);
+          t.call_id!,
+          t.transcription_id!,
+          t.transcription.text
+        )
+      );
+
+    await Promise.all(dbUpdatePromises);
+    console.log(
+      `✓ ${dbUpdatePromises.length} transcription IDs and text saved to database`
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

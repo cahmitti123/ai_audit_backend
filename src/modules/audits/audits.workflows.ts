@@ -66,10 +66,17 @@ export const runAuditFunction = inngest.createFunction(
   { event: "audit/run" },
   async ({ event, step, logger }): Promise<AuditFunctionResult> => {
     const { fiche_id, audit_config_id, user_id } = event.data;
-    const startTime = Date.now();
-
-    // Generate consistent audit ID for tracking
-    const auditId = `audit-${fiche_id}-${audit_config_id}-${Date.now()}`;
+    // Capture start time in a step to persist it across Inngest checkpoints
+    const { startTime, auditId } = await step.run(
+      "capture-start-time",
+      async (): Promise<{ startTime: number; auditId: string }> => {
+        const now = Date.now();
+        return {
+          startTime: now,
+          auditId: `audit-${fiche_id}-${audit_config_id}-${now}`,
+        };
+      }
+    );
 
     logger.info("Starting audit", {
       audit_id: auditId,
@@ -708,9 +715,9 @@ export const runAuditFunction = inngest.createFunction(
           ),
         },
         metadata: {
-          started_at: new Date(startTime).toISOString(),
+          started_at: new Date(startTime!).toISOString(),
           completed_at: new Date().toISOString(),
-          duration_ms: Date.now() - startTime,
+          duration_ms: Date.now() - startTime!,
         },
       };
 
@@ -724,7 +731,7 @@ export const runAuditFunction = inngest.createFunction(
       return saved;
     });
 
-    const duration = Date.now() - startTime;
+    const duration = Date.now() - startTime!;
     const durationSeconds = Math.round(duration / 1000);
     const savedAuditId = savedAudit?.id ? String(savedAudit.id) : "unknown";
 
@@ -804,8 +811,18 @@ export const batchAuditFunction = inngest.createFunction(
   async ({ event, step, logger }): Promise<BatchAuditResult> => {
     const { fiche_ids, audit_config_id, user_id } = event.data;
     const defaultAuditConfigId = audit_config_id || DEFAULT_AUDIT_CONFIG_ID;
-    const batchId = `batch-${Date.now()}`;
-    const startTime = Date.now();
+
+    // Capture start time in a step to persist it across Inngest checkpoints
+    const { startTime, batchId } = await step.run(
+      "capture-batch-start-time",
+      async (): Promise<{ startTime: number; batchId: string }> => {
+        const now = Date.now();
+        return {
+          startTime: now,
+          batchId: `batch-${now}`,
+        };
+      }
+    );
 
     logger.info("Starting batch audit", {
       total: fiche_ids.length,
@@ -844,6 +861,9 @@ export const batchAuditFunction = inngest.createFunction(
       match: "data.audit_config_id",
     });
 
+    // Calculate batch duration
+    const batchDuration = Date.now() - startTime!;
+
     // Count results
     const results = (await step.run("count-results", async () => {
       return {
@@ -853,7 +873,7 @@ export const batchAuditFunction = inngest.createFunction(
       };
     })) as unknown as { total: number; succeeded: number; failed: number };
 
-    const duration = Date.now() - startTime;
+    const duration = batchDuration; // Use pre-calculated duration
 
     // Send batch completion webhook
     await step.run("send-batch-completion-webhook", async () => {

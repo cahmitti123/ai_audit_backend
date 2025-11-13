@@ -57,7 +57,11 @@ export const transcribeFicheFunction = inngest.createFunction(
 
     for (const evt of events) {
       const { fiche_id, priority = "normal" } = evt.data;
-      const startTime = Date.now();
+
+      // Capture start time in a step to persist it across Inngest checkpoints
+      const startTime = await step.run(`capture-start-time-${fiche_id}`, async (): Promise<number> => {
+        return Date.now();
+      });
 
       // Validate API key at function level (non-retriable error)
       const apiKey = process.env.ELEVENLABS_API_KEY;

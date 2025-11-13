@@ -40,7 +40,6 @@ export async function getCachedFiche(ficheId: string) {
     cached_count: cached.recordingsCount,
   });
 
-  
   return {
     ...cached,
     rawData,
@@ -109,7 +108,8 @@ async function storeRecordings(ficheCacheId: bigint, recordings: unknown[]) {
     count: recordings.length,
   });
 
-  for (const rec of recordings) {
+  // Store all recordings in parallel for better performance
+  const upsertPromises = recordings.map((rec) => {
     const recording = rec as {
       call_id: string;
       recording_url?: string;
@@ -128,7 +128,7 @@ async function storeRecordings(ficheCacheId: bigint, recordings: unknown[]) {
 
     const parsed = recording.parsed;
 
-    await prisma.recording.upsert({
+    return prisma.recording.upsert({
       where: {
         ficheCacheId_callId: {
           ficheCacheId,
@@ -163,28 +163,71 @@ async function storeRecordings(ficheCacheId: bigint, recordings: unknown[]) {
         durationSeconds: recording.duration_seconds || null,
       },
     });
-  }
+  });
 
-  logger.debug("Recordings stored", {
+  await Promise.all(upsertPromises);
+
+  logger.debug("Recordings stored in parallel", {
     fiche_cache_id: String(ficheCacheId),
     count: recordings.length,
   });
 }
 
 /**
- * Delete expired cache entries
+ * Delete expired cache entries (only those without associated audits)
+ * Only deletes caches that have been expired for over 1 week
  */
 export async function deleteExpiredCaches() {
   logger.info("Cleaning up expired caches");
 
-  const result = await prisma.ficheCache.deleteMany({
+  // Calculate date 1 week ago
+  const oneWeekAgo = new Date();
+  oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+
+  // Find expired caches that have NO audits (expired over 1 week ago)
+  const expiredCaches = await prisma.ficheCache.findMany({
     where: {
       expiresAt: {
-        lt: new Date(),
+        lt: oneWeekAgo,
+      },
+    },
+    include: {
+      _count: {
+        select: {
+          audits: true,
+        },
       },
     },
   });
 
-  logger.info("Expired caches deleted", { count: result.count });
+  logger.info("Found expired caches", {
+    total: expiredCaches.length,
+    with_audits: expiredCaches.filter((c) => c._count.audits > 0).length,
+    without_audits: expiredCaches.filter((c) => c._count.audits === 0).length,
+  });
+
+  // Only delete caches that have no audits
+  const cacheIdsToDelete = expiredCaches
+    .filter((cache) => cache._count.audits === 0)
+    .map((cache) => cache.id);
+
+  if (cacheIdsToDelete.length === 0) {
+    logger.info("No expired caches to delete (all have audit records)");
+    return 0;
+  }
+
+  const result = await prisma.ficheCache.deleteMany({
+    where: {
+      id: {
+        in: cacheIdsToDelete,
+      },
+    },
+  });
+
+  logger.info("Expired caches deleted", {
+    count: result.count,
+    skipped: expiredCaches.length - result.count,
+  });
+
   return result.count;
 }

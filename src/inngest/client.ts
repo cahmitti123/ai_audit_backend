@@ -11,6 +11,7 @@ import { Inngest, EventSchemas } from "inngest";
 import type { FichesEvents } from "../modules/fiches/fiches.events.js";
 import type { TranscriptionsEvents } from "../modules/transcriptions/transcriptions.events.js";
 import type { AuditsEvents } from "../modules/audits/audits.events.js";
+import type { AutomationEvents } from "../modules/automation/automation.events.js";
 
 /**
  * Combined Event Type Definitions
@@ -33,6 +34,11 @@ type Events = {
   "audit/failed": { data: AuditsEvents["audit/failed"] };
   "audit/batch": { data: AuditsEvents["audit/batch"] };
   "audit/batch.completed": { data: AuditsEvents["audit/batch.completed"] };
+
+  // Automation domain events
+  "automation/run": { data: AutomationEvents["automation/run"] };
+  "automation/completed": { data: AutomationEvents["automation/completed"] };
+  "automation/failed": { data: AutomationEvents["automation/failed"] };
 };
 
 /**

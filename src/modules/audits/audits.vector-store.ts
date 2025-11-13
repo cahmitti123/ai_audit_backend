@@ -82,6 +82,9 @@ export async function searchVectorStore(
     const results: VectorSearchResult[] = [];
 
     // Extract content and citations
+    // Collect all file retrieval promises for parallel execution
+    const fileRetrievalPromises: Promise<VectorSearchResult | null>[] = [];
+
     for (const message of messages.data) {
       if (message.role === "assistant" && message.content) {
         for (const content of message.content) {
@@ -89,25 +92,27 @@ export async function searchVectorStore(
             // Extract annotations (citations)
             const annotations = content.text.annotations || [];
 
+            // Process annotations in parallel
             for (const annotation of annotations) {
               if (
                 annotation.type === "file_citation" &&
                 annotation.file_citation
               ) {
-                try {
-                  const file = await openai.files.retrieve(
-                    annotation.file_citation.file_id
-                  );
-                  results.push({
+                const promise = openai.files
+                  .retrieve(annotation.file_citation.file_id)
+                  .then((file) => ({
                     content: content.text.value,
                     file_name: file.filename,
                     metadata: {
                       file_id: file.id,
                     },
+                  }))
+                  .catch((error) => {
+                    console.error("Error retrieving file:", error);
+                    return null;
                   });
-                } catch (error) {
-                  console.error("Error retrieving file:", error);
-                }
+                
+                fileRetrievalPromises.push(promise);
               }
             }
 
@@ -121,6 +126,10 @@ export async function searchVectorStore(
         }
       }
     }
+
+    // Wait for all file retrievals to complete in parallel
+    const fileResults = await Promise.all(fileRetrievalPromises);
+    results.push(...fileResults.filter((r): r is VectorSearchResult => r !== null));
 
     // Cleanup
     await openai.beta.assistants.del(assistant.id);
@@ -140,28 +149,31 @@ export async function searchVectorStore(
 export async function getProductVerificationContext(
   step: any
 ): Promise<ProductVerificationContext[]> {
-  const contexts: ProductVerificationContext[] = [];
-
   console.log(
     `\n🔍 Retrieving product verification context for step: ${step.name}`
   );
+  console.log(`🚀 Processing ${step.controlPoints.length} checkpoints in parallel...`);
 
-  for (const checkpoint of step.controlPoints) {
+  // Process all checkpoints in parallel for maximum speed
+  const contextPromises = step.controlPoints.map(async (checkpoint: string, index: number) => {
     // Build search query combining step context and checkpoint
     const searchQuery = buildProductSearchQuery(step, checkpoint);
+
+    // Small staggered delay to avoid overwhelming the API (0ms, 50ms, 100ms, etc.)
+    await new Promise((resolve) => setTimeout(resolve, index * 50));
 
     // Search vector store
     const relevantDocs = await searchVectorStore(searchQuery, 3);
 
-    contexts.push({
+    return {
       checkpointName: checkpoint,
       relevantDocumentation: relevantDocs,
       searchQuery,
-    });
+    };
+  });
 
-    // Add small delay to avoid rate limits
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+  const contexts = await Promise.all(contextPromises);
+  console.log(`✅ Retrieved context for ${contexts.length} checkpoints`);
 
   return contexts;
 }

@@ -29,10 +29,14 @@ const router = Router();
  * Helper function to serialize BigInt fields to strings
  */
 function serializeSchedule(schedule: any) {
-  const { id, scheduleId, ...rest } = schedule;
+  const { id, scheduleId, specificAuditConfigs, ...rest } = schedule;
   return {
     ...(id && { id: String(id) }),
     ...(scheduleId && { scheduleId: String(scheduleId) }),
+    // Always include specificAuditConfigs, even if it's an empty array
+    specificAuditConfigs: specificAuditConfigs
+      ? specificAuditConfigs.map((configId: any) => String(configId))
+      : [],
     ...rest,
   };
 }
@@ -96,7 +100,7 @@ router.post("/schedules", async (req: Request, res: Response) => {
     logger.error("Failed to create automation schedule", {
       error: error.message,
     });
-    res.status(400).json({
+    return res.status(400).json({
       success: false,
       error: error.message,
     });
@@ -167,11 +171,21 @@ router.get("/schedules/:id", async (req: Request, res: Response) => {
       });
     }
 
+    // Enhanced response with diagnostic information
+    const serialized = serializeSchedule(schedule);
+    
     res.json({
       success: true,
       data: {
-        ...serializeSchedule(schedule),
+        ...serialized,
         runs: schedule.runs?.map(serializeRun),
+        // Add diagnostic info for troubleshooting
+        _diagnostic: {
+          specificAuditConfigsCount: schedule.specificAuditConfigs?.length || 0,
+          specificAuditConfigsRaw: schedule.specificAuditConfigs,
+          useAutomaticAudits: schedule.useAutomaticAudits,
+          runAudits: schedule.runAudits,
+        }
       },
     });
   } catch (error: any) {
@@ -290,11 +304,11 @@ router.post("/trigger", async (req: Request, res: Response) => {
 
     // Send event to Inngest
     await inngest.send({
-      name: "automation/run" as any,
+      name: "automation/run" as "automation/run",
       data: {
         schedule_id: data.scheduleId,
         override_fiche_selection: data.overrideFicheSelection,
-      } as any,
+      },
     });
 
     logger.info("Automation triggered", {

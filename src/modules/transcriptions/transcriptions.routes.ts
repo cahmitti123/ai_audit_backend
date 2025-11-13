@@ -104,6 +104,109 @@ transcriptionsRouter.get(
 
 /**
  * @swagger
+ * /api/transcriptions/{fiche_id}/recordings/{call_id}:
+ *   get:
+ *     tags: [Transcriptions]
+ *     summary: Get transcription for a specific recording
+ *     parameters:
+ *       - in: path
+ *         name: fiche_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: call_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Recording transcription data
+ *       404:
+ *         description: Recording or transcription not found
+ */
+transcriptionsRouter.get(
+  "/:fiche_id/recordings/:call_id",
+  async (req: Request, res: Response) => {
+    try {
+      const { fiche_id, call_id } = req.params;
+      
+      const { prisma } = await import("../../shared/prisma.js");
+      const { readFileSync, existsSync } = await import("fs");
+
+      // Get recording from DB
+      const recording = await prisma.recording.findFirst({
+        where: {
+          ficheCache: { ficheId: fiche_id },
+          callId: call_id,
+        },
+      });
+
+      if (!recording) {
+        return res.status(404).json({
+          success: false,
+          error: "Recording not found",
+        });
+      }
+
+      if (!recording.hasTranscription) {
+        return res.status(404).json({
+          success: false,
+          error: "No transcription available for this recording",
+        });
+      }
+
+      // Try DB first, then file cache fallback
+      let transcriptionData;
+      
+      if (recording.transcriptionText) {
+        transcriptionData = {
+          text: recording.transcriptionText,
+          language_code: "fr",
+          words: [],
+        };
+      } else if (recording.recordingUrl) {
+        // Fallback to file cache
+        const CACHE_FILE = "./data/transcription_cache.json";
+        if (existsSync(CACHE_FILE)) {
+          const cache = JSON.parse(readFileSync(CACHE_FILE, "utf-8"));
+          const cached = cache[recording.recordingUrl];
+          if (cached) {
+            transcriptionData = cached.transcription;
+          }
+        }
+      }
+
+      if (!transcriptionData) {
+        return res.status(404).json({
+          success: false,
+          error: "Transcription data not found in DB or cache",
+        });
+      }
+
+      res.json({
+        success: true,
+        data: {
+          call_id: recording.callId,
+          recording_url: recording.recordingUrl,
+          duration_seconds: recording.durationSeconds,
+          transcription_id: recording.transcriptionId,
+          transcription: transcriptionData,
+          has_transcription: true,
+        },
+      });
+    } catch (error: any) {
+      res.status(500).json({
+        success: false,
+        error: "Failed to get transcription",
+        message: error.message,
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
  * /api/transcriptions/batch:
  *   post:
  *     tags: [Transcriptions]

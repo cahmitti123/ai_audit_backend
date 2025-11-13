@@ -108,7 +108,7 @@ export async function updateAutomationSchedule(
       ...(data.useAutomaticAudits !== undefined && {
         useAutomaticAudits: data.useAutomaticAudits,
       }),
-      ...(data.specificAuditConfigs && {
+      ...(data.specificAuditConfigs !== undefined && {
         specificAuditConfigs: data.specificAuditConfigs,
       }),
       ...(data.continueOnError !== undefined && {

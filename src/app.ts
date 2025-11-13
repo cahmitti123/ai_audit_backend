@@ -22,6 +22,7 @@ import { auditConfigsRouter } from "./modules/audit-configs/index.js";
 import { auditsRouter } from "./modules/audits/index.js";
 import { webhooksRoutes } from "./modules/webhooks/index.js";
 import { automationRoutes } from "./modules/automation/index.js";
+import { chatRouter } from "./modules/chat/index.js";
 
 // Config
 import { swaggerSpec } from "./config/swagger.js";
@@ -78,6 +79,7 @@ export function createApp() {
   app.use("/api/audits", auditsRouter);
   app.use("/api/webhooks", webhooksRoutes);
   app.use("/api/automation", automationRoutes);
+  app.use("/api", chatRouter);
 
   return app;
 }

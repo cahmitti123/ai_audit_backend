@@ -86,31 +86,37 @@ export async function transcribeFicheRecordings(
   // Initialize transcription service
   const transcriptionService = new TranscriptionService(apiKey);
 
-  // Transcribe each recording
+  // Transcribe recordings in parallel
+  console.log(`🚀 Starting parallel transcription of ${untranscribed.length} recordings...`);
+  
   const results = [];
   const failures: Array<{ callId: string; error: string }> = [];
+  let completedCount = 0;
 
-  for (let i = 0; i < untranscribed.length; i++) {
-    const rec = untranscribed[i];
+  // Send all recording started webhooks
+  await Promise.all(
+    untranscribed.map((rec, i) =>
+      transcriptionWebhooks.recordingStarted(
+        ficheId,
+        rec.callId,
+        i + 1,
+        untranscribed.length,
+        rec.recordingUrl || undefined
+      )
+    )
+  );
+
+  // Process transcriptions in parallel
+  const transcriptionPromises = untranscribed.map(async (rec, i) => {
     console.log(
       `[${i + 1}/${untranscribed.length}] Transcribing ${rec.callId}...`
-    );
-
-    // Send recording started webhook
-    await transcriptionWebhooks.recordingStarted(
-      ficheId,
-      rec.callId,
-      i + 1,
-      untranscribed.length,
-      rec.recordingUrl || undefined
     );
 
     try {
       if (!rec.recordingUrl) {
         const errorMsg = "No recording URL available";
         console.log(`  ⚠️  ${errorMsg}`);
-        failures.push({ callId: rec.callId, error: errorMsg });
-
+        
         // Send recording failed webhook
         await transcriptionWebhooks.recordingFailed(
           ficheId,
@@ -119,25 +125,23 @@ export async function transcribeFicheRecordings(
           i + 1,
           untranscribed.length
         );
-        continue;
+        
+        return { success: false, callId: rec.callId, error: errorMsg };
       }
 
       const transcription = await transcriptionService.transcribe(
         rec.recordingUrl
       );
 
-      // Update database with transcription ID
+      // Update database with transcription ID and text
       await updateRecordingTranscription(
         ficheCache.id,
         rec.callId,
-        transcription.transcription_id!
+        transcription.transcription_id!,
+        transcription.transcription.text
       );
 
       console.log(`  ✓ Transcribed (ID: ${transcription.transcription_id})`);
-      results.push({
-        callId: rec.callId,
-        transcriptionId: transcription.transcription_id,
-      });
 
       // Send recording completed webhook
       await transcriptionWebhooks.recordingCompleted(
@@ -148,34 +152,14 @@ export async function transcribeFicheRecordings(
         untranscribed.length
       );
 
-      // Calculate current progress
-      const currentTranscribed = alreadyTranscribed + results.length;
-      const pending = recordings.length - currentTranscribed - failures.length;
-
-      // Send progress webhook with failure count
-      await transcriptionWebhooks.progress(
-        ficheId,
-        recordings.length,
-        currentTranscribed,
-        pending,
-        failures.length
-      );
-
-      // Call progress callback after each successful transcription
-      if (onProgress) {
-        await onProgress({
-          ficheId,
-          currentIndex: i + 1,
-          total: untranscribed.length,
-          totalRecordings: recordings.length,
-          transcribed: currentTranscribed,
-          pending,
-        });
-      }
+      return {
+        success: true,
+        callId: rec.callId,
+        transcriptionId: transcription.transcription_id,
+      };
     } catch (error: any) {
       const errorMsg = error.message || "Unknown error";
       console.error(`  ❌ Error:`, errorMsg);
-      failures.push({ callId: rec.callId, error: errorMsg });
 
       // Send recording failed webhook
       await transcriptionWebhooks.recordingFailed(
@@ -186,17 +170,50 @@ export async function transcribeFicheRecordings(
         untranscribed.length
       );
 
-      // Send progress webhook even on failure
-      const currentTranscribed = alreadyTranscribed + results.length;
-      const pending = recordings.length - currentTranscribed - failures.length;
+      return { success: false, callId: rec.callId, error: errorMsg };
+    }
+  });
 
-      await transcriptionWebhooks.progress(
+  // Wait for all transcriptions to complete and collect results
+  const transcriptionResults = await Promise.all(transcriptionPromises);
+
+  // Separate successes and failures
+  for (const result of transcriptionResults) {
+    completedCount++;
+    if (result.success) {
+      results.push({
+        callId: result.callId,
+        transcriptionId: result.transcriptionId,
+      });
+    } else {
+      failures.push({
+        callId: result.callId,
+        error: result.error,
+      });
+    }
+
+    // Send progress webhook after each completion
+    const currentTranscribed = alreadyTranscribed + results.length;
+    const pending = recordings.length - currentTranscribed - failures.length;
+
+    await transcriptionWebhooks.progress(
+      ficheId,
+      recordings.length,
+      currentTranscribed,
+      pending,
+      failures.length
+    );
+
+    // Call progress callback
+    if (onProgress) {
+      await onProgress({
         ficheId,
-        recordings.length,
-        currentTranscribed,
+        currentIndex: completedCount,
+        total: untranscribed.length,
+        totalRecordings: recordings.length,
+        transcribed: currentTranscribed,
         pending,
-        failures.length
-      );
+      });
     }
   }
 
@@ -244,28 +261,33 @@ export async function getFicheTranscriptionStatus(
 }
 
 /**
- * Batch transcribe multiple fiches
+ * Batch transcribe multiple fiches in parallel
  */
 export async function batchTranscribeFiches(
   ficheIds: string[],
   apiKey: string
 ) {
-  console.log(`🎤 Batch transcribing ${ficheIds.length} fiches...`);
+  console.log(`🎤 Batch transcribing ${ficheIds.length} fiches in parallel...`);
 
-  const results = [];
-  for (const ficheId of ficheIds) {
+  const transcriptionPromises = ficheIds.map(async (ficheId) => {
     try {
       const result = await transcribeFicheRecordings(ficheId, apiKey);
-      results.push({ ficheId, ...result, success: true });
+      console.log(`✅ Fiche ${ficheId} transcription complete`);
+      return { ficheId, ...result, success: true };
     } catch (error: any) {
       console.error(`❌ Failed to transcribe fiche ${ficheId}:`, error.message);
-      results.push({
+      return {
         ficheId,
         success: false,
         error: error.message,
-      });
+      };
     }
-  }
+  });
+
+  const results = await Promise.all(transcriptionPromises);
+  
+  const successCount = results.filter(r => r.success).length;
+  console.log(`✅ Batch transcription complete: ${successCount}/${ficheIds.length} successful`);
 
   return results;
 }

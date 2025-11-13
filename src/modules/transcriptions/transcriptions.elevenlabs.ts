@@ -96,38 +96,43 @@ export class TranscriptionService {
 
   async transcribeAll(recordings: any[]): Promise<Transcription[]> {
     console.log(
-      `\n🎤 Transcription de ${recordings.length} enregistrements...\n`
+      `\n🎤 Transcription parallèle de ${recordings.length} enregistrements...\n`
     );
 
-    const transcriptions: Transcription[] = [];
+    const transcriptionPromises = recordings.map(async (recording, i) => {
+      const recordingName = recording.recording_url
+        ? recording.recording_url.split("/").pop()
+        : recording.call_id || "unknown";
 
-    for (let i = 0; i < recordings.length; i++) {
-      const recordingName = recordings[i].recording_url
-        ? recordings[i].recording_url.split("/").pop()
-        : recordings[i].call_id || "unknown";
-
-      console.log(`[${i + 1}/${recordings.length}] ${recordingName}`);
+      console.log(`[${i + 1}/${recordings.length}] ${recordingName} - Démarrage...`);
 
       try {
         // Handle both recordingUrl (DB) and recording_url (API) formats
-        const url = recordings[i].recording_url || recordings[i].recordingUrl;
+        const url = recording.recording_url || recording.recordingUrl;
 
         if (!url) {
           console.log(`  ⚠️  No recording URL, skipping`);
-          continue;
+          return null;
         }
 
         const transcription = await this.transcribe(url);
         // ALWAYS attach full recording object for metadata (even if from cache)
         // This ensures we have access to parsed date/time/phone numbers
-        transcription.recording = recordings[i];
-        transcription.call_id = recordings[i].call_id || recordings[i].callId;
+        transcription.recording = recording;
+        transcription.call_id = recording.call_id || recording.callId;
 
-        transcriptions.push(transcription);
+        console.log(`[${i + 1}/${recordings.length}] ${recordingName} - ✓ Terminé`);
+        return transcription;
       } catch (error) {
-        console.error(`  ❌ Erreur:`, error);
+        console.error(`[${i + 1}/${recordings.length}] ${recordingName} - ❌ Erreur:`, error);
+        return null;
       }
-    }
+    });
+
+    const results = await Promise.all(transcriptionPromises);
+    const transcriptions = results.filter((t): t is Transcription => t !== null);
+
+    console.log(`\n✓ ${transcriptions.length}/${recordings.length} transcriptions réussies\n`);
 
     return transcriptions;
   }

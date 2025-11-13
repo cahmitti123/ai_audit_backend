@@ -8,84 +8,221 @@ import type { FicheSelection } from "../../schemas.js";
 import axios from "axios";
 
 /**
- * Fetch fiche IDs based on selection criteria
+ * Calculate dates to query based on selection criteria
  */
-export async function fetchFichesBySelection(
-  selection: FicheSelection,
-  apiKey?: string
-): Promise<string[]> {
-  const { mode, dateRange, customStartDate, customEndDate, groupes, onlyWithRecordings, onlyUnaudited, maxFiches, ficheIds } = selection;
+export function calculateDatesToQuery(
+  selection: FicheSelection
+): string[] {
+  const { mode, dateRange, customStartDate, customEndDate, ficheIds } = selection;
 
-  // Manual mode: return provided fiche IDs
+  // Manual mode: no dates to query
   if (mode === "manual" && ficheIds) {
-    return ficheIds.slice(0, maxFiches || ficheIds.length);
-  }
-
-  // Date range or filter mode: fetch from external API
-  const url = process.env.VITE_API_URL_SALES || process.env.API_URL_SALES;
-  if (!url) {
-    throw new Error("Sales API URL not configured");
-  }
-
-  const finalApiKey = apiKey || process.env.VITE_API_CLE || process.env.API_CLE;
-  if (!finalApiKey) {
-    throw new Error("API key not configured");
+    return [];
   }
 
   // Calculate date range
   const { startDate, endDate } = calculateDateRange(dateRange, customStartDate, customEndDate);
 
-  // Prepare API parameters
-  const params: any = {
-    cle: finalApiKey,
-  };
-
-  if (startDate) params.date_debut = startDate;
-  if (endDate) params.date_fin = endDate;
-  if (groupes && groupes.length > 0) {
-    params.groupe = groupes.join(",");
+  // Generate array of dates to query (API only accepts single date)
+  const dates: string[] = [];
+  if (startDate && endDate) {
+    const start = parseDateDDMMYYYY(startDate);
+    const end = parseDateDDMMYYYY(endDate);
+    const current = new Date(start);
+    
+    while (current <= end) {
+      dates.push(formatDate(current));
+      current.setDate(current.getDate() + 1);
+    }
+  } else if (startDate) {
+    dates.push(startDate);
   }
 
-  // Fetch from API
+  return dates;
+}
+
+/**
+ * Fetch fiches for a single date
+ * Note: This returns basic fiche data WITHOUT recordings
+ * To get recordings, you must fetch each fiche individually using fetchApiFicheDetails
+ */
+export async function fetchFichesForDate(
+  date: string,
+  onlyWithRecordings: boolean,
+  apiKey?: string
+): Promise<any[]> {
+  const baseUrl = process.env.FICHE_API_BASE_URL || "https://api.devis-mutuelle-pas-cher.com";
+  const apiBase = `${baseUrl}/api`;
+  
+  // The /by-date endpoint only returns basic fiche data
+  // It doesn't support include_recordings parameter
+  const url = `${apiBase}/fiches/search/by-date`;
+
+  const params = new URLSearchParams({
+    date: date,
+    criteria_type: "1",
+    force_new_session: "false",
+  });
+
   try {
-    const response = await axios.get(url, {
-      params,
-      timeout: 60000, // 60 seconds
+    console.log(`Fetching fiches for ${date}:`, { url, params: params.toString() });
+    
+    const response = await axios.get(`${url}?${params}`, {
+      timeout: 90000, // 90 seconds - external API can be slow
     });
 
-    let fiches = response.data?.fiches || response.data || [];
+    console.log(`API Response for ${date}:`, {
+      status: response.status,
+      fichesCount: response.data?.fiches?.length || 0,
+      dataKeys: Object.keys(response.data || {}),
+    });
 
-    // Ensure it's an array
-    if (!Array.isArray(fiches)) {
-      console.warn("API response is not an array:", typeof fiches);
+    const dateFiches = response.data?.fiches || [];
+    
+    if (dateFiches.length > 0) {
+      console.log(`Sample fiche from ${date}:`, {
+        id: dateFiches[0].id || dateFiches[0].id_fiche,
+        keys: Object.keys(dateFiches[0]),
+        hasRecordings: Boolean(dateFiches[0].recordings || dateFiches[0].enregistrements),
+      });
+    } else {
+      console.log(`No fiches returned for ${date}`);
+    }
+    
+    return dateFiches;
+  } catch (error: any) {
+    console.error(`Error fetching fiches for ${date}:`, {
+      message: error.message,
+      code: error.code,
+      status: error.response?.status,
+    });
+    throw new Error(`Failed to fetch fiches for ${date}: ${error.message}`);
+  }
+}
+
+/**
+ * Process and transform fiche data from /by-date endpoint
+ * Note: /by-date returns basic data WITHOUT recordings
+ * The data will be: { id, cle, nom, prenom, telephone, telephone_2, email, statut, date_insertion, date_modification }
+ */
+export function processFichesData(
+  fiches: any[],
+  maxFiches?: number,
+  onlyWithRecordings?: boolean
+): { ficheIds: string[]; fichesData: any[]; cles: Record<string, string> } {
+  // Ensure it's an array
+  if (!Array.isArray(fiches)) {
+    console.warn("Fiches is not an array:", typeof fiches);
+    return { ficheIds: [], fichesData: [], cles: {} };
+  }
+
+  console.log("Processing fiches data:", { 
+    total: fiches.length,
+    onlyWithRecordings,
+    sampleKeys: fiches[0] ? Object.keys(fiches[0]) : []
+  });
+
+  // Extract fiche IDs and cles (needed for detailed fetch later)
+  const fichesWithIds = fiches
+    .filter((fiche: any) => fiche.id) // Must have an ID
+    .map((fiche: any) => ({
+      id: fiche.id,
+      cle: fiche.cle,
+      statut: fiche.statut,
+      nom: fiche.nom,
+      prenom: fiche.prenom,
+      email: fiche.email,
+      telephone: fiche.telephone,
+      telephone_2: fiche.telephone_2,
+    }));
+
+  console.log("Extracted fiche IDs:", { 
+    total: fichesWithIds.length, 
+    maxFiches, 
+    returning: Math.min(fichesWithIds.length, maxFiches || fichesWithIds.length),
+    sample: fichesWithIds.slice(0, 3).map(f => ({ id: f.id, statut: f.statut })),
+  });
+
+  // Apply max limit
+  const limitedFiches = fichesWithIds.slice(0, maxFiches || fichesWithIds.length);
+  const ficheIds = limitedFiches.map(f => f.id);
+  
+  // Create a map of ficheId -> cle for later detailed fetching
+  const cles: Record<string, string> = {};
+  limitedFiches.forEach(f => {
+    if (f.cle) {
+      cles[f.id] = f.cle;
+    }
+  });
+  
+  // Store basic data (will be used if we can't fetch detailed later)
+  const fichesData = limitedFiches.map((fiche: any) => ({
+    id: fiche.id,
+    cle: fiche.cle,
+    statut: fiche.statut,
+    nom: fiche.nom,
+    prenom: fiche.prenom,
+    email: fiche.email,
+    telephone: fiche.telephone,
+    telephone_2: fiche.telephone_2,
+  }));
+  
+  console.log("Processed fiche data:", {
+    ficheIdsCount: ficheIds.length,
+    hasCles: Object.keys(cles).length,
+  });
+  
+  return { 
+    ficheIds, 
+    fichesData,
+    cles,
+  };
+}
+
+/**
+ * Fetch fiche IDs based on selection criteria (LEGACY - kept for compatibility)
+ * @deprecated Use calculateDatesToQuery + fetchFichesForDate in workflows instead
+ */
+export async function fetchFichesBySelection(
+  selection: FicheSelection,
+  apiKey?: string
+): Promise<{ ficheIds: string[]; fichesData: any[]; cles: Record<string, string> }> {
+  const { mode, onlyWithRecordings, maxFiches, ficheIds } = selection;
+
+  // Manual mode: return provided fiche IDs (no full data available)
+  if (mode === "manual" && ficheIds) {
+    const limitedIds = ficheIds.slice(0, maxFiches || ficheIds.length);
+    return { ficheIds: limitedIds, fichesData: [], cles: {} };
+  }
+
+  // Calculate dates to query
+  const dates = calculateDatesToQuery(selection);
+
+  console.log("Fetching fiches from API (LEGACY):", { 
+    totalDays: dates.length,
+    onlyWithRecordings 
+  });
+
+  // Fetch from API for each date in parallel and combine results
+  console.log(`Fetching fiches for ${dates.length} dates in parallel (LEGACY function)...`);
+  
+  const fetchPromises = dates.map(async (date) => {
+    try {
+      const dateFiches = await fetchFichesForDate(date, onlyWithRecordings || false, apiKey);
+      console.log(`  ✓ ${date}: ${dateFiches.length} fiches`);
+      return dateFiches;
+    } catch (error: any) {
+      console.error(`  ✗ ${date}: ${error.message}`);
       return [];
     }
+  });
+  
+  const dateResults = await Promise.all(fetchPromises);
+  const allFiches = dateResults.flat();
 
-    // Apply filters
-    if (onlyWithRecordings) {
-      fiches = fiches.filter((fiche: any) => {
-        const recordings = fiche.enregistrements || fiche.recordings || [];
-        return recordings.length > 0;
-      });
-    }
+  console.log("Total fiches fetched:", { total: allFiches.length, days: dates.length });
 
-    if (onlyUnaudited) {
-      // This would require checking the database for existing audits
-      // For now, we'll skip this filter and let the workflow handle it
-      console.warn("onlyUnaudited filter not yet implemented in service");
-    }
-
-    // Extract fiche IDs
-    const ficheIdList = fiches
-      .map((fiche: any) => fiche.id_fiche || fiche.ficheId || fiche.id)
-      .filter(Boolean);
-
-    // Apply max limit
-    return ficheIdList.slice(0, maxFiches || ficheIdList.length);
-  } catch (error: any) {
-    console.error("Error fetching fiches from API:", error.message);
-    throw new Error(`Failed to fetch fiches: ${error.message}`);
-  }
+  return processFichesData(allFiches, maxFiches, onlyWithRecordings);
 }
 
 /**
@@ -143,6 +280,14 @@ function formatDate(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const year = date.getFullYear();
   return `${day}/${month}/${year}`;
+}
+
+/**
+ * Parse DD/MM/YYYY date string to Date object
+ */
+function parseDateDDMMYYYY(dateStr: string): Date {
+  const [day, month, year] = dateStr.split("/").map(Number);
+  return new Date(year, month - 1, day);
 }
 
 /**

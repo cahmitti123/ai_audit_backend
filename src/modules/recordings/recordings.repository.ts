@@ -44,12 +44,13 @@ export async function getRecordingByCallId(
 }
 
 /**
- * Update recording with transcription ID
+ * Update recording with transcription data
  */
 export async function updateRecordingTranscription(
   ficheCacheId: bigint,
   callId: string,
-  transcriptionId: string
+  transcriptionId: string,
+  transcriptionText?: string
 ) {
   return await prisma.recording.update({
     where: {
@@ -60,6 +61,7 @@ export async function updateRecordingTranscription(
     },
     data: {
       transcriptionId,
+      transcriptionText: transcriptionText || null,
       hasTranscription: true,
       transcribedAt: new Date(),
     },

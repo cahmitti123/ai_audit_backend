@@ -189,90 +189,46 @@ model AuditStepResult {
     totalTokens                  Int      @default(0) @map("total_tokens")
     createdAt                    DateTime @default(now()) @map("created_at")
 
-    controlPoints ControlPointResult[]
-    citations     Citation[]
-
     @@index([auditId])
     @@index([stepPosition])
     @@index([conforme])
     @@map("audit_step_results")
 }
 
-model ControlPointResult {
-    id           BigInt          @id @default(autoincrement())
-    stepResultId BigInt          @map("step_result_id")
-    stepResult   AuditStepResult @relation(fields: [stepResultId], references: [id], onDelete: Cascade)
+// ═══════════════════════════════════════════════════════════════════════════════
+// CHAT SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
 
-    point                       String
-    pointIndex                  Int      @map("point_index")
-    statut                      String
-    commentaire                 String   @db.Text
-    erreurTranscriptionNotee    Boolean  @map("erreur_transcription_notee")
-    variationPhonetiqueUtilisee String?  @map("variation_phonetique_utilisee")
-    minutages                   String[]
-    createdAt                   DateTime @default(now()) @map("created_at")
-
-    citations Citation[]
-
-    @@index([stepResultId])
-    @@index([pointIndex])
-    @@map("control_point_results")
-}
-
-model Citation {
-    id             BigInt              @id @default(autoincrement())
-    stepResultId   BigInt              @map("step_result_id")
-    stepResult     AuditStepResult     @relation(fields: [stepResultId], references: [id], onDelete: Cascade)
-    controlPointId BigInt?             @map("control_point_id")
-    controlPoint   ControlPointResult? @relation(fields: [controlPointId], references: [id], onDelete: Cascade)
-
-    texte            String   @db.Text
-    recordingIndex   Int      @map("recording_index")
-    chunkIndex       Int      @map("chunk_index")
-    minutage         String
-    minutageSecondes Decimal  @map("minutage_secondes") @db.Decimal(10, 2)
-    speaker          String
-    recordingDate    String?  @map("recording_date")
-    recordingTime    String?  @map("recording_time")
-    recordingUrl     String?  @map("recording_url") @db.Text
-    createdAt        DateTime @default(now()) @map("created_at")
-
-    @@index([stepResultId])
-    @@index([controlPointId])
-    @@index([recordingIndex])
-    @@map("citations")
-}
-
-model AuditLog {
+model ChatConversation {
     id        BigInt   @id @default(autoincrement())
-    auditId   BigInt   @map("audit_id")
-    level     String
-    message   String   @db.Text
-    metadata  Json?    @default("{}")
-    timestamp DateTime @default(now())
-
+    ficheId   String   @map("fiche_id")
+    auditId   BigInt?  @map("audit_id")  // null = fiche-level chat
+    
+    title     String?
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+    
+    messages ChatMessage[]
+    
+    @@unique([ficheId, auditId])
+    @@index([ficheId])
     @@index([auditId])
-    @@index([level])
-    @@index([timestamp])
-    @@map("audit_logs")
+    @@index([createdAt])
+    @@map("chat_conversations")
 }
 
-model ApiRequestLog {
-    id         BigInt   @id @default(autoincrement())
-    endpoint   String
-    method     String
-    params     Json?
-    statusCode Int      @map("status_code")
-    success    Boolean
-    duration   Int
-    timestamp  DateTime @default(now())
-    userId     String?  @map("user_id")
-    ipAddress  String?  @map("ip_address")
-
-    @@index([endpoint])
+model ChatMessage {
+    id             BigInt           @id @default(autoincrement())
+    conversationId BigInt           @map("conversation_id")
+    conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+    
+    role      String   // "user" | "assistant" | "system"
+    content   String   @db.Text
+    timestamp DateTime @default(now())
+    
+    @@index([conversationId])
     @@index([timestamp])
-    @@index([success])
-    @@map("api_request_logs")
+    @@map("chat_messages")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

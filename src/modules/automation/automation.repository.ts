@@ -12,11 +12,71 @@ import type {
 } from "../../schemas.js";
 
 /**
+ * Generate cron expression based on schedule type and parameters
+ */
+function generateCronExpression(
+  scheduleType: string,
+  timeOfDay?: string | null,
+  dayOfWeek?: number | null,
+  dayOfMonth?: number | null,
+  customCron?: string | null
+): string | null {
+  // If custom cron provided, use it
+  if (scheduleType === "CRON" && customCron) {
+    return customCron;
+  }
+
+  // MANUAL schedules don't need cron
+  if (scheduleType === "MANUAL") {
+    return null;
+  }
+
+  // All other types need timeOfDay
+  if (!timeOfDay) {
+    return null;
+  }
+
+  const [hours, minutes] = timeOfDay.split(":").map((n) => parseInt(n, 10));
+
+  if (scheduleType === "DAILY") {
+    // Every day at specified time: "minute hour * * *"
+    return `${minutes} ${hours} * * *`;
+  }
+
+  if (scheduleType === "WEEKLY") {
+    // Specific day of week at specified time: "minute hour * * day"
+    if (dayOfWeek === null || dayOfWeek === undefined) {
+      return null;
+    }
+    return `${minutes} ${hours} * * ${dayOfWeek}`;
+  }
+
+  if (scheduleType === "MONTHLY") {
+    // Specific day of month at specified time: "minute hour day * *"
+    if (!dayOfMonth) {
+      return null;
+    }
+    return `${minutes} ${hours} ${dayOfMonth} * *`;
+  }
+
+  return null;
+}
+
+/**
  * Create automation schedule
  */
-export async function createAutomationSchedule(
-  data: AutomationScheduleCreate
-) {
+export async function createAutomationSchedule(data: AutomationScheduleCreate) {
+  // Auto-generate cron expression if not provided
+  const cronExpression =
+    data.cronExpression ||
+    generateCronExpression(
+      data.scheduleType,
+      data.timeOfDay,
+      data.dayOfWeek,
+      data.dayOfMonth,
+      data.cronExpression
+    );
+
   return await prisma.automationSchedule.create({
     data: {
       name: data.name,
@@ -24,7 +84,7 @@ export async function createAutomationSchedule(
       isActive: data.isActive ?? true,
       createdBy: data.createdBy,
       scheduleType: data.scheduleType,
-      cronExpression: data.cronExpression,
+      cronExpression,
       timezone: data.timezone,
       timeOfDay: data.timeOfDay,
       dayOfWeek: data.dayOfWeek,
@@ -80,6 +140,46 @@ export async function updateAutomationSchedule(
   id: bigint,
   data: AutomationScheduleUpdate
 ) {
+  // Get current schedule to determine if we need to regenerate cron
+  const current = await prisma.automationSchedule.findUnique({
+    where: { id },
+  });
+
+  if (!current) {
+    throw new Error(`Schedule ${id} not found`);
+  }
+
+  // Determine if we should regenerate cron expression
+  const scheduleType = data.scheduleType || current.scheduleType;
+  const timeOfDay =
+    data.timeOfDay !== undefined ? data.timeOfDay : current.timeOfDay;
+  const dayOfWeek =
+    data.dayOfWeek !== undefined ? data.dayOfWeek : current.dayOfWeek;
+  const dayOfMonth =
+    data.dayOfMonth !== undefined ? data.dayOfMonth : current.dayOfMonth;
+
+  // Auto-generate cron if schedule parameters changed and no explicit cron provided
+  let cronExpression = data.cronExpression;
+  if (cronExpression === undefined) {
+    // Only regenerate if relevant fields changed
+    const relevantFieldsChanged =
+      data.scheduleType !== undefined ||
+      data.timeOfDay !== undefined ||
+      data.dayOfWeek !== undefined ||
+      data.dayOfMonth !== undefined;
+
+    if (relevantFieldsChanged) {
+      const generated = generateCronExpression(
+        scheduleType,
+        timeOfDay,
+        dayOfWeek,
+        dayOfMonth,
+        current.cronExpression
+      );
+      cronExpression = generated || undefined;
+    }
+  }
+
   return await prisma.automationSchedule.update({
     where: { id },
     data: {
@@ -87,14 +187,14 @@ export async function updateAutomationSchedule(
       ...(data.description !== undefined && { description: data.description }),
       ...(data.isActive !== undefined && { isActive: data.isActive }),
       ...(data.scheduleType && { scheduleType: data.scheduleType }),
-      ...(data.cronExpression !== undefined && {
-        cronExpression: data.cronExpression,
-      }),
+      ...(cronExpression !== undefined && { cronExpression }),
       ...(data.timezone && { timezone: data.timezone }),
       ...(data.timeOfDay !== undefined && { timeOfDay: data.timeOfDay }),
       ...(data.dayOfWeek !== undefined && { dayOfWeek: data.dayOfWeek }),
       ...(data.dayOfMonth !== undefined && { dayOfMonth: data.dayOfMonth }),
-      ...(data.ficheSelection && { ficheSelection: data.ficheSelection as any }),
+      ...(data.ficheSelection && {
+        ficheSelection: data.ficheSelection as any,
+      }),
       ...(data.runTranscription !== undefined && {
         runTranscription: data.runTranscription,
       }),
@@ -303,4 +403,3 @@ export async function getAutomaticAuditConfigs() {
     },
   });
 }
-

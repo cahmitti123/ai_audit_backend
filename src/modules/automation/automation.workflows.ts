@@ -65,7 +65,16 @@ export const runAutomationFunction = inngest.createFunction(
       if (!scheduleData.isActive) {
         throw new NonRetriableError(`Schedule ${schedule_id} is not active`);
       }
-      return scheduleData;
+
+      // Convert BigInt values to numbers for JSON serialization
+      // Inngest steps can't return BigInts as they're not JSON-serializable
+      return {
+        ...scheduleData,
+        specificAuditConfigs:
+          scheduleData.specificAuditConfigs?.map((id: any) =>
+            typeof id === "bigint" ? Number(id) : id
+          ) || [],
+      };
     });
 
     logger.info("Schedule loaded", {
@@ -361,7 +370,7 @@ export const runAutomationFunction = inngest.createFunction(
       };
 
       // Process fiches in batches to leverage parallelism while maintaining control
-      const FICHE_BATCH_SIZE = 3; // Process 3 fiches in parallel
+      const FICHE_BATCH_SIZE = 5; // Process 5 fiches in parallel (balanced for Inngest limits)
 
       for (
         let batchStart = 0;
@@ -386,29 +395,45 @@ export const runAutomationFunction = inngest.createFunction(
 
         // Process each fiche in the batch
         // STEP 1: Fetch all fiches in this batch SEQUENTIALLY (CRM API needs delays)
-        for (const ficheId of batchFicheIds) {
+        for (let i = 0; i < batchFicheIds.length; i++) {
+          const ficheId = batchFicheIds[i];
           const ficheCle = fichesCles[ficheId];
 
           try {
             // Check cache first to avoid rate limiting
-            const isCached = await step.run(`check-cache-${ficheId}`, async () => {
-              const { getCachedFiche } = await import("../fiches/fiches.repository.js");
-              const cached = await getCachedFiche(ficheId);
-              const isValid = cached && cached.expiresAt > new Date();
-              
-              if (isValid) {
-                await log("info", `Fiche ${ficheId} already cached, skipping fetch`, {
-                  cache_id: String(cached.id),
-                  recordings: cached.recordingsCount,
-                  expires_at: cached.expiresAt,
-                });
+            const isCached = await step.run(
+              `check-cache-${ficheId}`,
+              async () => {
+                const { getCachedFiche } = await import(
+                  "../fiches/fiches.repository.js"
+                );
+                const cached = await getCachedFiche(ficheId);
+                const isValid = cached && cached.expiresAt > new Date();
+
+                if (isValid) {
+                  await log(
+                    "info",
+                    `Fiche ${ficheId} already cached, skipping fetch`,
+                    {
+                      cache_id: String(cached.id),
+                      recordings: cached.recordingsCount,
+                      expires_at: cached.expiresAt,
+                    }
+                  );
+                }
+
+                return isValid;
               }
-              
-              return isValid;
-            });
+            );
 
             // Only fetch if not cached or expired
             if (!isCached) {
+              // Delay to avoid overwhelming Inngest step.invoke() rate limits
+              // This is Inngest's internal limit, not our function's rate limit
+              if (i > 0) {
+                await step.sleep(`delay-fetch-${ficheId}`, 2000); // 2s delay between fetch invocations
+              }
+
               await log("info", `Fetching fiche ${ficheId} from API`);
 
               // Step 5a: Fetch/cache fiche using existing tested function
@@ -434,15 +459,26 @@ export const runAutomationFunction = inngest.createFunction(
           }
         }
 
-        // STEP 2: Transcribe all fiches in this batch IN PARALLEL (ElevenLabs can handle it)
+        // STEP 2: Transcribe fiches sequentially with delays (to avoid Inngest rate limits)
+        // Note: The actual transcription work happens in parallel via the transcribeFicheFunction
         if (schedule.runTranscription) {
           await log(
             "info",
-            `Transcribing ${batchFicheIds.length} fiches in parallel`
+            `Transcribing ${batchFicheIds.length} fiches with delays`
           );
 
-          const transcriptionPromises = batchFicheIds.map(async (ficheId) => {
+          for (let i = 0; i < batchFicheIds.length; i++) {
+            const ficheId = batchFicheIds[i];
+
             try {
+              // Add delay between transcription invocations (deterministic step IDs)
+              if (i > 0) {
+                await step.sleep(
+                  `delay-transcribe-batch-${batchStart}-${i}`,
+                  1000
+                ); // 1s delay between invocations
+              }
+
               await log("info", `Starting transcription for fiche ${ficheId}`);
 
               await step.invoke(`transcribe-fiche-${ficheId}`, {
@@ -477,10 +513,8 @@ export const runAutomationFunction = inngest.createFunction(
                 }
               }
             }
-          });
+          }
 
-          // Wait for all transcriptions in this batch to complete
-          await Promise.all(transcriptionPromises);
           await log("info", `Batch transcriptions complete`);
         }
 
@@ -512,25 +546,37 @@ export const runAutomationFunction = inngest.createFunction(
                 Array.isArray(schedule.specificAuditConfigs) &&
                 schedule.specificAuditConfigs.length > 0
               ) {
-                // Handle both BigInt and Number formats
+                // Handle Number formats, filter out null/undefined/invalid
+                // Note: BigInts are already converted to Numbers in load-schedule step
                 const specificIds = schedule.specificAuditConfigs
-                  .filter((id) => id !== null && id !== undefined)
-                  .map((id) => {
-                    // Convert BigInt to Number if needed
-                    if (typeof id === "bigint") {
-                      return Number(id);
+                  .filter((id) => {
+                    // Filter out null, undefined, 0, and invalid values
+                    if (id === null || id === undefined || id === 0) {
+                      return false;
                     }
-                    return Number(id);
+                    return true;
                   })
-                  .filter((id) => !isNaN(id) && id > 0);
+                  .map((id) => Number(id)) // Ensure it's a number
+                  .filter((id) => !isNaN(id) && id > 0); // Additional safety check
 
-                auditConfigIds.push(...specificIds);
+                if (specificIds.length > 0) {
+                  auditConfigIds.push(...specificIds);
 
-                await log(
-                  "info",
-                  `Added ${specificIds.length} specific audit configs`,
-                  { specific_audit_config_ids: specificIds }
-                );
+                  await log(
+                    "info",
+                    `Added ${specificIds.length} specific audit configs`,
+                    { specific_audit_config_ids: specificIds }
+                  );
+                } else {
+                  await log(
+                    "warning",
+                    `Specific audit configs array contains only null/invalid values`,
+                    {
+                      raw_configs: schedule.specificAuditConfigs,
+                      hint: "The schedule was saved with invalid audit config IDs. Please edit the schedule and re-select audit configs.",
+                    }
+                  );
+                }
               } else {
                 await log("info", `No specific audit configs configured`, {
                   specificAuditConfigsProvided: !!schedule.specificAuditConfigs,
@@ -539,8 +585,9 @@ export const runAutomationFunction = inngest.createFunction(
                 });
               }
 
-              // Then, add automatic audits if enabled (and no specific configs were provided)
-              if (schedule.useAutomaticAudits || auditConfigIds.length === 0) {
+              // Then, add automatic audits ONLY if explicitly enabled
+              // (removed fallback behavior - only use selected audits)
+              if (schedule.useAutomaticAudits) {
                 const automaticConfigs = await step.run(
                   `get-automatic-audits-${ficheId}`,
                   async () => {

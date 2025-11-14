@@ -13,14 +13,17 @@ export const DEFAULT_AUDIT_CONFIG_ID = 10; // Quick Audit
 // Timeline Generation
 export const TIMELINE_CHUNK_SIZE = 10; // Messages per chunk
 
-// Inngest Rate Limits
+// Inngest Rate Limits (increased for efficiency)
+// Note: These are OUR function's rate limits
+// Inngest also has INTERNAL rate limits on step.invoke() calls (~10-15/min)
+// which requires delays between invocations in the automation workflow
 export const RATE_LIMITS = {
   FICHE_FETCH: {
-    limit: 20,
+    limit: 100, // Increased from 20 - our function limit
     period: "1m" as const,
   },
   TRANSCRIPTION: {
-    limit: 10,
+    limit: 50, // Increased from 10 - our function limit
     period: "1m" as const,
   },
 } as const;
@@ -33,19 +36,19 @@ export const TIMEOUTS = {
   BATCH_AUDIT: "1h",
 } as const;
 
-// Inngest Concurrency
+// Inngest Concurrency (increased for efficiency)
 export const CONCURRENCY = {
   AUDIT_RUN: {
-    limit: 10,
+    limit: 25, // Increased from 10
     key: "event.data.audit_config_id" as const,
   },
 } as const;
 
-// Batch Processing
+// Batch Processing (increased for efficiency)
 export const BATCH_CONFIG = {
   TRANSCRIPTION: {
-    maxSize: 5,
-    timeout: "10s",
+    maxSize: 10, // Increased from 5
+    timeout: "15s", // Increased from 10s
   },
 } as const;
 

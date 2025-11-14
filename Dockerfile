@@ -40,7 +40,7 @@ RUN npm install && \
 # Copy built artifacts from builder
 COPY --from=builder /app/src ./src
 COPY --from=builder /app/config ./config
-COPY --from=builder /app/scripts ./scripts
+# COPY --from=builder /app/scripts ./scripts  # Directory doesn't exist
 
 # Create non-root user
 RUN addgroup -g 1001 -S nodejs && \

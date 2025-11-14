@@ -853,26 +853,156 @@ ${
  */
 
 /**
- * Daily automation check (runs at 2 AM UTC)
+ * Check for scheduled automations (runs every 15 minutes)
+ * Finds schedules that should run based on their schedule type and triggers them
  */
-export const dailyAutomationCheck = inngest.createFunction(
+export const scheduledAutomationCheck = inngest.createFunction(
   {
-    id: "daily-automation-check",
-    name: "Daily Automation Check",
+    id: "scheduled-automation-check",
+    name: "Check Scheduled Automations",
     retries: 1,
   },
-  { cron: "0 2 * * *" },
+  { cron: "*/15 * * * *" }, // Every 15 minutes
   async ({ step, logger }) => {
-    logger.info("Running daily automation check");
+    logger.info("Checking for scheduled automations to run");
 
-    // This would check for schedules that need to run today
-    // For now, it's a placeholder - schedules will be triggered manually via API
+    // Get all active schedules
+    const schedules = await step.run("get-active-schedules", async () => {
+      const { getAllAutomationSchedules } = await import(
+        "./automation.repository.js"
+      );
+      return await getAllAutomationSchedules(false); // Only active
+    });
+
+    logger.info(`Found ${schedules.length} active schedules`);
+
+    // Filter schedules that should run now
+    const schedulesToRun = await step.run("filter-schedules", async () => {
+      const { getNextRunTime } = await import("./automation.service.js");
+      const now = new Date();
+      const toRun = [];
+
+      for (const schedule of schedules) {
+        // Skip MANUAL schedules
+        if (schedule.scheduleType === "MANUAL") {
+          continue;
+        }
+
+        // Check if schedule needs required fields
+        if (schedule.scheduleType === "DAILY" && !schedule.timeOfDay) {
+          logger.warn(`Schedule ${schedule.id} (DAILY) missing timeOfDay`);
+          continue;
+        }
+
+        if (
+          schedule.scheduleType === "WEEKLY" &&
+          (!schedule.timeOfDay || schedule.dayOfWeek === null)
+        ) {
+          logger.warn(
+            `Schedule ${schedule.id} (WEEKLY) missing timeOfDay or dayOfWeek`
+          );
+          continue;
+        }
+
+        if (
+          schedule.scheduleType === "MONTHLY" &&
+          (!schedule.timeOfDay || !schedule.dayOfMonth)
+        ) {
+          logger.warn(
+            `Schedule ${schedule.id} (MONTHLY) missing timeOfDay or dayOfMonth`
+          );
+          continue;
+        }
+
+        // Calculate next run time
+        const nextRun = getNextRunTime(
+          schedule.scheduleType,
+          schedule.cronExpression || undefined,
+          schedule.timeOfDay || undefined,
+          schedule.dayOfWeek !== null ? schedule.dayOfWeek : undefined,
+          schedule.dayOfMonth || undefined,
+          schedule.timezone
+        );
+
+        if (!nextRun) {
+          continue;
+        }
+
+        // Check if it should run now (within last 15 minutes to current time)
+        const fifteenMinutesAgo = new Date(now.getTime() - 15 * 60 * 1000);
+
+        // Should run if:
+        // 1. Next run time is in the past (missed run)
+        // 2. Or next run time is within the last 15 minutes
+        // 3. And hasn't run in the last 15 minutes (to avoid duplicate runs)
+        const shouldRun =
+          nextRun <= now &&
+          (!schedule.lastRunAt ||
+            new Date(schedule.lastRunAt) <= fifteenMinutesAgo);
+
+        if (shouldRun) {
+          toRun.push({
+            id: String(schedule.id),
+            name: schedule.name,
+            scheduleType: schedule.scheduleType,
+            nextRun: nextRun.toISOString(),
+            lastRun: schedule.lastRunAt
+              ? new Date(schedule.lastRunAt).toISOString()
+              : "never",
+          });
+        }
+      }
+
+      return toRun;
+    });
+
+    logger.info(`${schedulesToRun.length} schedules should run now`);
+
+    // Trigger each schedule
+    const results = await step.run("trigger-schedules", async () => {
+      const triggered = [];
+
+      for (const schedule of schedulesToRun) {
+        try {
+          // Send automation/run event
+          await step.sendEvent(`trigger-schedule-${schedule.id}`, {
+            name: "automation/run",
+            data: {
+              schedule_id: parseInt(schedule.id),
+            },
+          });
+
+          triggered.push({
+            schedule_id: schedule.id,
+            name: schedule.name,
+            status: "triggered",
+          });
+
+          logger.info(`Triggered schedule ${schedule.id} (${schedule.name})`);
+        } catch (error: any) {
+          logger.error(`Failed to trigger schedule ${schedule.id}`, {
+            error: error.message,
+          });
+
+          triggered.push({
+            schedule_id: schedule.id,
+            name: schedule.name,
+            status: "failed",
+            error: error.message,
+          });
+        }
+      }
+
+      return triggered;
+    });
 
     return {
       success: true,
-      message: "Daily check completed",
+      checked: schedules.length,
+      triggered: results.length,
+      results,
     };
   }
 );
 
-export const functions = [runAutomationFunction, dailyAutomationCheck];
+export const functions = [runAutomationFunction, scheduledAutomationCheck];

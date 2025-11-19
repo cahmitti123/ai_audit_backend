@@ -1,21 +1,192 @@
 /**
  * Audits Repository
  * =================
- * Database operations for audit results
+ * RESPONSIBILITY: Direct database operations
+ * - CRUD operations for audits and step results
+ * - Database queries and mutations
+ * - No business logic
+ * - No data transformations (except simple mapping)
+ *
+ * LAYER: Data Access
  */
 
 import { prisma } from "../../shared/prisma.js";
 
+// ═══════════════════════════════════════════════════════════════════════════
+// UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
- * Save audit result to database
+ * Sanitize data by removing null bytes (\u0000) which PostgreSQL cannot store in text fields
+ * This is common with LLM outputs that may contain null characters
+ */
+function sanitizeNullBytes(data: any): any {
+  if (data === null || data === undefined) {
+    return data;
+  }
+
+  if (typeof data === "string") {
+    // Remove null bytes from strings
+    return data.replace(/\u0000/g, "");
+  }
+
+  if (Array.isArray(data)) {
+    // Recursively sanitize array elements
+    return data.map((item) => sanitizeNullBytes(item));
+  }
+
+  if (typeof data === "object") {
+    // Recursively sanitize object properties
+    const sanitized: any = {};
+    for (const [key, value] of Object.entries(data)) {
+      sanitized[key] = sanitizeNullBytes(value);
+    }
+    return sanitized;
+  }
+
+  // Return primitives as-is (numbers, booleans, etc.)
+  return data;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TYPES (moved from export to internal use)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface ListAuditsFilters {
+  ficheIds?: string[];
+  status?: string[];
+  isCompliant?: boolean;
+  dateFrom?: Date;
+  dateTo?: Date;
+  auditConfigIds?: bigint[];
+  sortBy?: "created_at" | "completed_at" | "score_percentage" | "duration_ms";
+  sortOrder?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Create audit record when workflow starts
+ */
+export async function createPendingAudit(
+  ficheCacheId: bigint,
+  auditConfigId: bigint,
+  auditId?: string
+) {
+  return await prisma.audit.create({
+    data: {
+      ficheCacheId,
+      auditConfigId,
+      overallScore: 0,
+      scorePercentage: 0,
+      niveau: "PENDING",
+      isCompliant: false,
+      criticalPassed: 0,
+      criticalTotal: 0,
+      status: "running",
+      startedAt: new Date(),
+      resultData: {
+        audit_id: auditId,
+        status: "running",
+        started_at: new Date().toISOString(),
+      },
+    },
+  });
+}
+
+/**
+ * Update audit with results when workflow completes
+ */
+export async function updateAuditWithResults(
+  auditDbId: bigint,
+  auditResult: any
+) {
+  // Sanitize the audit result to remove null bytes that PostgreSQL cannot handle
+  const sanitizedResult = sanitizeNullBytes(auditResult);
+
+  return await prisma.audit.update({
+    where: { id: auditDbId },
+    data: {
+      overallScore: sanitizedResult.audit.compliance.score,
+      scorePercentage: sanitizedResult.audit.compliance.score,
+      niveau: sanitizedResult.audit.compliance.niveau,
+      isCompliant: sanitizedResult.audit.compliance.niveau !== "REJET",
+      criticalPassed: parseInt(
+        sanitizedResult.audit.compliance.points_critiques.split("/")[0]
+      ),
+      criticalTotal: parseInt(
+        sanitizedResult.audit.compliance.points_critiques.split("/")[1]
+      ),
+      status: "completed",
+      completedAt: new Date(sanitizedResult.metadata.completed_at),
+      durationMs: sanitizedResult.metadata.duration_ms,
+      totalTokens: sanitizedResult.statistics.total_tokens,
+      successfulSteps: sanitizedResult.statistics.successful_steps,
+      failedSteps: sanitizedResult.statistics.failed_steps,
+      recordingsCount: sanitizedResult.statistics.recordings_count,
+      timelineChunks: sanitizedResult.statistics.timeline_chunks,
+      resultData: sanitizedResult,
+      stepResults: {
+        create: sanitizedResult.audit.results.steps.map(
+          (step: any, index: number) => ({
+            stepPosition: step.step_metadata?.position || index + 1,
+            stepName: step.step_metadata?.name || "",
+            severityLevel: step.step_metadata?.severity || "MEDIUM",
+            isCritical: step.step_metadata?.is_critical || false,
+            weight: step.step_metadata?.weight || 5,
+            traite: step.traite,
+            conforme: step.conforme,
+            score: step.score,
+            niveauConformite: step.niveau_conformite,
+            commentaireGlobal: step.commentaire_global,
+            motsClesTrouves: step.mots_cles_trouves || [],
+            minutages: step.minutages || [],
+            erreursTranscriptionTolerees:
+              step.erreurs_transcription_tolerees || 0,
+            totalCitations:
+              step.points_controle?.reduce(
+                (sum: number, pc: any) => sum + (pc.citations?.length || 0),
+                0
+              ) || 0,
+            totalTokens: step.usage?.total_tokens || 0,
+          })
+        ),
+      },
+    },
+    include: {
+      stepResults: true,
+    },
+  });
+}
+
+/**
+ * Update audit status to failed
+ */
+export async function markAuditAsFailed(
+  auditDbId: bigint,
+  errorMessage: string
+) {
+  return await prisma.audit.update({
+    where: { id: auditDbId },
+    data: {
+      status: "failed",
+      errorMessage,
+      completedAt: new Date(),
+    },
+  });
+}
+
+/**
+ * Save audit result to database (LEGACY - for backwards compatibility)
+ * This creates a completed audit directly. New code should use createPendingAudit + updateAuditWithResults
  */
 export async function saveAuditResult(auditResult: any, ficheCacheId: bigint) {
   return await prisma.audit.create({
     data: {
       ficheCacheId,
       auditConfigId: BigInt(auditResult.audit.config.id),
-      overallScore: auditResult.audit.compliance.poids_obtenu,
-      scorePercentage: auditResult.audit.compliance.score,
+      overallScore: auditResult.audit.compliance.score, // PERCENTAGE (0-100)
+      scorePercentage: auditResult.audit.compliance.score, // PERCENTAGE (0-100) - same value for compatibility
       niveau: auditResult.audit.compliance.niveau,
       isCompliant: auditResult.audit.compliance.niveau !== "REJET",
       criticalPassed: parseInt(
@@ -122,19 +293,6 @@ export async function getAuditById(auditId: bigint) {
 /**
  * List audits with advanced filtering and sorting
  */
-export interface ListAuditsFilters {
-  ficheIds?: string[];
-  status?: string[];
-  isCompliant?: boolean;
-  dateFrom?: Date;
-  dateTo?: Date;
-  auditConfigIds?: string[];
-  sortBy?: "created_at" | "completed_at" | "score_percentage" | "duration_ms";
-  sortOrder?: "asc" | "desc";
-  limit?: number;
-  offset?: number;
-}
-
 export async function listAudits(filters: ListAuditsFilters = {}) {
   const {
     ficheIds,
@@ -240,9 +398,10 @@ export async function listAudits(filters: ListAuditsFilters = {}) {
 }
 
 /**
- * Get audits grouped by fiches
+ * Get audits grouped by fiches (raw data without business logic)
+ * Returns raw Prisma data - transformations should be done in service layer
  */
-export async function getAuditsGroupedByFiches(
+export async function getAuditsGroupedByFichesRaw(
   filters: ListAuditsFilters = {}
 ) {
   const {
@@ -361,70 +520,9 @@ export async function getAuditsGroupedByFiches(
     prisma.ficheCache.count({ where: ficheWhere }),
   ]);
 
-  // Transform to desired format with latest audit date
-  const fichesWithLatestAudit = allFiches.map((fiche) => {
-    const latestAuditDate =
-      fiche.audits.length > 0
-        ? fiche.audits.reduce((latest, audit) => {
-            return audit.createdAt > latest ? audit.createdAt : latest;
-          }, fiche.audits[0].createdAt)
-        : null;
-
-    return {
-      fiche: {
-        id: fiche.id,
-        ficheId: fiche.ficheId,
-        groupe: fiche.groupe,
-        agenceNom: fiche.agenceNom,
-        prospectNom: fiche.prospectNom,
-        prospectPrenom: fiche.prospectPrenom,
-        prospectEmail: fiche.prospectEmail,
-        prospectTel: fiche.prospectTel,
-        hasRecordings: fiche.hasRecordings,
-        recordingsCount: fiche.recordingsCount,
-        fetchedAt: fiche.fetchedAt,
-        createdAt: fiche.createdAt,
-        updatedAt: fiche.updatedAt,
-      },
-      audits: fiche.audits,
-      summary: {
-        totalAudits: fiche.audits.length,
-        compliantCount: fiche.audits.filter((a) => a.isCompliant).length,
-        averageScore:
-          fiche.audits.length > 0
-            ? fiche.audits.reduce(
-                (sum, a) => sum + Number(a.scorePercentage),
-                0
-              ) / fiche.audits.length
-            : 0,
-        latestAuditDate,
-      },
-      _latestAuditTime: latestAuditDate?.getTime() || 0,
-    };
-  });
-
-  // Sort by latest audit date (most recent first)
-  fichesWithLatestAudit.sort((a, b) => {
-    // Fiches with audits come before fiches without audits
-    if (a._latestAuditTime === 0 && b._latestAuditTime === 0) return 0;
-    if (a._latestAuditTime === 0) return 1;
-    if (b._latestAuditTime === 0) return -1;
-    // Sort by most recent audit first
-    return b._latestAuditTime - a._latestAuditTime;
-  });
-
-  // Apply pagination after sorting
-  const paginatedFiches = fichesWithLatestAudit.slice(offset, offset + limit);
-
-  // Remove the temporary sorting field
-  const result = paginatedFiches.map(({ _latestAuditTime, ...fiche }) => fiche);
-
+  // Return raw data - let service layer handle transformations, sorting, pagination
   return {
-    data: result,
-    pagination: {
-      total: totalFiches,
-      limit,
-      offset,
-    },
+    fiches: allFiches,
+    total: totalFiches,
   };
 }

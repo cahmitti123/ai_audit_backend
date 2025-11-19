@@ -1,8 +1,20 @@
+/**
+ * Fiches Schemas
+ * ==============
+ * RESPONSIBILITY: Type definitions and validation
+ * - Zod schemas for API responses
+ * - Type exports (inferred from Zod)
+ * - Runtime validators
+ * - No business logic
+ *
+ * LAYER: Foundation (Types & Validation)
+ */
+
 import { z } from "zod";
 import { logger } from "../../shared/logger.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SALES LIST SCHEMAS (GET /fiches/search/by-date)
+// SALES FICHE SCHEMA (Base schema for sales items)
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const salesFicheSchema = z.object({
@@ -18,15 +30,8 @@ export const salesFicheSchema = z.object({
   date_modification: z.string().nullable(),
 });
 
-export const salesResponseSchema = z.object({
-  fiches: z.array(salesFicheSchema),
-  total: z.number(),
-});
-
-export const salesApiResponseSchema = salesResponseSchema;
-
 // ═══════════════════════════════════════════════════════════════════════════
-// FICHE DETAILS SCHEMAS (GET /fiches/{fiche_id})
+// FICHE DETAILS SCHEMAS (GET /fiches/by-id/{ficheId})
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const informationSchema = z.object({
@@ -67,7 +72,13 @@ export const informationSchema = z.object({
   corbeille: z.boolean(),
   archive: z.boolean(),
   modules: z.array(z.string()),
-  etiquettes: z.array(z.object({})),
+  etiquettes: z.array(
+    z.object({
+      nom: z.string(),
+      date: z.string(),
+      style: z.string(),
+    })
+  ),
 });
 
 export const prospectSchema = z.object({
@@ -315,6 +326,24 @@ export const recordingSchema = z.object({
   transcription: transcriptionSchema.nullable().optional(),
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// SALES WITH CALLS SCHEMAS (GET /fiches/sales-with-calls)
+// Recordings array can be empty if includeRecordings=false
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const salesFicheWithRecordingsSchema = salesFicheSchema.extend({
+  recordings: z.array(recordingSchema).default([]),
+});
+
+export const salesWithCallsResponseSchema = z.object({
+  fiches: z.array(salesFicheWithRecordingsSchema),
+  total: z.number(),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FICHE DETAILS RESPONSE SCHEMA
+// ═══════════════════════════════════════════════════════════════════════════
+
 export const saleDetailsResponseSchema = z.object({
   success: z.boolean(),
   message: z.string(),
@@ -336,6 +365,46 @@ export const saleDetailsResponseSchema = z.object({
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// DATABASE RECORD TYPES (for internal operations)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Recording status from database query
+ * Used for calculating transcription statistics
+ */
+export const recordingStatusSchema = z.object({
+  id: z.bigint(),
+  hasTranscription: z.boolean(),
+  transcribedAt: z.date().nullable(),
+});
+
+/**
+ * Audit status from database query
+ * Used for calculating audit statistics
+ */
+export const auditStatusRecordSchema = z.object({
+  id: z.bigint(),
+  overallScore: z.union([
+    z.number(),
+    z.string(),
+    z.custom<import("@prisma/client").Prisma.Decimal>(),
+  ]), // Prisma Decimal
+  scorePercentage: z.union([
+    z.number(),
+    z.string(),
+    z.custom<import("@prisma/client").Prisma.Decimal>(),
+  ]), // Prisma Decimal
+  niveau: z.string(),
+  isCompliant: z.boolean(),
+  status: z.string(),
+  completedAt: z.date().nullable(),
+  auditConfig: z.object({
+    id: z.bigint(),
+    name: z.string(),
+  }),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // STATUS TYPES (for enriched responses)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -348,6 +417,23 @@ export const transcriptionStatusSchema = z.object({
   lastTranscribedAt: z.date().nullable().optional(),
 });
 
+export const auditSummarySchema = z.object({
+  id: z.string(),
+  overallScore: z.string(),
+  scorePercentage: z.string(),
+  niveau: z.string(),
+  isCompliant: z.boolean(),
+  status: z.string(),
+  completedAt: z.date().nullable(),
+  createdAt: z.date().optional(),
+  auditConfig: z
+    .object({
+      id: z.string(),
+      name: z.string(),
+    })
+    .nullable(),
+});
+
 export const auditStatusSchema = z.object({
   total: z.number(),
   completed: z.number(),
@@ -356,7 +442,7 @@ export const auditStatusSchema = z.object({
   compliant: z.number(),
   nonCompliant: z.number(),
   averageScore: z.number().nullable(),
-  latestAudit: z.any().optional(),
+  latestAudit: auditSummarySchema.nullable().optional(),
 });
 
 export const ficheStatusSchema = z.object({
@@ -374,12 +460,77 @@ export const salesResponseWithStatusSchema = z.object({
   total: z.number(),
 });
 
+export const ficheWithCompleteStatusSchema = z.object({
+  ficheId: z.string(),
+  groupe: z.string().nullable(),
+  agenceNom: z.string().nullable(),
+  prospectNom: z.string().nullable(),
+  prospectPrenom: z.string().nullable(),
+  prospectEmail: z.string().nullable(),
+  prospectTel: z.string().nullable(),
+  fetchedAt: z.date(),
+  createdAt: z.date(),
+  transcription: transcriptionStatusSchema,
+  audit: auditStatusSchema.extend({
+    audits: z.array(auditSummarySchema),
+  }),
+  recordings: z.array(
+    z.object({
+      id: z.string(),
+      callId: z.string(),
+      hasTranscription: z.boolean(),
+      transcribedAt: z.date().nullable(),
+      startTime: z.date().nullable(),
+      durationSeconds: z.number().nullable(),
+    })
+  ),
+});
+
+export const dateRangeStatusResponseSchema = z.object({
+  startDate: z.string(),
+  endDate: z.string(),
+  total: z.number(),
+  fiches: z.array(ficheWithCompleteStatusSchema),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROGRESSIVE FETCH SCHEMAS (for streaming/partial results)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const progressiveFetchMetaSchema = z.object({
+  complete: z.boolean(),
+  partial: z.boolean(),
+  backgroundJobId: z.string().optional(),
+  totalDaysRequested: z.number(),
+  daysFetched: z.number(),
+  daysRemaining: z.number(),
+  daysCached: z.number(),
+  cacheCoverage: z.object({
+    datesWithData: z.array(z.string()),
+    datesMissing: z.array(z.string()),
+  }),
+});
+
+export const progressiveDateRangeResponseSchema = z.object({
+  startDate: z.string(),
+  endDate: z.string(),
+  total: z.number(),
+  fiches: z.array(ficheWithCompleteStatusSchema),
+  meta: progressiveFetchMetaSchema,
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // EXPORTED TYPES
 // ═══════════════════════════════════════════════════════════════════════════
 
+// API Response Types
 export type SalesFiche = z.infer<typeof salesFicheSchema>;
-export type SalesResponse = z.infer<typeof salesResponseSchema>;
+export type SalesFicheWithRecordings = z.infer<
+  typeof salesFicheWithRecordingsSchema
+>;
+export type SalesWithCallsResponse = z.infer<
+  typeof salesWithCallsResponseSchema
+>;
 export type Information = z.infer<typeof informationSchema>;
 export type Prospect = z.infer<typeof prospectSchema>;
 export type Conjoint = z.infer<typeof conjointSchema>;
@@ -404,22 +555,43 @@ export type Transcription = z.infer<typeof transcriptionSchema>;
 export type Recording = z.infer<typeof recordingSchema>;
 export type SaleDetailsResponse = z.infer<typeof saleDetailsResponseSchema>;
 export type FicheDetailsResponse = SaleDetailsResponse;
+
+// Database Record Types (for internal operations)
+export type RecordingStatus = z.infer<typeof recordingStatusSchema>;
+export type AuditStatusRecord = z.infer<typeof auditStatusRecordSchema>;
+
+// Status Types (for enriched responses)
 export type TranscriptionStatus = z.infer<typeof transcriptionStatusSchema>;
+export type AuditSummary = z.infer<typeof auditSummarySchema>;
 export type AuditStatus = z.infer<typeof auditStatusSchema>;
 export type FicheStatus = z.infer<typeof ficheStatusSchema>;
 export type SalesFicheWithStatus = z.infer<typeof salesFicheWithStatusSchema>;
-export type SalesResponseWithStatus = z.infer<typeof salesResponseWithStatusSchema>;
+export type SalesResponseWithStatus = z.infer<
+  typeof salesResponseWithStatusSchema
+>;
+export type FicheWithCompleteStatus = z.infer<
+  typeof ficheWithCompleteStatusSchema
+>;
+export type DateRangeStatusResponse = z.infer<
+  typeof dateRangeStatusResponseSchema
+>;
+export type ProgressiveFetchMeta = z.infer<typeof progressiveFetchMetaSchema>;
+export type ProgressiveDateRangeResponse = z.infer<
+  typeof progressiveDateRangeResponseSchema
+>;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // VALIDATORS
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const validateSalesResponse = (data: unknown): SalesResponse => {
+export const validateSalesWithCallsResponse = (
+  data: unknown
+): SalesWithCallsResponse => {
   try {
-    return salesResponseSchema.parse(data);
+    return salesWithCallsResponseSchema.parse(data);
   } catch (error) {
-    logger.error("Sales response validation failed", { error });
-    throw new Error("Invalid sales response format");
+    logger.error("Sales with calls response validation failed", { error });
+    throw new Error("Invalid sales with calls response format");
   }
 };
 

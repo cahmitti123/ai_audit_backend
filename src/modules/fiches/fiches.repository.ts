@@ -1,13 +1,21 @@
 /**
  * Fiches Repository
  * =================
- * Database operations for fiche caching
+ * RESPONSIBILITY: Database operations only (CRUD)
+ * - Read/write/delete fiches cache entries
+ * - Read/write recordings
+ * - Query helpers for database lookups
+ * - No business logic or enrichment
+ *
+ * LAYER: Data Access (Database)
  */
 
 import { prisma } from "../../shared/prisma.js";
-import { enrichRecording } from "../../utils/recording-parser.js";
-import { CACHE_EXPIRATION_HOURS } from "../../shared/constants.js";
 import { logger } from "../../shared/logger.js";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// READ OPERATIONS
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * Get cached fiche by ID
@@ -30,14 +38,28 @@ export async function getCachedFiche(ficheId: string) {
   }
 
   // Attach recordings to rawData for compatibility
+  // Transform database format (camelCase) to API format (snake_case)
   const rawData = cached.rawData as Record<string, unknown>;
-  (rawData as { recordings?: unknown[] }).recordings = cached.recordings;
+  (rawData as { recordings?: unknown[] }).recordings = cached.recordings.map(
+    (rec) => ({
+      call_id: rec.callId,
+      recording_url: rec.recordingUrl,
+      direction: rec.direction,
+      answered: rec.answered,
+      start_time: rec.startTime?.toISOString(),
+      duration_seconds: rec.durationSeconds,
+      from_number: rec.fromNumber,
+      to_number: rec.toNumber,
+      transcription: rec.hasTranscription
+        ? { conversation: rec.transcriptionText || "" }
+        : null,
+    })
+  );
 
   logger.debug("Fiche retrieved from cache", {
     fiche_id: ficheId,
     cache_id: String(cached.id),
     recordings_count: cached.recordings.length,
-    cached_count: cached.recordingsCount,
   });
 
   return {
@@ -47,69 +69,214 @@ export async function getCachedFiche(ficheId: string) {
 }
 
 /**
- * Cache fiche data in database
- * @param ficheData - Full fiche details from API
- * @param expirationHours - Cache expiration time in hours (default: 24)
+ * Get fiche with status information (transcription + audit)
  */
-export async function cacheFiche(
-  ficheData: import("./fiches.schemas.js").FicheDetailsResponse,
-  expirationHours: number = CACHE_EXPIRATION_HOURS
-) {
-  // Validate that required information exists
-  if (!ficheData.information) {
-    throw new Error("Cannot cache fiche: missing information object");
-  }
-
-  const expiresAt = new Date();
-  expiresAt.setHours(expiresAt.getHours() + expirationHours);
-
-  // Enrich recordings with parsed metadata
-  if (ficheData.recordings) {
-    ficheData.recordings = ficheData.recordings.map(enrichRecording);
-  }
-
-  const ficheCache = await prisma.ficheCache.upsert({
-    where: { ficheId: ficheData.information.fiche_id },
-    create: {
-      ficheId: ficheData.information.fiche_id,
-      groupe: ficheData.information.groupe,
-      agenceNom: ficheData.information.agence_nom,
-      prospectNom: ficheData.prospect?.nom,
-      prospectPrenom: ficheData.prospect?.prenom,
-      prospectEmail: ficheData.prospect?.mail,
-      prospectTel: ficheData.prospect?.telephone || ficheData.prospect?.mobile,
-      rawData: ficheData,
-      hasRecordings: ficheData.recordings?.length > 0,
-      recordingsCount: ficheData.recordings?.length || 0,
-      expiresAt,
-    },
-    update: {
-      groupe: ficheData.information.groupe,
-      agenceNom: ficheData.information.agence_nom,
-      prospectNom: ficheData.prospect?.nom,
-      prospectPrenom: ficheData.prospect?.prenom,
-      prospectEmail: ficheData.prospect?.mail,
-      prospectTel: ficheData.prospect?.telephone || ficheData.prospect?.mobile,
-      rawData: ficheData,
-      hasRecordings: ficheData.recordings?.length > 0,
-      recordingsCount: ficheData.recordings?.length || 0,
-      fetchedAt: new Date(),
-      expiresAt,
+export async function getFicheWithStatus(ficheId: string) {
+  const ficheCache = await prisma.ficheCache.findUnique({
+    where: { ficheId },
+    include: {
+      recordings: {
+        select: {
+          id: true,
+          hasTranscription: true,
+          transcribedAt: true,
+        },
+      },
+      audits: {
+        where: { isLatest: true },
+        select: {
+          id: true,
+          overallScore: true,
+          scorePercentage: true,
+          niveau: true,
+          isCompliant: true,
+          status: true,
+          completedAt: true,
+          auditConfig: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      },
     },
   });
-
-  // Store recordings
-  if (ficheData.recordings?.length > 0) {
-    await storeRecordings(ficheCache.id, ficheData.recordings);
-  }
 
   return ficheCache;
 }
 
 /**
- * Store recordings in database
+ * Get multiple fiches with status information
  */
-async function storeRecordings(ficheCacheId: bigint, recordings: unknown[]) {
+export async function getFichesWithStatus(ficheIds: string[]) {
+  const fichesCache = await prisma.ficheCache.findMany({
+    where: { ficheId: { in: ficheIds } },
+    include: {
+      recordings: {
+        select: {
+          id: true,
+          hasTranscription: true,
+          transcribedAt: true,
+        },
+      },
+      audits: {
+        where: { isLatest: true },
+        select: {
+          id: true,
+          overallScore: true,
+          scorePercentage: true,
+          niveau: true,
+          isCompliant: true,
+          status: true,
+          completedAt: true,
+          auditConfig: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      },
+    },
+  });
+
+  return fichesCache;
+}
+
+/**
+ * Get fiches by sales date range
+ * Uses salesDate field to filter by which CRM sales date the fiches belong to
+ */
+export async function getFichesByDateRange(startDate: Date, endDate: Date) {
+  // Convert Date objects to YYYY-MM-DD strings for salesDate comparison
+  const startDateStr = startDate.toISOString().split("T")[0];
+  const endDateStr = endDate.toISOString().split("T")[0];
+
+  const fichesCache = await prisma.ficheCache.findMany({
+    where: {
+      salesDate: {
+        gte: startDateStr,
+        lte: endDateStr,
+      },
+    },
+    include: {
+      recordings: {
+        select: {
+          id: true,
+          hasTranscription: true,
+          transcribedAt: true,
+          callId: true,
+          startTime: true,
+          durationSeconds: true,
+        },
+        orderBy: { startTime: "desc" },
+      },
+      audits: {
+        where: { isLatest: true },
+        select: {
+          id: true,
+          overallScore: true,
+          scorePercentage: true,
+          niveau: true,
+          isCompliant: true,
+          status: true,
+          completedAt: true,
+          createdAt: true,
+          auditConfig: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  return fichesCache;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WRITE OPERATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Upsert fiche cache entry
+ */
+export async function upsertFicheCache(data: {
+  ficheId: string;
+  groupe: string;
+  agenceNom: string;
+  prospectNom?: string;
+  prospectPrenom?: string;
+  prospectEmail?: string;
+  prospectTel?: string;
+  salesDate?: string; // YYYY-MM-DD - CRM sales date this fiche belongs to
+  rawData: unknown;
+  hasRecordings: boolean;
+  recordingsCount: number;
+  expiresAt: Date;
+  lastRevalidatedAt?: Date;
+}) {
+  const ficheCache = await prisma.ficheCache.upsert({
+    where: { ficheId: data.ficheId },
+    create: {
+      ficheId: data.ficheId,
+      groupe: data.groupe,
+      agenceNom: data.agenceNom,
+      prospectNom: data.prospectNom,
+      prospectPrenom: data.prospectPrenom,
+      prospectEmail: data.prospectEmail,
+      prospectTel: data.prospectTel,
+      salesDate: data.salesDate,
+      rawData: data.rawData as import("@prisma/client").Prisma.InputJsonValue,
+      hasRecordings: data.hasRecordings,
+      recordingsCount: data.recordingsCount,
+      expiresAt: data.expiresAt,
+      lastRevalidatedAt: data.lastRevalidatedAt,
+    },
+    update: {
+      groupe: data.groupe,
+      agenceNom: data.agenceNom,
+      prospectNom: data.prospectNom,
+      prospectPrenom: data.prospectPrenom,
+      prospectEmail: data.prospectEmail,
+      prospectTel: data.prospectTel,
+      salesDate: data.salesDate,
+      rawData: data.rawData as import("@prisma/client").Prisma.InputJsonValue,
+      hasRecordings: data.hasRecordings,
+      recordingsCount: data.recordingsCount,
+      fetchedAt: new Date(),
+      expiresAt: data.expiresAt,
+      ...(data.lastRevalidatedAt && {
+        lastRevalidatedAt: data.lastRevalidatedAt,
+      }),
+    },
+  });
+
+  logger.debug("Fiche cache upserted", {
+    fiche_id: data.ficheId,
+    cache_id: String(ficheCache.id),
+    recordings_count: data.recordingsCount,
+    last_revalidated_at: data.lastRevalidatedAt?.toISOString(),
+  });
+
+  return ficheCache;
+}
+
+/**
+ * Upsert recordings for a fiche
+ * Also updates rawData.recordings to keep in sync
+ */
+export async function upsertRecordings(
+  ficheCacheId: bigint,
+  recordings: unknown[]
+) {
   logger.debug("Storing recordings", {
     fiche_cache_id: String(ficheCacheId),
     count: recordings.length,
@@ -180,61 +347,120 @@ async function storeRecordings(ficheCacheId: bigint, recordings: unknown[]) {
   });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// NOTE: DELETE OPERATIONS REMOVED
+// All sales data is permanently stored in the database
+// No automatic deletion of cache entries
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// QUERY HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
- * Delete expired cache entries (only those without associated audits)
- * Only deletes caches that have been expired for over 1 week
+ * Get the oldest revalidation timestamp in a date range
+ * Returns null if no fiches found or none have been revalidated
  */
-export async function deleteExpiredCaches() {
-  logger.info("Cleaning up expired caches");
-
-  // Calculate date 1 week ago
-  const oneWeekAgo = new Date();
-  oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-
-  // Find expired caches that have NO audits (expired over 1 week ago)
-  const expiredCaches = await prisma.ficheCache.findMany({
+export async function getOldestRevalidationInRange(
+  startDate: Date,
+  endDate: Date
+): Promise<Date | null> {
+  const result = await prisma.ficheCache.findFirst({
     where: {
-      expiresAt: {
-        lt: oneWeekAgo,
+      createdAt: {
+        gte: startDate,
+        lte: endDate,
       },
     },
-    include: {
-      _count: {
-        select: {
-          audits: true,
-        },
-      },
+    orderBy: {
+      lastRevalidatedAt: "asc",
+    },
+    select: {
+      lastRevalidatedAt: true,
     },
   });
 
-  logger.info("Found expired caches", {
-    total: expiredCaches.length,
-    with_audits: expiredCaches.filter((c) => c._count.audits > 0).length,
-    without_audits: expiredCaches.filter((c) => c._count.audits === 0).length,
-  });
+  return result?.lastRevalidatedAt || null;
+}
 
-  // Only delete caches that have no audits
-  const cacheIdsToDelete = expiredCaches
-    .filter((cache) => cache._count.audits === 0)
-    .map((cache) => cache.id);
+/**
+ * Check which dates in a range have cached data
+ * Returns object with dates that have data vs dates missing
+ *
+ * IMPORTANT: Uses salesDate field to determine which CRM sales date the fiche belongs to
+ * IMPORTANT: Takes Date parameters but works with YYYY-MM-DD strings to avoid timezone issues
+ */
+export async function getDateRangeCoverage(
+  startDate: Date | string,
+  endDate: Date | string
+): Promise<{
+  datesWithData: string[];
+  datesMissing: string[];
+}> {
+  // Convert to YYYY-MM-DD strings (handle both Date objects and strings)
+  const startDateStr =
+    typeof startDate === "string"
+      ? startDate
+      : startDate.toISOString().split("T")[0];
+  const endDateStr =
+    typeof endDate === "string" ? endDate : endDate.toISOString().split("T")[0];
 
-  if (cacheIdsToDelete.length === 0) {
-    logger.info("No expired caches to delete (all have audit records)");
-    return 0;
+  // Generate all dates in the requested range using string manipulation
+  const allRequestedDates: string[] = [];
+  const current = new Date(startDateStr + "T00:00:00.000Z");
+  const end = new Date(endDateStr + "T00:00:00.000Z");
+
+  while (current <= end) {
+    allRequestedDates.push(current.toISOString().split("T")[0]);
+    current.setUTCDate(current.getUTCDate() + 1);
   }
 
-  const result = await prisma.ficheCache.deleteMany({
+  // Get all fiches that have a salesDate in the requested range
+
+  const fiches = await prisma.ficheCache.findMany({
     where: {
-      id: {
-        in: cacheIdsToDelete,
+      salesDate: {
+        gte: startDateStr,
+        lte: endDateStr,
       },
+    },
+    select: {
+      salesDate: true,
     },
   });
 
-  logger.info("Expired caches deleted", {
-    count: result.count,
-    skipped: expiredCaches.length - result.count,
+  // Extract unique sales dates that have data
+  const datesWithDataSet = new Set<string>();
+  fiches.forEach((fiche) => {
+    if (fiche.salesDate) {
+      datesWithDataSet.add(fiche.salesDate);
+    }
   });
 
-  return result.count;
+  // Separate into with data vs missing (using allRequestedDates generated above)
+  const datesWithData = allRequestedDates.filter((date) =>
+    datesWithDataSet.has(date)
+  );
+  const datesMissing = allRequestedDates.filter(
+    (date) => !datesWithDataSet.has(date)
+  );
+
+  return {
+    datesWithData,
+    datesMissing,
+  };
+}
+
+/**
+ * Check if we have cached data for a specific sales date
+ * Uses salesDate field to determine which CRM date the fiches belong to
+ */
+export async function hasDataForDate(date: string): Promise<boolean> {
+  const count = await prisma.ficheCache.count({
+    where: {
+      salesDate: date, // YYYY-MM-DD format
+    },
+  });
+
+  return count > 0;
 }

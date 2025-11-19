@@ -174,96 +174,23 @@ export const ChatMessageSchema = z.object({
 export type ChatMessage = z.infer<typeof ChatMessageSchema>;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// AUTOMATION TYPES
+// AUTOMATION TYPES (Re-exported from automation module)
 // ═══════════════════════════════════════════════════════════════════════════════
+// Note: These are re-exported for backward compatibility.
+// Prefer importing directly from @modules/automation for new code.
 
-export const ScheduleTypeSchema = z.enum([
-  "MANUAL",
-  "DAILY",
-  "WEEKLY",
-  "MONTHLY",
-  "CRON",
-]);
+export {
+  // Schemas
+  scheduleTypeSchema as ScheduleTypeSchema,
+  ficheSelectionSchema as FicheSelectionSchema,
+  createAutomationScheduleInputSchema as AutomationScheduleCreateSchema,
+  updateAutomationScheduleInputSchema as AutomationScheduleUpdateSchema,
+  triggerAutomationInputSchema as TriggerAutomationSchema,
+  // Note: Response schemas are not exported from automation module
+  // They use the transformed API types instead
+} from "./modules/automation/automation.schemas.js";
 
-export const FicheSelectionSchema = z.object({
-  mode: z.enum(["date_range", "manual", "filter"]),
-  dateRange: z
-    .enum(["last_24h", "yesterday", "last_week", "last_month", "custom"])
-    .optional(),
-  customStartDate: z.string().optional(),
-  customEndDate: z.string().optional(),
-  groupes: z.array(z.string()).optional(),
-  onlyWithRecordings: z.boolean().optional().default(false),
-  onlyUnaudited: z.boolean().optional().default(false),
-  maxFiches: z.number().int().positive().optional(),
-  ficheIds: z.array(z.string()).optional(),
-});
-
-export const AutomationScheduleCreateSchema = z.object({
-  name: z.string().min(1).max(255),
-  description: z.string().optional(),
-  isActive: z.boolean().default(true),
-  createdBy: z.string().optional(),
-
-  // Schedule Configuration
-  scheduleType: ScheduleTypeSchema,
-  cronExpression: z.string().optional(),
-  timezone: z.string().default("UTC"),
-  timeOfDay: z
-    .string()
-    .regex(/^\d{2}:\d{2}$/)
-    .optional(), // HH:MM
-  dayOfWeek: z.number().int().min(0).max(6).optional(),
-  dayOfMonth: z.number().int().min(1).max(31).optional(),
-
-  // Fiche Selection
-  ficheSelection: FicheSelectionSchema,
-
-  // Transcription Configuration
-  runTranscription: z.boolean().default(true),
-  skipIfTranscribed: z.boolean().default(true),
-  transcriptionPriority: z.enum(["low", "normal", "high"]).default("normal"),
-
-  // Audit Configuration
-  runAudits: z.boolean().default(true),
-  useAutomaticAudits: z.boolean().default(true),
-  specificAuditConfigs: z.preprocess((val) => {
-    if (!val || !Array.isArray(val)) return undefined;
-    // Filter out null/undefined values and convert strings to numbers
-    const filtered = val
-      .filter((id: any) => id !== null && id !== undefined && id !== "")
-      .map((id: any) => {
-        if (typeof id === "string") return parseInt(id, 10);
-        return id;
-      });
-    // Return undefined if array is empty after filtering
-    return filtered.length > 0 ? filtered : undefined;
-  }, z.array(z.number().int()).optional()),
-
-  // Error Handling
-  continueOnError: z.boolean().default(true),
-  retryFailed: z.boolean().default(false),
-  maxRetries: z.number().int().min(0).max(5).default(0),
-
-  // Notifications
-  notifyOnComplete: z.boolean().default(true),
-  notifyOnError: z.boolean().default(true),
-  webhookUrl: z.preprocess(
-    (val) => (!val || val === "" ? undefined : val),
-    z.string().url().optional()
-  ),
-  notifyEmails: z.preprocess((val) => {
-    if (!val || !Array.isArray(val)) return [];
-    return val.filter((email: any) => email && email.trim() !== "");
-  }, z.array(z.string().email()).optional()),
-
-  // External API
-  externalApiKey: z.string().optional(),
-});
-
-export const AutomationScheduleUpdateSchema =
-  AutomationScheduleCreateSchema.partial();
-
+// Keep these legacy response schemas for backward compatibility
 export const AutomationScheduleResponseSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -272,13 +199,25 @@ export const AutomationScheduleResponseSchema = z.object({
   createdBy: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
-  scheduleType: ScheduleTypeSchema,
+  scheduleType: z.enum(["MANUAL", "DAILY", "WEEKLY", "MONTHLY", "CRON"]),
   cronExpression: z.string().nullable(),
   timezone: z.string(),
   timeOfDay: z.string().nullable(),
   dayOfWeek: z.number().nullable(),
   dayOfMonth: z.number().nullable(),
-  ficheSelection: FicheSelectionSchema,
+  ficheSelection: z.object({
+    mode: z.enum(["date_range", "manual", "filter"]),
+    dateRange: z
+      .enum(["last_24h", "yesterday", "last_week", "last_month", "custom"])
+      .optional(),
+    customStartDate: z.string().optional(),
+    customEndDate: z.string().optional(),
+    groupes: z.array(z.string()).optional(),
+    onlyWithRecordings: z.boolean().optional(),
+    onlyUnaudited: z.boolean().optional(),
+    maxFiches: z.number().int().positive().optional(),
+    ficheIds: z.array(z.string()).optional(),
+  }),
   runTranscription: z.boolean(),
   skipIfTranscribed: z.boolean(),
   transcriptionPriority: z.string(),
@@ -318,11 +257,6 @@ export const AutomationRunResponseSchema = z.object({
   resultSummary: z.any().nullable(),
 });
 
-export const TriggerAutomationSchema = z.object({
-  scheduleId: z.number().int().positive(),
-  overrideFicheSelection: FicheSelectionSchema.optional(),
-});
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // INFERRED TYPESCRIPT TYPES (Single Source of Truth)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -337,16 +271,17 @@ export type EvidenceCitation = z.infer<typeof EvidenceCitationSchema>;
 export type ControlPoint = z.infer<typeof ControlPointSchema>;
 export type AuditStepResult = z.infer<typeof AuditStepSchema>;
 export type EnhancedQuery = z.infer<typeof EnhancedQuerySchema>;
-export type ScheduleType = z.infer<typeof ScheduleTypeSchema>;
-export type FicheSelection = z.infer<typeof FicheSelectionSchema>;
-export type AutomationScheduleCreate = z.infer<
-  typeof AutomationScheduleCreateSchema
->;
-export type AutomationScheduleUpdate = z.infer<
-  typeof AutomationScheduleUpdateSchema
->;
+// Re-export types from automation module for backward compatibility
+export type {
+  ScheduleType,
+  FicheSelection,
+  CreateAutomationScheduleInput as AutomationScheduleCreate,
+  UpdateAutomationScheduleInput as AutomationScheduleUpdate,
+  TriggerAutomationInput as TriggerAutomation,
+} from "./modules/automation/automation.schemas.js";
+
+// Keep these legacy response types
 export type AutomationScheduleResponse = z.infer<
   typeof AutomationScheduleResponseSchema
 >;
 export type AutomationRunResponse = z.infer<typeof AutomationRunResponseSchema>;
-export type TriggerAutomation = z.infer<typeof TriggerAutomationSchema>;

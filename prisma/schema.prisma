@@ -75,13 +75,17 @@ model FicheCache {
     prospectEmail  String? @map("prospect_email")
     prospectTel    String? @map("prospect_tel")
 
-    rawData         Json     @map("raw_data")
-    hasRecordings   Boolean  @default(false) @map("has_recordings")
-    recordingsCount Int?     @map("recordings_count")
-    fetchedAt       DateTime @default(now()) @map("fetched_at")
-    expiresAt       DateTime @map("expires_at")
-    createdAt       DateTime @default(now()) @map("created_at")
-    updatedAt       DateTime @updatedAt @map("updated_at")
+    // Sales date tracking - which CRM date this fiche belongs to
+    salesDate String? @map("sales_date") // YYYY-MM-DD format - date from CRM sales list
+
+    rawData           Json      @map("raw_data")
+    hasRecordings     Boolean   @default(false) @map("has_recordings")
+    recordingsCount   Int?      @map("recordings_count")
+    fetchedAt         DateTime  @default(now()) @map("fetched_at")
+    expiresAt         DateTime  @map("expires_at")
+    lastRevalidatedAt DateTime? @map("last_revalidated_at")
+    createdAt         DateTime  @default(now()) @map("created_at")
+    updatedAt         DateTime  @updatedAt @map("updated_at")
 
     audits     Audit[]
     recordings Recording[]
@@ -89,6 +93,8 @@ model FicheCache {
     @@index([ficheId])
     @@index([expiresAt])
     @@index([groupe])
+    @@index([salesDate])
+    @@index([lastRevalidatedAt])
     @@map("fiche_cache")
 }
 
@@ -372,4 +378,85 @@ model AutomationLog {
     @@index([level])
     @@index([timestamp])
     @@map("automation_logs")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROGRESSIVE FETCH JOB TRACKING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model ProgressiveFetchJob {
+    id        String @id @default(cuid())
+    startDate String @map("start_date") // YYYY-MM-DD
+    endDate   String @map("end_date") // YYYY-MM-DD
+
+    // Job Status
+    status        String @default("pending") // pending, processing, complete, failed
+    progress      Int    @default(0) // 0-100
+    totalDays     Int    @map("total_days")
+    completedDays Int    @default(0) @map("completed_days")
+    totalFiches   Int    @default(0) @map("total_fiches")
+
+    // Dates tracking
+    datesAlreadyFetched String[] @map("dates_already_fetched")
+    datesRemaining      String[] @map("dates_remaining")
+    datesFailed         String[] @map("dates_failed")
+
+    // Webhook configuration
+    webhookUrl        String?   @map("webhook_url")
+    webhookSecret     String?   @map("webhook_secret")
+    webhookEvents     String[]  @default(["complete", "failed"]) @map("webhook_events")
+    lastWebhookSentAt DateTime? @map("last_webhook_sent_at")
+    webhookAttempts   Int       @default(0) @map("webhook_attempts")
+    webhookLastError  String?   @map("webhook_last_error")
+
+    // Results
+    resultFicheIds String[] @map("result_fiche_ids")
+    error          String?  @map("error") @db.Text
+
+    // Timestamps
+    createdAt   DateTime  @default(now()) @map("created_at")
+    updatedAt   DateTime  @updatedAt @map("updated_at")
+    completedAt DateTime? @map("completed_at")
+
+    // Relations
+    webhookDeliveries WebhookDelivery[]
+
+    // Indexes for performance
+    @@index([status])
+    @@index([startDate, endDate])
+    @@index([createdAt])
+    @@index([completedAt])
+    @@map("progressive_fetch_jobs")
+}
+
+model WebhookDelivery {
+    id    String              @id @default(cuid())
+    jobId String              @map("job_id")
+    job   ProgressiveFetchJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+    // Webhook details
+    event   String // "progress" | "complete" | "failed"
+    url     String
+    payload Json
+
+    // Delivery status
+    status       String  @default("pending") // pending, sent, failed
+    statusCode   Int?    @map("status_code")
+    responseBody String? @map("response_body") @db.Text
+
+    // Retry logic
+    attempt     Int       @default(1)
+    maxAttempts Int       @default(3) @map("max_attempts")
+    nextRetryAt DateTime? @map("next_retry_at")
+
+    // Timestamps
+    sentAt    DateTime? @map("sent_at")
+    createdAt DateTime  @default(now()) @map("created_at")
+
+    // Indexes
+    @@index([jobId])
+    @@index([status, nextRetryAt])
+    @@index([event])
+    @@index([createdAt])
+    @@map("webhook_deliveries")
 }

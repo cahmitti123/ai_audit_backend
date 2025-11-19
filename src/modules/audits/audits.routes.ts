@@ -1,20 +1,25 @@
 /**
  * Audits Routes
  * =============
- * API endpoints for audit execution and results
+ * RESPONSIBILITY: HTTP API endpoints
+ * - Request/response handling
+ * - Input validation
+ * - Error handling
+ * - Delegates to service layer
+ *
+ * LAYER: Presentation (HTTP)
  */
 
 import { Router, Request, Response } from "express";
 import { inngest } from "../../inngest/client.js";
-import { runAudit } from "./audits.runner.js";
+import * as auditsService from "./audits.service.js";
 import {
-  getAuditsByFiche,
-  getAuditById,
-  listAudits,
-  getAuditsGroupedByFiches,
-  ListAuditsFilters,
-} from "./audits.repository.js";
+  validateRunAuditInput,
+  validateBatchAuditInput,
+  parseListAuditsQuery,
+} from "./audits.schemas.js";
 import { jsonResponse } from "../../shared/bigint-serializer.js";
+import { logger } from "../../shared/logger.js";
 
 export const auditsRouter = Router();
 
@@ -102,115 +107,28 @@ export const auditsRouter = Router();
  */
 auditsRouter.get("/", async (req: Request, res: Response) => {
   try {
-    // Parse query parameters
-    const filters: ListAuditsFilters = {};
+    // Parse and validate query parameters
+    const filters = parseListAuditsQuery(req.query as any);
 
-    // Fiche IDs filter
-    if (req.query.fiche_ids && typeof req.query.fiche_ids === "string") {
-      filters.ficheIds = req.query.fiche_ids.split(",").map((id) => id.trim());
-    }
-
-    // Status filter
-    if (req.query.status && typeof req.query.status === "string") {
-      filters.status = req.query.status.split(",").map((s) => s.trim());
-    }
-
-    // Compliance filter
-    if (req.query.is_compliant !== undefined) {
-      filters.isCompliant = req.query.is_compliant === "true";
-    }
-
-    // Date range filters
-    if (req.query.date_from && typeof req.query.date_from === "string") {
-      filters.dateFrom = new Date(req.query.date_from);
-      if (isNaN(filters.dateFrom.getTime())) {
-        return res.status(400).json({
-          success: false,
-          error: "Invalid date_from format. Use ISO 8601 (YYYY-MM-DD)",
-        });
-      }
-    }
-
-    if (req.query.date_to && typeof req.query.date_to === "string") {
-      filters.dateTo = new Date(req.query.date_to);
-      // Set to end of day
-      filters.dateTo.setHours(23, 59, 59, 999);
-      if (isNaN(filters.dateTo.getTime())) {
-        return res.status(400).json({
-          success: false,
-          error: "Invalid date_to format. Use ISO 8601 (YYYY-MM-DD)",
-        });
-      }
-    }
-
-    // Audit config IDs filter
-    if (
-      req.query.audit_config_ids &&
-      typeof req.query.audit_config_ids === "string"
-    ) {
-      filters.auditConfigIds = req.query.audit_config_ids
-        .split(",")
-        .map((id) => id.trim());
-    }
-
-    // Sorting
-    if (req.query.sort_by && typeof req.query.sort_by === "string") {
-      const validSortFields = [
-        "created_at",
-        "completed_at",
-        "score_percentage",
-        "duration_ms",
-      ];
-      if (validSortFields.includes(req.query.sort_by)) {
-        filters.sortBy = req.query.sort_by as any;
-      }
-    }
-
-    if (req.query.sort_order && typeof req.query.sort_order === "string") {
-      if (["asc", "desc"].includes(req.query.sort_order)) {
-        filters.sortOrder = req.query.sort_order as "asc" | "desc";
-      }
-    }
-
-    // Pagination
-    if (req.query.limit) {
-      const limit = parseInt(req.query.limit as string);
-      if (!isNaN(limit) && limit > 0) {
-        filters.limit = Math.min(limit, 500); // Max 500
-      }
-    }
-
-    if (req.query.offset) {
-      const offset = parseInt(req.query.offset as string);
-      if (!isNaN(offset) && offset >= 0) {
-        filters.offset = offset;
-      }
-    }
-
-    // Execute query
-    const result = await listAudits(filters);
-
-    // Convert BigInt to string for JSON serialization
-    const serializable = JSON.parse(
-      JSON.stringify(result, (key, value) =>
-        typeof value === "bigint" ? value.toString() : value
-      )
-    );
+    // Execute query via service
+    const result = await auditsService.listAudits(filters);
 
     // Calculate pagination info
-    const totalPages = Math.ceil(serializable.total / serializable.limit);
+    const totalPages = Math.ceil(
+      result.pagination.total / result.pagination.limit
+    );
     const currentPage =
-      Math.floor(serializable.offset / serializable.limit) + 1;
+      Math.floor(result.pagination.offset / result.pagination.limit) + 1;
     const hasNextPage = currentPage < totalPages;
     const hasPrevPage = currentPage > 1;
 
     res.json({
       success: true,
-      data: serializable.audits,
+      data: result.audits,
       pagination: {
-        total: serializable.total,
-        limit: serializable.limit,
-        offset: serializable.offset,
+        total: result.pagination.total,
+        limit: result.pagination.limit,
+        offset: result.pagination.offset,
         current_page: currentPage,
         total_pages: totalPages,
         has_next_page: hasNextPage,
@@ -218,7 +136,7 @@ auditsRouter.get("/", async (req: Request, res: Response) => {
       },
     });
   } catch (error: any) {
-    console.error("Error listing audits:", error);
+    logger.error("Error listing audits", { error: error.message });
     res.status(500).json({
       success: false,
       error: "Failed to list audits",
@@ -361,119 +279,28 @@ auditsRouter.get("/", async (req: Request, res: Response) => {
  */
 auditsRouter.get("/grouped-by-fiches", async (req: Request, res: Response) => {
   try {
-    // Parse query parameters (same as main list endpoint)
-    const filters: ListAuditsFilters = {};
+    // Parse and validate query parameters
+    const filters = parseListAuditsQuery(req.query as any);
 
-    // Fiche IDs filter
-    if (req.query.fiche_ids && typeof req.query.fiche_ids === "string") {
-      filters.ficheIds = req.query.fiche_ids.split(",").map((id) => id.trim());
-    }
-
-    // Status filter
-    if (req.query.status && typeof req.query.status === "string") {
-      filters.status = req.query.status.split(",").map((s) => s.trim());
-    }
-
-    // Compliance filter
-    if (req.query.is_compliant !== undefined) {
-      filters.isCompliant = req.query.is_compliant === "true";
-    }
-
-    // Date range filters
-    if (req.query.date_from && typeof req.query.date_from === "string") {
-      filters.dateFrom = new Date(req.query.date_from);
-      if (isNaN(filters.dateFrom.getTime())) {
-        return res.status(400).json({
-          success: false,
-          error: "Invalid date_from format. Use ISO 8601 (YYYY-MM-DD)",
-        });
-      }
-    }
-
-    if (req.query.date_to && typeof req.query.date_to === "string") {
-      filters.dateTo = new Date(req.query.date_to);
-      // Set to end of day
-      filters.dateTo.setHours(23, 59, 59, 999);
-      if (isNaN(filters.dateTo.getTime())) {
-        return res.status(400).json({
-          success: false,
-          error: "Invalid date_to format. Use ISO 8601 (YYYY-MM-DD)",
-        });
-      }
-    }
-
-    // Audit config IDs filter
-    if (
-      req.query.audit_config_ids &&
-      typeof req.query.audit_config_ids === "string"
-    ) {
-      filters.auditConfigIds = req.query.audit_config_ids
-        .split(",")
-        .map((id) => id.trim());
-    }
-
-    // Sorting
-    if (req.query.sort_by && typeof req.query.sort_by === "string") {
-      const validSortFields = [
-        "created_at",
-        "completed_at",
-        "score_percentage",
-        "duration_ms",
-      ];
-      if (validSortFields.includes(req.query.sort_by)) {
-        filters.sortBy = req.query.sort_by as any;
-      }
-    }
-
-    if (req.query.sort_order && typeof req.query.sort_order === "string") {
-      if (["asc", "desc"].includes(req.query.sort_order)) {
-        filters.sortOrder = req.query.sort_order as "asc" | "desc";
-      }
-    }
-
-    // Pagination
-    if (req.query.limit) {
-      const limit = parseInt(req.query.limit as string);
-      if (!isNaN(limit) && limit > 0) {
-        filters.limit = Math.min(limit, 500); // Max 500
-      }
-    }
-
-    if (req.query.offset) {
-      const offset = parseInt(req.query.offset as string);
-      if (!isNaN(offset) && offset >= 0) {
-        filters.offset = offset;
-      }
-    }
-
-    // Execute query
-    const result = await getAuditsGroupedByFiches(filters);
-
-    // Convert BigInt to string for JSON serialization
-    const serializable = JSON.parse(
-      JSON.stringify(result, (key, value) =>
-        typeof value === "bigint" ? value.toString() : value
-      )
-    );
+    // Execute query via service
+    const result = await auditsService.getAuditsGroupedByFiches(filters);
 
     // Calculate pagination info
     const totalPages = Math.ceil(
-      serializable.pagination.total / serializable.pagination.limit
+      result.pagination.total / result.pagination.limit
     );
     const currentPage =
-      Math.floor(
-        serializable.pagination.offset / serializable.pagination.limit
-      ) + 1;
+      Math.floor(result.pagination.offset / result.pagination.limit) + 1;
     const hasNextPage = currentPage < totalPages;
     const hasPrevPage = currentPage > 1;
 
     res.json({
       success: true,
-      data: serializable.data,
+      data: result.data,
       pagination: {
-        total: serializable.pagination.total,
-        limit: serializable.pagination.limit,
-        offset: serializable.pagination.offset,
+        total: result.pagination.total,
+        limit: result.pagination.limit,
+        offset: result.pagination.offset,
         current_page: currentPage,
         total_pages: totalPages,
         has_next_page: hasNextPage,
@@ -481,7 +308,9 @@ auditsRouter.get("/grouped-by-fiches", async (req: Request, res: Response) => {
       },
     });
   } catch (error: any) {
-    console.error("Error fetching audits grouped by fiches:", error);
+    logger.error("Error fetching audits grouped by fiches", {
+      error: error.message,
+    });
     res.status(500).json({
       success: false,
       error: "Failed to fetch audits grouped by fiches",
@@ -807,14 +636,21 @@ auditsRouter.post("/batch", async (req: Request, res: Response) => {
 auditsRouter.get("/by-fiche/:fiche_id", async (req: Request, res: Response) => {
   try {
     const includeDetails = req.query.include_details === "true";
-    const audits = await getAuditsByFiche(req.params.fiche_id, includeDetails);
+    const audits = await auditsService.getAuditsByFiche(
+      req.params.fiche_id,
+      includeDetails
+    );
 
-    return jsonResponse(res, { 
-      success: true, 
-      data: audits, 
-      count: audits.length 
+    return jsonResponse(res, {
+      success: true,
+      data: audits,
+      count: audits.length,
     });
   } catch (error: any) {
+    logger.error("Error fetching audits by fiche", {
+      ficheId: req.params.fiche_id,
+      error: error.message,
+    });
     res.status(500).json({
       success: false,
       error: "Failed to fetch audits",
@@ -832,7 +668,7 @@ auditsRouter.get("/by-fiche/:fiche_id", async (req: Request, res: Response) => {
  */
 auditsRouter.get("/:audit_id", async (req: Request, res: Response) => {
   try {
-    const audit = await getAuditById(BigInt(req.params.audit_id));
+    const audit = await auditsService.getAuditById(req.params.audit_id);
 
     if (!audit) {
       return res.status(404).json({
@@ -841,11 +677,15 @@ auditsRouter.get("/:audit_id", async (req: Request, res: Response) => {
       });
     }
 
-    return jsonResponse(res, { 
-      success: true, 
-      data: audit 
+    return jsonResponse(res, {
+      success: true,
+      data: audit,
     });
   } catch (error: any) {
+    logger.error("Error fetching audit", {
+      auditId: req.params.audit_id,
+      error: error.message,
+    });
     res.status(500).json({
       success: false,
       error: "Failed to fetch audit",

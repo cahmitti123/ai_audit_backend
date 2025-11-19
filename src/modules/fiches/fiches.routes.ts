@@ -1,26 +1,24 @@
 /**
  * Fiches Routes
  * =============
- * API endpoints for fiche operations
+ * RESPONSIBILITY: HTTP endpoints only
+ * - Request/response handling
+ * - Input validation
+ * - Delegates to service layer
+ * - No business logic
+ *
+ * LAYER: Presentation (HTTP)
  */
 
 import { Router, Request, Response } from "express";
-import {
-  fetchApiSales,
-  getFicheWithCache,
-  refreshFicheFromApi,
-  getFicheStatus,
-  getFichesStatus,
-  getFichesByDateWithStatus,
-  getFichesByDateRangeWithStatus,
-} from "./fiches.service.js";
-import { getCachedFiche } from "./fiches.repository.js";
+import * as fichesApi from "./fiches.api.js";
+import * as fichesService from "./fiches.service.js";
+import * as fichesRepository from "./fiches.repository.js";
+import * as fichesRevalidation from "./fiches.revalidation.js";
 import { jsonResponse } from "../../shared/bigint-serializer.js";
-import type {
-  SalesFiche,
-  SalesResponseWithStatus,
-  FicheStatus,
-} from "./fiches.schemas.js";
+import { logger } from "../../shared/logger.js";
+import { inngest } from "../../inngest/client.js";
+import { prisma } from "../../shared/prisma.js";
 
 export const fichesRouter = Router();
 
@@ -51,95 +49,39 @@ export const fichesRouter = Router();
 fichesRouter.get("/search", async (req: Request, res: Response) => {
   try {
     const { date, includeStatus } = req.query;
-    console.log("Received search request with date:", date);
 
     if (!date || typeof date !== "string") {
-      console.log("Invalid date parameter received");
       return res.status(400).json({
         success: false,
         error: "Missing or invalid date parameter (YYYY-MM-DD required)",
       });
     }
 
-    console.log("Fetching sales for date:", date);
-
-    const sales = await fetchApiSales(date);
-    console.log(
-      "Successfully fetched sales, count:",
-      sales?.fiches?.length || 0
+    // Use service layer for orchestration
+    // Use same date for both start and end to search single day
+    const shouldIncludeStatus = includeStatus !== "false";
+    const result = await fichesService.getSalesByDateRange(
+      date,
+      date,
+      shouldIncludeStatus
     );
 
-    // Include status information if requested (default: true)
-    const shouldIncludeStatus = includeStatus !== "false";
+    return res.json(result);
+  } catch (error) {
+    const err = error as Error;
+    logger.error("Error fetching fiches", {
+      error: err.message,
+      date: req.query.date,
+    });
 
-    if (shouldIncludeStatus && sales.fiches && sales.fiches.length > 0) {
-      console.log("Fetching status information for fiches");
-
-      // Extract fiche IDs from the sales data
-      const ficheIds = sales.fiches
-        .map((fiche: SalesFiche) => fiche.id)
-        .filter((id): id is string => Boolean(id));
-
-      if (ficheIds.length > 0) {
-        const statusMap = await getFichesStatus(ficheIds);
-
-        // Create default status for missing entries
-        const defaultStatus: FicheStatus = {
-          hasData: false,
-          transcription: {
-            total: 0,
-            transcribed: 0,
-            pending: 0,
-            percentage: 0,
-            isComplete: false,
-          },
-          audit: {
-            total: 0,
-            completed: 0,
-            pending: 0,
-            running: 0,
-            compliant: 0,
-            nonCompliant: 0,
-            averageScore: null,
-          },
-        };
-
-        // Enrich fiches with status information
-        const enrichedResponse: SalesResponseWithStatus = {
-          fiches: sales.fiches.map((fiche: SalesFiche) => {
-            const ficheId = fiche.id;
-            const status = ficheId ? statusMap[ficheId] : null;
-
-            return {
-              ...fiche,
-              status: status || defaultStatus,
-            };
-          }),
-          total: sales.total,
-        };
-
-        console.log("Status information added to fiches");
-        return res.json(enrichedResponse);
-      }
-    }
-
-    return res.json(sales);
-  } catch (error: any) {
-    console.error("Error fetching fiches:", error.message);
-
-    // Check if it's a validation error (date format)
-    const isValidationError = error.message?.includes("Invalid date format");
-    const statusCode = isValidationError ? 400 : 500;
-
-    res.status(statusCode).json({
+    res.status(500).json({
       success: false,
-      error: isValidationError
-        ? "Invalid date format"
-        : "Failed to fetch fiches",
-      message: error.message,
+      error: "Failed to fetch fiches",
+      message: err.message,
     });
   }
 });
+
 /**
  * @swagger
  * /api/fiches/{fiche_id}:
@@ -150,10 +92,6 @@ fichesRouter.get("/search", async (req: Request, res: Response) => {
  *       - in: path
  *         name: fiche_id
  *         required: true
- *         schema:
- *           type: string
- *       - in: query
- *         name: cle
  *         schema:
  *           type: string
  *       - in: query
@@ -168,55 +106,24 @@ fichesRouter.get("/search", async (req: Request, res: Response) => {
 fichesRouter.get("/:fiche_id", async (req: Request, res: Response) => {
   try {
     const { fiche_id } = req.params;
-    const { cle, refresh } = req.query;
+    const { refresh } = req.query;
     const shouldRefresh = refresh === "true";
 
-    console.log("Received fiche details request", {
-      fiche_id,
-      has_cle: Boolean(cle),
-      refresh: shouldRefresh,
-    });
+    // Use service layer for orchestration
+    const ficheDetails = await fichesService.getFiche(fiche_id, shouldRefresh);
 
-    let ficheDetails;
-
-    if (shouldRefresh) {
-      // Force refresh from external API and upsert to database
-      console.log("Force refreshing fiche from API", { fiche_id });
-      ficheDetails = await refreshFicheFromApi(
-        fiche_id,
-        cle as string | undefined
-      );
-      console.log("Fiche details refreshed from API and upserted to DB", {
-        fiche_id,
-        has_data: Boolean(ficheDetails),
-      });
-    } else {
-      // Use cache (or fetch and cache if not cached)
-      console.log("Fetching fiche with cache", { fiche_id });
-      ficheDetails = await getFicheWithCache(
-        fiche_id,
-        cle as string | undefined
-      );
-      console.log("Fiche details fetched from cache/API", {
-        fiche_id,
-        has_data: Boolean(ficheDetails),
-      });
-    }
-
-    console.log("Successfully fetched fiche details, sending response", {
-      fiche_id,
-      refreshed: shouldRefresh,
-    });
     return jsonResponse(res, ficheDetails);
-  } catch (error: any) {
-    console.error("Error fetching fiche details:", error.message, {
+  } catch (error) {
+    const err = error as Error;
+    logger.error("Error fetching fiche details", {
+      error: err.message,
       fiche_id: req.params.fiche_id,
-      stack: error.stack,
+      stack: err.stack,
     });
     return res.status(500).json({
       success: false,
       error: "Failed to fetch fiche details",
-      message: error.message,
+      message: err.message,
     });
   }
 });
@@ -241,7 +148,7 @@ fichesRouter.get("/:fiche_id", async (req: Request, res: Response) => {
  */
 fichesRouter.get("/:fiche_id/cache", async (req: Request, res: Response) => {
   try {
-    const cached = await getCachedFiche(req.params.fiche_id);
+    const cached = await fichesRepository.getCachedFiche(req.params.fiche_id);
 
     if (!cached) {
       return res.status(404).json({
@@ -262,11 +169,12 @@ fichesRouter.get("/:fiche_id/cache", async (req: Request, res: Response) => {
         expiresAt: cached.expiresAt,
       },
     });
-  } catch (error: any) {
+  } catch (error) {
+    const err = error as Error;
     res.status(500).json({
       success: false,
       error: "Failed to fetch cached fiche",
-      message: error.message,
+      message: err.message,
     });
   }
 });
@@ -291,7 +199,7 @@ fichesRouter.get("/:fiche_id/cache", async (req: Request, res: Response) => {
  */
 fichesRouter.get("/:fiche_id/status", async (req: Request, res: Response) => {
   try {
-    const status = await getFicheStatus(req.params.fiche_id);
+    const status = await fichesService.getFicheStatus(req.params.fiche_id);
 
     if (!status) {
       return res.status(404).json({
@@ -306,11 +214,12 @@ fichesRouter.get("/:fiche_id/status", async (req: Request, res: Response) => {
       success: true,
       data: status,
     });
-  } catch (error: any) {
+  } catch (error) {
+    const err = error as Error;
     res.status(500).json({
       success: false,
       error: "Failed to fetch fiche status",
-      message: error.message,
+      message: err.message,
     });
   }
 });
@@ -347,17 +256,18 @@ fichesRouter.post("/status/batch", async (req: Request, res: Response) => {
       });
     }
 
-    const statusMap = await getFichesStatus(ficheIds);
+    const statusMap = await fichesService.getFichesStatus(ficheIds);
 
     res.json({
       success: true,
       data: statusMap,
     });
-  } catch (error: any) {
+  } catch (error) {
+    const err = error as Error;
     res.status(500).json({
       success: false,
       error: "Failed to fetch fiches status",
-      message: error.message,
+      message: err.message,
     });
   }
 });
@@ -380,24 +290,6 @@ fichesRouter.post("/status/batch", async (req: Request, res: Response) => {
  *     responses:
  *       200:
  *         description: List of fiches with complete status information
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 data:
- *                   type: object
- *                   properties:
- *                     date:
- *                       type: string
- *                     total:
- *                       type: integer
- *                     fiches:
- *                       type: array
- *                       items:
- *                         type: object
  */
 fichesRouter.get("/status/by-date", async (req: Request, res: Response) => {
   try {
@@ -419,21 +311,22 @@ fichesRouter.get("/status/by-date", async (req: Request, res: Response) => {
       });
     }
 
-    console.log("Fetching fiches with status for date:", date);
-    const result = await getFichesByDateWithStatus(date);
-
-    console.log(`Found ${result.total} fiches for date ${date}`);
+    const result = await fichesService.getFichesByDateWithStatus(date);
 
     res.json({
       success: true,
       data: result,
     });
-  } catch (error: any) {
-    console.error("Error fetching fiches by date with status:", error);
+  } catch (error) {
+    const err = error as Error;
+    logger.error("Error fetching fiches by date with status", {
+      error: err.message,
+      date: req.query.date,
+    });
     res.status(500).json({
       success: false,
       error: "Failed to fetch fiches by date",
-      message: error.message,
+      message: err.message,
     });
   }
 });
@@ -443,7 +336,13 @@ fichesRouter.get("/status/by-date", async (req: Request, res: Response) => {
  * /api/fiches/status/by-date-range:
  *   get:
  *     tags: [Fiches]
- *     summary: Get all fiches for a date range with complete status information
+ *     summary: Progressive fetch - returns first available data immediately, continues in background
+ *     description: |
+ *       This endpoint uses a progressive loading strategy:
+ *       1. Checks cache for all dates in range
+ *       2. Returns cached data + first missing day immediately
+ *       3. Fetches remaining days in background
+ *       4. Sends webhook notification when complete (if webhookUrl provided)
  *     parameters:
  *       - in: query
  *         name: startDate
@@ -451,22 +350,38 @@ fichesRouter.get("/status/by-date", async (req: Request, res: Response) => {
  *         schema:
  *           type: string
  *           format: date
+ *         description: Start date in YYYY-MM-DD format
  *       - in: query
  *         name: endDate
  *         required: true
  *         schema:
  *           type: string
  *           format: date
+ *         description: End date in YYYY-MM-DD format
+ *       - in: query
+ *         name: webhookUrl
+ *         required: false
+ *         schema:
+ *           type: string
+ *           format: uri
+ *         description: URL to receive completion notification
+ *       - in: query
+ *         name: webhookSecret
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Secret for webhook HMAC signature
  *     responses:
  *       200:
- *         description: List of fiches with complete status information
+ *         description: Progressive response with partial/complete data
  */
 fichesRouter.get(
   "/status/by-date-range",
   async (req: Request, res: Response) => {
     try {
-      const { startDate, endDate } = req.query;
+      const { startDate, endDate, webhookUrl, webhookSecret } = req.query;
 
+      // Validate input
       if (!startDate || typeof startDate !== "string") {
         return res.status(400).json({
           success: false,
@@ -497,27 +412,346 @@ fichesRouter.get(
         });
       }
 
-      console.log("Fetching fiches with status for date range:", {
+      // Validate webhook URL if provided
+      if (webhookUrl && typeof webhookUrl === "string") {
+        try {
+          const url = new URL(webhookUrl);
+          if (!["http:", "https:"].includes(url.protocol)) {
+            return res.status(400).json({
+              success: false,
+              error: "webhookUrl must use http or https protocol",
+            });
+          }
+        } catch {
+          return res.status(400).json({
+            success: false,
+            error: "Invalid webhookUrl format",
+          });
+        }
+      }
+
+      // Helper to trigger background continuation
+      const triggerBackgroundFetch = async (
+        jobId: string,
+        remainingDates: string[],
+        _firstFetchedDate: string | null // Not used anymore
+      ) => {
+        logger.info("Triggering background fetch continuation", {
+          jobId,
+          remainingDatesCount: remainingDates.length,
+          webhookConfigured: Boolean(webhookUrl),
+        });
+
+        await inngest
+          .send({
+            name: "fiches/progressive-fetch-continue",
+            data: {
+              jobId,
+              startDate,
+              endDate,
+              datesAlreadyFetched: [], // Background will fetch ALL remaining dates
+              webhookUrl: webhookUrl as string | undefined,
+              webhookSecret: webhookSecret as string | undefined,
+            },
+            // Idempotency key prevents duplicate jobs for same job ID
+            id: `progressive-fetch-${jobId}`,
+          })
+          .catch((error) => {
+            const err = error as Error;
+            logger.error("Failed to trigger background fetch", {
+              jobId,
+              error: err.message,
+            });
+          });
+      };
+
+      // Use progressive fetch strategy
+      const result = await fichesService.getFichesByDateRangeProgressive(
         startDate,
         endDate,
-      });
-      const result = await getFichesByDateRangeWithStatus(startDate, endDate);
-
-      console.log(
-        `Found ${result.total} fiches for date range ${startDate} to ${endDate}`
+        {
+          webhookUrl: webhookUrl as string | undefined,
+          webhookSecret: webhookSecret as string | undefined,
+          triggerBackgroundFetch,
+        }
       );
 
       res.json({
         success: true,
-        data: result,
+        ...result,
       });
-    } catch (error: any) {
-      console.error("Error fetching fiches by date range with status:", error);
+    } catch (error) {
+      const err = error as Error;
+      logger.error("Error fetching fiches by date range with status", {
+        error: err.message,
+        startDate: req.query.startDate,
+        endDate: req.query.endDate,
+        stack: err.stack,
+      });
       res.status(500).json({
         success: false,
         error: "Failed to fetch fiches by date range",
-        message: error.message,
+        message: err.message,
       });
     }
   }
 );
+
+/**
+ * @swagger
+ * /api/webhooks/fiches:
+ *   get:
+ *     tags: [Fiches]
+ *     summary: Poll for job updates (used by frontend)
+ *     description: Alternative to webhooks - frontend can poll this endpoint for progress
+ *     parameters:
+ *       - in: query
+ *         name: jobId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Job status with partial data
+ */
+fichesRouter.get("/webhooks/fiches", async (req: Request, res: Response) => {
+  try {
+    const { jobId } = req.query;
+
+    if (!jobId || typeof jobId !== "string") {
+      return res.status(400).json({
+        success: false,
+        error: "Missing jobId parameter",
+      });
+    }
+
+    const job = await prisma.progressiveFetchJob.findUnique({
+      where: { id: jobId },
+    });
+
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        error: "Notification not found",
+        jobId,
+      });
+    }
+
+    // Get current cached data if job is processing or complete
+    let partialFiches: Array<{
+      ficheId: string;
+      groupe: string | null;
+      prospectNom: string | null;
+      prospectPrenom: string | null;
+      recordingsCount: number;
+      createdAt: Date;
+    }> = [];
+
+    if (job.status === "processing" || job.status === "complete") {
+      const startOfRange = new Date(job.startDate);
+      startOfRange.setHours(0, 0, 0, 0);
+      const endOfRange = new Date(job.endDate);
+      endOfRange.setHours(23, 59, 59, 999);
+
+      const cachedData = await fichesRepository.getFichesByDateRange(
+        startOfRange,
+        endOfRange
+      );
+
+      partialFiches = cachedData.map((fc) => ({
+        ficheId: fc.ficheId,
+        groupe: fc.groupe,
+        prospectNom: fc.prospectNom,
+        prospectPrenom: fc.prospectPrenom,
+        recordingsCount: fc.recordings.length,
+        createdAt: fc.createdAt,
+      }));
+    }
+
+    return res.json({
+      success: true,
+      jobId: job.id,
+      event: job.status === "complete" ? "complete" : "progress",
+      timestamp: job.updatedAt.toISOString(),
+      data: {
+        status: job.status,
+        progress: job.progress,
+        completedDays: job.completedDays,
+        totalDays: job.totalDays,
+        totalFiches: job.totalFiches,
+        currentFichesCount: partialFiches.length,
+        datesCompleted: job.datesAlreadyFetched,
+        datesRemaining: job.datesRemaining,
+        datesFailed: job.datesFailed,
+        error: job.error,
+        partialData: partialFiches,
+        dataUrl:
+          job.status === "complete"
+            ? `${
+                process.env.API_BASE_URL || "http://localhost:3002"
+              }/api/fiches/status/by-date-range?startDate=${
+                job.startDate
+              }&endDate=${job.endDate}`
+            : undefined,
+      },
+    });
+  } catch (error) {
+    const err = error as Error;
+    logger.error("Error polling job status", {
+      error: err.message,
+      jobId: req.query.jobId,
+    });
+    return res.status(500).json({
+      success: false,
+      error: "Failed to fetch job status",
+      message: err.message,
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/fiches/jobs/{jobId}:
+ *   get:
+ *     tags: [Fiches]
+ *     summary: Get progressive fetch job status
+ *     parameters:
+ *       - in: path
+ *         name: jobId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Job status and progress
+ */
+fichesRouter.get("/jobs/:jobId", async (req: Request, res: Response) => {
+  try {
+    const { jobId } = req.params;
+
+    const job = await prisma.progressiveFetchJob.findUnique({
+      where: { id: jobId },
+      include: {
+        webhookDeliveries: {
+          orderBy: { createdAt: "desc" },
+          take: 10, // Last 10 deliveries
+        },
+      },
+    });
+
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        error: "Job not found",
+      });
+    }
+
+    return res.json({
+      success: true,
+      job: {
+        id: job.id,
+        status: job.status,
+        progress: job.progress,
+        completedDays: job.completedDays,
+        totalDays: job.totalDays,
+        totalFiches: job.totalFiches,
+        startDate: job.startDate,
+        endDate: job.endDate,
+        datesAlreadyFetched: job.datesAlreadyFetched,
+        datesRemaining: job.datesRemaining,
+        datesFailed: job.datesFailed,
+        error: job.error,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        completedAt: job.completedAt,
+        webhookDeliveries: job.webhookDeliveries.map((d) => ({
+          id: d.id,
+          event: d.event,
+          status: d.status,
+          statusCode: d.statusCode,
+          attempt: d.attempt,
+          sentAt: d.sentAt,
+          createdAt: d.createdAt,
+        })),
+      },
+    });
+  } catch (error) {
+    const err = error as Error;
+    logger.error("Error fetching job status", {
+      error: err.message,
+      jobId: req.params.jobId,
+    });
+    return res.status(500).json({
+      success: false,
+      error: "Failed to fetch job status",
+      message: err.message,
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/fiches/jobs:
+ *   get:
+ *     tags: [Fiches]
+ *     summary: List progressive fetch jobs
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [pending, processing, complete, failed]
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *     responses:
+ *       200:
+ *         description: List of jobs
+ */
+fichesRouter.get("/jobs", async (req: Request, res: Response) => {
+  try {
+    const { status, limit = "20" } = req.query;
+
+    const jobs = await prisma.progressiveFetchJob.findMany({
+      where: status ? { status: status as string } : undefined,
+      orderBy: { createdAt: "desc" },
+      take: parseInt(limit as string, 10),
+      include: {
+        _count: {
+          select: { webhookDeliveries: true },
+        },
+      },
+    });
+
+    return res.json({
+      success: true,
+      jobs: jobs.map((job) => ({
+        id: job.id,
+        status: job.status,
+        progress: job.progress,
+        startDate: job.startDate,
+        endDate: job.endDate,
+        completedDays: job.completedDays,
+        totalDays: job.totalDays,
+        totalFiches: job.totalFiches,
+        datesFailed: job.datesFailed,
+        createdAt: job.createdAt,
+        completedAt: job.completedAt,
+        webhookDeliveriesCount: job._count.webhookDeliveries,
+      })),
+      total: jobs.length,
+    });
+  } catch (error) {
+    const err = error as Error;
+    logger.error("Error listing jobs", {
+      error: err.message,
+    });
+    return res.status(500).json({
+      success: false,
+      error: "Failed to list jobs",
+      message: err.message,
+    });
+  }
+});

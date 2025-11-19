@@ -23,6 +23,11 @@ type Events = {
   "fiche/fetch": { data: FichesEvents["fiche/fetch"] };
   "fiche/fetched": { data: FichesEvents["fiche/fetched"] };
   "fiche/cache.expired": { data: FichesEvents["fiche/cache.expired"] };
+  "fiches/revalidate-date": { data: FichesEvents["fiches/revalidate-date"] };
+  "fiches/cache-sales-list": { data: FichesEvents["fiches/cache-sales-list"] };
+  "fiches/progressive-fetch-continue": {
+    data: FichesEvents["fiches/progressive-fetch-continue"];
+  };
 
   // Transcriptions domain events
   "fiche/transcribe": { data: TranscriptionsEvents["fiche/transcribe"] };

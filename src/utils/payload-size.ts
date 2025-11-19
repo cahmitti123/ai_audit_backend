@@ -9,7 +9,10 @@
  */
 export function getPayloadSize(data: any): number {
   try {
-    const jsonString = JSON.stringify(data);
+    // Custom replacer to handle BigInt serialization
+    const jsonString = JSON.stringify(data, (key, value) =>
+      typeof value === "bigint" ? value.toString() : value
+    );
     // Use Buffer.byteLength for accurate byte count (handles UTF-8)
     return Buffer.byteLength(jsonString, "utf8");
   } catch (error) {

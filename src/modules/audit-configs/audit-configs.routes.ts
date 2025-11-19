@@ -1,20 +1,24 @@
 /**
  * Audit Configs Routes
  * ====================
- * API endpoints for audit configuration management
+ * RESPONSIBILITY: HTTP API endpoints
+ * - Request/response handling
+ * - Input validation
+ * - Error handling
+ * - Delegates to service layer
+ *
+ * LAYER: Presentation (HTTP)
  */
 
 import { Router, Request, Response } from "express";
+import * as auditConfigsService from "./audit-configs.service.js";
 import {
-  getAllAuditConfigs,
-  getAuditConfigById,
-  createAuditConfig,
-  updateAuditConfig,
-  deleteAuditConfig,
-  addAuditStep,
-  updateAuditStep,
-  deleteAuditStep,
-} from "./audit-configs.repository.js";
+  validateCreateAuditConfigInput,
+  validateUpdateAuditConfigInput,
+  validateCreateAuditStepInput,
+  validateUpdateAuditStepInput,
+} from "./audit-configs.schemas.js";
+import { logger } from "../../shared/logger.js";
 
 export const auditConfigsRouter = Router();
 
@@ -24,38 +28,39 @@ export const auditConfigsRouter = Router();
  *   get:
  *     tags: [Audit Configs]
  *     summary: List all audit configurations
+ *     parameters:
+ *       - name: include_inactive
+ *         in: query
+ *         schema:
+ *           type: boolean
+ *       - name: include_steps
+ *         in: query
+ *         schema:
+ *           type: boolean
+ *       - name: include_stats
+ *         in: query
+ *         schema:
+ *           type: boolean
  */
 auditConfigsRouter.get("/", async (req: Request, res: Response) => {
   try {
     const includeInactive = req.query.include_inactive === "true";
     const includeSteps = req.query.include_steps === "true";
+    const includeStats = req.query.include_stats === "true";
 
-    const configs = await getAllAuditConfigs(includeInactive);
+    if (includeStats) {
+      const stats = await auditConfigsService.getAllAuditConfigsWithStats();
+      return res.json({
+        success: true,
+        data: stats,
+        count: stats.length,
+      });
+    }
 
-    const data = configs.map((config) => ({
-      id: config.id.toString(),
-      name: config.name,
-      description: config.description,
-      systemPrompt: config.systemPrompt,
-      isActive: config.isActive,
-      stepsCount: config.steps.length,
-      createdAt: config.createdAt,
-      createdBy: config.createdBy,
-      ...(includeSteps && {
-        steps: config.steps.map((step) => ({
-          id: step.id.toString(),
-          name: step.name,
-          position: step.position,
-          severityLevel: step.severityLevel,
-          isCritical: step.isCritical,
-          weight: step.weight,
-          chronologicalImportant: step.chronologicalImportant,
-          verifyProductInfo: step.verifyProductInfo,
-          controlPoints: step.controlPoints,
-          keywords: step.keywords,
-        })),
-      }),
-    }));
+    const data = await auditConfigsService.getAllAuditConfigs({
+      includeInactive,
+      includeSteps,
+    });
 
     res.json({
       success: true,
@@ -63,7 +68,7 @@ auditConfigsRouter.get("/", async (req: Request, res: Response) => {
       count: data.length,
     });
   } catch (error: any) {
-    console.error("Error fetching audit configs:", error);
+    logger.error("Error fetching audit configs", { error: error.message });
     res.status(500).json({
       success: false,
       error: "Failed to fetch audit configurations",
@@ -78,11 +83,21 @@ auditConfigsRouter.get("/", async (req: Request, res: Response) => {
  *   get:
  *     tags: [Audit Configs]
  *     summary: Get audit configuration details
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: include_stats
+ *         in: query
+ *         schema:
+ *           type: boolean
  */
 auditConfigsRouter.get("/:id", async (req: Request, res: Response) => {
   try {
-    const configId = BigInt(req.params.id);
-    const config = await getAuditConfigById(configId);
+    const includeStats = req.query.include_stats === "true";
+    const config = await auditConfigsService.getAuditConfigById(req.params.id);
 
     if (!config) {
       return res.status(404).json({
@@ -91,35 +106,28 @@ auditConfigsRouter.get("/:id", async (req: Request, res: Response) => {
       });
     }
 
+    if (includeStats) {
+      const stats = await auditConfigsService.getAuditConfigStats(
+        req.params.id
+      );
+      return res.json({
+        success: true,
+        data: {
+          ...config,
+          stats,
+        },
+      });
+    }
+
     res.json({
       success: true,
-      data: {
-        id: config.id.toString(),
-        name: config.name,
-        description: config.description,
-        systemPrompt: config.systemPrompt,
-        isActive: config.isActive,
-        createdBy: config.createdBy,
-        createdAt: config.createdAt,
-        updatedAt: config.updatedAt,
-        steps: config.steps.map((step) => ({
-          id: step.id.toString(),
-          position: step.position,
-          name: step.name,
-          description: step.description,
-          prompt: step.prompt,
-          severityLevel: step.severityLevel,
-          isCritical: step.isCritical,
-          weight: step.weight,
-          chronologicalImportant: step.chronologicalImportant,
-          verifyProductInfo: step.verifyProductInfo,
-          controlPoints: step.controlPoints,
-          keywords: step.keywords,
-        })),
-      },
+      data: config,
     });
   } catch (error: any) {
-    console.error("Error fetching audit config:", error);
+    logger.error("Error fetching audit config", {
+      id: req.params.id,
+      error: error.message,
+    });
     res.status(500).json({
       success: false,
       error: "Failed to fetch audit configuration",
@@ -133,17 +141,31 @@ auditConfigsRouter.get("/:id", async (req: Request, res: Response) => {
  * /api/audit-configs:
  *   post:
  *     tags: [Audit Configs]
- *     summary: Create new audit configuration
+ *     summary: Create new audit configuration (atomic transaction)
+ *     description: Creates audit config with all steps in a single transaction. All or nothing.
  */
 auditConfigsRouter.post("/", async (req: Request, res: Response) => {
   try {
-    const config = await createAuditConfig(req.body);
+    // Validate input structure first
+    const input = validateCreateAuditConfigInput(req.body);
+
+    // Create config (with transaction handling in service layer)
+    const config = await auditConfigsService.createAuditConfig(input);
+
     res.status(201).json({
       success: true,
-      data: { id: config.id.toString(), name: config.name },
+      data: config,
     });
   } catch (error: any) {
-    res.status(400).json({
+    logger.error("Error creating audit config", {
+      error: error.message,
+      stepCount: req.body.steps?.length || 0,
+    });
+
+    // Return appropriate status code
+    const statusCode = error.message.includes("Validation failed") ? 400 : 500;
+
+    res.status(statusCode).json({
       success: false,
       error: "Failed to create audit config",
       message: error.message,
@@ -160,16 +182,20 @@ auditConfigsRouter.post("/", async (req: Request, res: Response) => {
  */
 auditConfigsRouter.put("/:id", async (req: Request, res: Response) => {
   try {
-    const config = await updateAuditConfig(BigInt(req.params.id), req.body);
+    const input = validateUpdateAuditConfigInput(req.body);
+    const config = await auditConfigsService.updateAuditConfig(
+      req.params.id,
+      input
+    );
     res.json({
       success: true,
-      data: {
-        id: config.id.toString(),
-        name: config.name,
-        stepsCount: config.steps.length,
-      },
+      data: config,
     });
   } catch (error: any) {
+    logger.error("Error updating audit config", {
+      id: req.params.id,
+      error: error.message,
+    });
     res.status(400).json({
       success: false,
       error: "Failed to update audit config",
@@ -187,9 +213,13 @@ auditConfigsRouter.put("/:id", async (req: Request, res: Response) => {
  */
 auditConfigsRouter.delete("/:id", async (req: Request, res: Response) => {
   try {
-    await deleteAuditConfig(BigInt(req.params.id));
+    await auditConfigsService.deleteAuditConfig(req.params.id);
     res.json({ success: true, message: "Audit config deleted" });
   } catch (error: any) {
+    logger.error("Error deleting audit config", {
+      id: req.params.id,
+      error: error.message,
+    });
     res.status(400).json({
       success: false,
       error: "Failed to delete audit config",
@@ -209,12 +239,20 @@ auditConfigsRouter.post(
   "/:config_id/steps",
   async (req: Request, res: Response) => {
     try {
-      const step = await addAuditStep(BigInt(req.params.config_id), req.body);
+      const input = validateCreateAuditStepInput(req.body);
+      const step = await auditConfigsService.addAuditStep(
+        req.params.config_id,
+        input
+      );
       res.status(201).json({
         success: true,
-        data: { id: step.id.toString(), name: step.name },
+        data: step,
       });
     } catch (error: any) {
+      logger.error("Error adding audit step", {
+        configId: req.params.config_id,
+        error: error.message,
+      });
       res.status(400).json({
         success: false,
         error: "Failed to add step",
@@ -235,17 +273,18 @@ auditConfigsRouter.put(
   "/steps/:step_id",
   async (req: Request, res: Response) => {
     try {
-      const step = await updateAuditStep(BigInt(req.params.step_id), req.body);
-
-      // Convert BigInt to string for JSON serialization
-      const serializable = JSON.parse(
-        JSON.stringify(step, (key, value) =>
-          typeof value === "bigint" ? value.toString() : value
-        )
+      const input = validateUpdateAuditStepInput(req.body);
+      const step = await auditConfigsService.updateAuditStep(
+        req.params.step_id,
+        input
       );
 
-      res.json({ success: true, data: serializable });
+      res.json({ success: true, data: step });
     } catch (error: any) {
+      logger.error("Error updating audit step", {
+        stepId: req.params.step_id,
+        error: error.message,
+      });
       res.status(400).json({
         success: false,
         error: "Failed to update step",
@@ -266,12 +305,118 @@ auditConfigsRouter.delete(
   "/steps/:step_id",
   async (req: Request, res: Response) => {
     try {
-      await deleteAuditStep(BigInt(req.params.step_id));
+      await auditConfigsService.deleteAuditStep(req.params.step_id);
       res.json({ success: true, message: "Step deleted" });
     } catch (error: any) {
+      logger.error("Error deleting audit step", {
+        stepId: req.params.step_id,
+        error: error.message,
+      });
       res.status(400).json({
         success: false,
         error: "Failed to delete step",
+        message: error.message,
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/audit-configs/{config_id}/steps/reorder:
+ *   put:
+ *     tags: [Audit Configs]
+ *     summary: Reorder steps in an audit configuration
+ */
+auditConfigsRouter.put(
+  "/:config_id/steps/reorder",
+  async (req: Request, res: Response) => {
+    try {
+      const { stepIds } = req.body;
+      if (!Array.isArray(stepIds)) {
+        return res.status(400).json({
+          success: false,
+          error: "stepIds must be an array",
+        });
+      }
+
+      await auditConfigsService.reorderSteps(req.params.config_id, stepIds);
+      res.json({
+        success: true,
+        message: "Steps reordered successfully",
+      });
+    } catch (error: any) {
+      logger.error("Error reordering audit steps", {
+        configId: req.params.config_id,
+        error: error.message,
+      });
+      res.status(400).json({
+        success: false,
+        error: "Failed to reorder steps",
+        message: error.message,
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/audit-configs/{config_id}/validate:
+ *   get:
+ *     tags: [Audit Configs]
+ *     summary: Validate audit config for running
+ */
+auditConfigsRouter.get(
+  "/:config_id/validate",
+  async (req: Request, res: Response) => {
+    try {
+      const validation = await auditConfigsService.validateAuditConfigForRun(
+        req.params.config_id
+      );
+      res.json({
+        success: true,
+        data: validation,
+      });
+    } catch (error: any) {
+      logger.error("Error validating audit config", {
+        configId: req.params.config_id,
+        error: error.message,
+      });
+      res.status(500).json({
+        success: false,
+        error: "Failed to validate audit config",
+        message: error.message,
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/audit-configs/{config_id}/stats:
+ *   get:
+ *     tags: [Audit Configs]
+ *     summary: Get audit config usage statistics
+ */
+auditConfigsRouter.get(
+  "/:config_id/stats",
+  async (req: Request, res: Response) => {
+    try {
+      const stats = await auditConfigsService.getAuditConfigStats(
+        req.params.config_id
+      );
+      res.json({
+        success: true,
+        data: stats,
+      });
+    } catch (error: any) {
+      logger.error("Error fetching audit config stats", {
+        configId: req.params.config_id,
+        error: error.message,
+      });
+      res.status(500).json({
+        success: false,
+        error: "Failed to fetch audit config statistics",
         message: error.message,
       });
     }

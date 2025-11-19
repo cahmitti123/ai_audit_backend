@@ -1,19 +1,165 @@
 /**
  * Automation Service
  * ==================
- * Business logic for automation operations
+ * RESPONSIBILITY: Business logic and orchestration
+ * - Calculate dates and schedules
+ * - Process and transform fiche data
+ * - Generate cron expressions
+ * - Orchestrate automation flows
+ * - Transform BigInt ↔ string
+ * - No direct database calls (use repository)
+ * - No direct HTTP handling (use routes)
+ *
+ * LAYER: Orchestration (Business logic)
  */
 
-import type { FicheSelection } from "../../schemas.js";
-import axios from "axios";
+import type {
+  FicheSelection,
+  ScheduleType,
+  ProcessedFicheData,
+  CreateAutomationScheduleInput,
+  UpdateAutomationScheduleInput,
+  AutomationSchedule,
+  AutomationScheduleWithRuns,
+  AutomationRun,
+  AutomationRunWithLogs,
+  AutomationLog,
+} from "./automation.schemas.js";
+import * as automationRepository from "./automation.repository.js";
+import * as automationApi from "./automation.api.js";
+import { logger } from "../../shared/logger.js";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SCHEDULE BUSINESS LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Generate cron expression based on schedule type and parameters
+ * Business rule: Convert user-friendly schedule params to cron format
+ */
+export function generateCronExpression(
+  scheduleType: ScheduleType,
+  timeOfDay?: string | null,
+  dayOfWeek?: number | null,
+  dayOfMonth?: number | null,
+  customCron?: string | null
+): string | null {
+  // If custom cron provided, use it
+  if (scheduleType === "CRON" && customCron) {
+    return customCron;
+  }
+
+  // MANUAL schedules don't need cron
+  if (scheduleType === "MANUAL") {
+    return null;
+  }
+
+  // All other types need timeOfDay
+  if (!timeOfDay) {
+    return null;
+  }
+
+  const [hours, minutes] = timeOfDay.split(":").map((n) => parseInt(n, 10));
+
+  if (scheduleType === "DAILY") {
+    // Every day at specified time: "minute hour * * *"
+    return `${minutes} ${hours} * * *`;
+  }
+
+  if (scheduleType === "WEEKLY") {
+    // Specific day of week at specified time: "minute hour * * day"
+    if (dayOfWeek === null || dayOfWeek === undefined) {
+      return null;
+    }
+    return `${minutes} ${hours} * * ${dayOfWeek}`;
+  }
+
+  if (scheduleType === "MONTHLY") {
+    // Specific day of month at specified time: "minute hour day * *"
+    if (!dayOfMonth) {
+      return null;
+    }
+    return `${minutes} ${hours} ${dayOfMonth} * *`;
+  }
+
+  return null;
+}
+
+/**
+ * Parse cron expression to determine next run time
+ * Business rule: Calculate when a schedule should run next
+ */
+export function getNextRunTime(
+  scheduleType: ScheduleType,
+  cronExpression?: string,
+  timeOfDay?: string,
+  dayOfWeek?: number,
+  dayOfMonth?: number,
+  timezone = "UTC"
+): Date | null {
+  // This is a simplified implementation
+  // In production, you'd use a library like 'cron-parser'
+
+  const now = new Date();
+
+  if (scheduleType === "DAILY" && timeOfDay) {
+    const [hours, minutes] = timeOfDay.split(":").map(Number);
+    const nextRun = new Date(now);
+    nextRun.setHours(hours, minutes, 0, 0);
+
+    if (nextRun <= now) {
+      nextRun.setDate(nextRun.getDate() + 1);
+    }
+
+    return nextRun;
+  }
+
+  if (scheduleType === "WEEKLY" && dayOfWeek !== undefined && timeOfDay) {
+    const [hours, minutes] = timeOfDay.split(":").map(Number);
+    const nextRun = new Date(now);
+    nextRun.setHours(hours, minutes, 0, 0);
+
+    const currentDay = nextRun.getDay();
+    const daysUntilTarget = (dayOfWeek - currentDay + 7) % 7;
+
+    if (daysUntilTarget === 0 && nextRun <= now) {
+      nextRun.setDate(nextRun.getDate() + 7);
+    } else {
+      nextRun.setDate(nextRun.getDate() + daysUntilTarget);
+    }
+
+    return nextRun;
+  }
+
+  if (scheduleType === "MONTHLY" && dayOfMonth !== undefined && timeOfDay) {
+    const [hours, minutes] = timeOfDay.split(":").map(Number);
+    const nextRun = new Date(now);
+    nextRun.setDate(dayOfMonth);
+    nextRun.setHours(hours, minutes, 0, 0);
+
+    if (nextRun <= now) {
+      nextRun.setMonth(nextRun.getMonth() + 1);
+    }
+
+    return nextRun;
+  }
+
+  // For CRON type, you'd need to parse the cron expression
+  // For now, return null
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DATE CALCULATION LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * Calculate dates to query based on selection criteria
+ * Business rule: Convert date range selection to array of dates for API calls
  */
-export function calculateDatesToQuery(
-  selection: FicheSelection
-): string[] {
-  const { mode, dateRange, customStartDate, customEndDate, ficheIds } = selection;
+export function calculateDatesToQuery(selection: FicheSelection): string[] {
+  const { mode, dateRange, customStartDate, customEndDate, ficheIds } =
+    selection;
 
   // Manual mode: no dates to query
   if (mode === "manual" && ficheIds) {
@@ -21,7 +167,11 @@ export function calculateDatesToQuery(
   }
 
   // Calculate date range
-  const { startDate, endDate } = calculateDateRange(dateRange, customStartDate, customEndDate);
+  const { startDate, endDate } = calculateDateRange(
+    dateRange,
+    customStartDate,
+    customEndDate
+  );
 
   // Generate array of dates to query (API only accepts single date)
   const dates: string[] = [];
@@ -29,7 +179,7 @@ export function calculateDatesToQuery(
     const start = parseDateDDMMYYYY(startDate);
     const end = parseDateDDMMYYYY(endDate);
     const current = new Date(start);
-    
+
     while (current <= end) {
       dates.push(formatDate(current));
       current.setDate(current.getDate() + 1);
@@ -38,215 +188,20 @@ export function calculateDatesToQuery(
     dates.push(startDate);
   }
 
+  logger.info("Calculated dates to query", {
+    mode: selection.mode,
+    dateRange: selection.dateRange,
+    datesCount: dates.length,
+    firstDate: dates[0],
+    lastDate: dates[dates.length - 1],
+  });
+
   return dates;
 }
 
 /**
- * Fetch fiches for a single date
- * Note: This returns basic fiche data WITHOUT recordings
- * To get recordings, you must fetch each fiche individually using fetchApiFicheDetails
- */
-export async function fetchFichesForDate(
-  date: string,
-  onlyWithRecordings: boolean,
-  apiKey?: string
-): Promise<any[]> {
-  const baseUrl = process.env.FICHE_API_BASE_URL || "https://api.devis-mutuelle-pas-cher.com";
-  const apiBase = `${baseUrl}/api`;
-  
-  // The /by-date endpoint only returns basic fiche data
-  // It doesn't support include_recordings parameter
-  const url = `${apiBase}/fiches/search/by-date`;
-
-  const params = new URLSearchParams({
-    date: date,
-    criteria_type: "1",
-    force_new_session: "false",
-  });
-
-  try {
-    console.log(`Fetching fiches for ${date}:`, { url, params: params.toString() });
-    
-    const response = await axios.get(`${url}?${params}`, {
-      timeout: 90000, // 90 seconds - external API can be slow
-    });
-
-    console.log(`API Response for ${date}:`, {
-      status: response.status,
-      fichesCount: response.data?.fiches?.length || 0,
-      dataKeys: Object.keys(response.data || {}),
-    });
-
-    const dateFiches = response.data?.fiches || [];
-    
-    if (dateFiches.length > 0) {
-      console.log(`Sample fiche from ${date}:`, {
-        id: dateFiches[0].id || dateFiches[0].id_fiche,
-        keys: Object.keys(dateFiches[0]),
-        hasRecordings: Boolean(dateFiches[0].recordings || dateFiches[0].enregistrements),
-        date_insertion: dateFiches[0].date_insertion,
-        date_modification: dateFiches[0].date_modification,
-        statut: dateFiches[0].statut,
-      });
-      
-      // Analyze what dates are actually in the results
-      const dateInsertions = new Set(dateFiches.map((f: any) => f.date_insertion).filter(Boolean));
-      const dateModifications = new Set(dateFiches.map((f: any) => f.date_modification).filter(Boolean));
-      
-      console.log(`📊 Date analysis for ${date}:`, {
-        requested_date: date,
-        total_fiches: dateFiches.length,
-        unique_insertion_dates: Array.from(dateInsertions),
-        unique_modification_dates: Array.from(dateModifications),
-        sample_fiches: dateFiches.slice(0, 5).map((f: any) => ({
-          id: f.id,
-          date_insertion: f.date_insertion,
-          date_modification: f.date_modification,
-          statut: f.statut,
-        })),
-      });
-    } else {
-      console.log(`No fiches returned for ${date}`);
-    }
-    
-    return dateFiches;
-  } catch (error: any) {
-    console.error(`Error fetching fiches for ${date}:`, {
-      message: error.message,
-      code: error.code,
-      status: error.response?.status,
-    });
-    throw new Error(`Failed to fetch fiches for ${date}: ${error.message}`);
-  }
-}
-
-/**
- * Process and transform fiche data from /by-date endpoint
- * Note: /by-date returns basic data WITHOUT recordings
- * The data will be: { id, cle, nom, prenom, telephone, telephone_2, email, statut, date_insertion, date_modification }
- */
-export function processFichesData(
-  fiches: any[],
-  maxFiches?: number,
-  onlyWithRecordings?: boolean
-): { ficheIds: string[]; fichesData: any[]; cles: Record<string, string> } {
-  // Ensure it's an array
-  if (!Array.isArray(fiches)) {
-    console.warn("Fiches is not an array:", typeof fiches);
-    return { ficheIds: [], fichesData: [], cles: {} };
-  }
-
-  console.log("Processing fiches data:", { 
-    total: fiches.length,
-    onlyWithRecordings,
-    sampleKeys: fiches[0] ? Object.keys(fiches[0]) : []
-  });
-
-  // Extract fiche IDs and cles (needed for detailed fetch later)
-  const fichesWithIds = fiches
-    .filter((fiche: any) => fiche.id) // Must have an ID
-    .map((fiche: any) => ({
-      id: fiche.id,
-      cle: fiche.cle,
-      statut: fiche.statut,
-      nom: fiche.nom,
-      prenom: fiche.prenom,
-      email: fiche.email,
-      telephone: fiche.telephone,
-      telephone_2: fiche.telephone_2,
-    }));
-
-  console.log("Extracted fiche IDs:", { 
-    total: fichesWithIds.length, 
-    maxFiches, 
-    returning: Math.min(fichesWithIds.length, maxFiches || fichesWithIds.length),
-    sample: fichesWithIds.slice(0, 3).map(f => ({ id: f.id, statut: f.statut })),
-  });
-
-  // Apply max limit
-  const limitedFiches = fichesWithIds.slice(0, maxFiches || fichesWithIds.length);
-  const ficheIds = limitedFiches.map(f => f.id);
-  
-  // Create a map of ficheId -> cle for later detailed fetching
-  const cles: Record<string, string> = {};
-  limitedFiches.forEach(f => {
-    if (f.cle) {
-      cles[f.id] = f.cle;
-    }
-  });
-  
-  // Store basic data (will be used if we can't fetch detailed later)
-  const fichesData = limitedFiches.map((fiche: any) => ({
-    id: fiche.id,
-    cle: fiche.cle,
-    statut: fiche.statut,
-    nom: fiche.nom,
-    prenom: fiche.prenom,
-    email: fiche.email,
-    telephone: fiche.telephone,
-    telephone_2: fiche.telephone_2,
-  }));
-  
-  console.log("Processed fiche data:", {
-    ficheIdsCount: ficheIds.length,
-    hasCles: Object.keys(cles).length,
-  });
-  
-  return { 
-    ficheIds, 
-    fichesData,
-    cles,
-  };
-}
-
-/**
- * Fetch fiche IDs based on selection criteria (LEGACY - kept for compatibility)
- * @deprecated Use calculateDatesToQuery + fetchFichesForDate in workflows instead
- */
-export async function fetchFichesBySelection(
-  selection: FicheSelection,
-  apiKey?: string
-): Promise<{ ficheIds: string[]; fichesData: any[]; cles: Record<string, string> }> {
-  const { mode, onlyWithRecordings, maxFiches, ficheIds } = selection;
-
-  // Manual mode: return provided fiche IDs (no full data available)
-  if (mode === "manual" && ficheIds) {
-    const limitedIds = ficheIds.slice(0, maxFiches || ficheIds.length);
-    return { ficheIds: limitedIds, fichesData: [], cles: {} };
-  }
-
-  // Calculate dates to query
-  const dates = calculateDatesToQuery(selection);
-
-  console.log("Fetching fiches from API (LEGACY):", { 
-    totalDays: dates.length,
-    onlyWithRecordings 
-  });
-
-  // Fetch from API for each date in parallel and combine results
-  console.log(`Fetching fiches for ${dates.length} dates in parallel (LEGACY function)...`);
-  
-  const fetchPromises = dates.map(async (date) => {
-    try {
-      const dateFiches = await fetchFichesForDate(date, onlyWithRecordings || false, apiKey);
-      console.log(`  ✓ ${date}: ${dateFiches.length} fiches`);
-      return dateFiches;
-    } catch (error: any) {
-      console.error(`  ✗ ${date}: ${error.message}`);
-      return [];
-    }
-  });
-  
-  const dateResults = await Promise.all(fetchPromises);
-  const allFiches = dateResults.flat();
-
-  console.log("Total fiches fetched:", { total: allFiches.length, days: dates.length });
-
-  return processFichesData(allFiches, maxFiches, onlyWithRecordings);
-}
-
-/**
  * Calculate date range based on selection
+ * Business rule: Convert preset date ranges to actual start/end dates
  */
 function calculateDateRange(
   dateRange?: string,
@@ -310,101 +265,520 @@ function parseDateDDMMYYYY(dateStr: string): Date {
   return new Date(year, month - 1, day);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// FICHE PROCESSING LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
- * Parse cron expression to determine next run time
+ * Process and transform fiche data from /by-date endpoint
+ * Business rule: Extract IDs, cles, and basic data for further processing
+ * Note: /by-date returns basic data WITHOUT recordings
  */
-export function getNextRunTime(
-  scheduleType: string,
-  cronExpression?: string,
-  timeOfDay?: string,
-  dayOfWeek?: number,
-  dayOfMonth?: number,
-  timezone = "UTC"
-): Date | null {
-  // This is a simplified implementation
-  // In production, you'd use a library like 'cron-parser'
-  
-  const now = new Date();
-
-  if (scheduleType === "DAILY" && timeOfDay) {
-    const [hours, minutes] = timeOfDay.split(":").map(Number);
-    const nextRun = new Date(now);
-    nextRun.setHours(hours, minutes, 0, 0);
-    
-    if (nextRun <= now) {
-      nextRun.setDate(nextRun.getDate() + 1);
-    }
-    
-    return nextRun;
+export function processFichesData(
+  fiches: any[],
+  maxFiches?: number,
+  onlyWithRecordings?: boolean
+): ProcessedFicheData {
+  // Ensure it's an array
+  if (!Array.isArray(fiches)) {
+    logger.warn("Fiches is not an array", { type: typeof fiches });
+    return { ficheIds: [], fichesData: [], cles: {} };
   }
 
-  if (scheduleType === "WEEKLY" && dayOfWeek !== undefined && timeOfDay) {
-    const [hours, minutes] = timeOfDay.split(":").map(Number);
-    const nextRun = new Date(now);
-    nextRun.setHours(hours, minutes, 0, 0);
-    
-    const currentDay = nextRun.getDay();
-    const daysUntilTarget = (dayOfWeek - currentDay + 7) % 7;
-    
-    if (daysUntilTarget === 0 && nextRun <= now) {
-      nextRun.setDate(nextRun.getDate() + 7);
-    } else {
-      nextRun.setDate(nextRun.getDate() + daysUntilTarget);
-    }
-    
-    return nextRun;
-  }
+  logger.debug("Processing fiches data", {
+    total: fiches.length,
+    onlyWithRecordings,
+    maxFiches,
+  });
 
-  if (scheduleType === "MONTHLY" && dayOfMonth !== undefined && timeOfDay) {
-    const [hours, minutes] = timeOfDay.split(":").map(Number);
-    const nextRun = new Date(now);
-    nextRun.setDate(dayOfMonth);
-    nextRun.setHours(hours, minutes, 0, 0);
-    
-    if (nextRun <= now) {
-      nextRun.setMonth(nextRun.getMonth() + 1);
-    }
-    
-    return nextRun;
-  }
+  // Extract fiche IDs and cles (needed for detailed fetch later)
+  const fichesWithIds = fiches
+    .filter((fiche: any) => fiche.id) // Must have an ID
+    .map((fiche: any) => ({
+      id: fiche.id,
+      cle: fiche.cle,
+      statut: fiche.statut,
+      nom: fiche.nom,
+      prenom: fiche.prenom,
+      email: fiche.email,
+      telephone: fiche.telephone,
+      telephone_2: fiche.telephone_2,
+    }));
 
-  // For CRON type, you'd need to parse the cron expression
-  // For now, return null
-  return null;
+  // Apply max limit
+  const limitedFiches = fichesWithIds.slice(
+    0,
+    maxFiches || fichesWithIds.length
+  );
+  const ficheIds = limitedFiches.map((f) => f.id);
+
+  // Create a map of ficheId -> cle for later detailed fetching
+  const cles: Record<string, string> = {};
+  limitedFiches.forEach((f) => {
+    if (f.cle) {
+      cles[f.id] = f.cle;
+    }
+  });
+
+  // Store basic data (will be used if we can't fetch detailed later)
+  const fichesData = limitedFiches.map((fiche: any) => ({
+    id: fiche.id,
+    cle: fiche.cle,
+    statut: fiche.statut,
+    nom: fiche.nom,
+    prenom: fiche.prenom,
+    email: fiche.email,
+    telephone: fiche.telephone,
+    telephone_2: fiche.telephone_2,
+  }));
+
+  logger.info("Processed fiche data", {
+    originalCount: fiches.length,
+    processedCount: ficheIds.length,
+    hasCles: Object.keys(cles).length,
+  });
+
+  return {
+    ficheIds,
+    fichesData,
+    cles,
+  };
 }
 
 /**
- * Send notification webhook
+ * Fetch fiches by selection (orchestrates multiple date fetches)
+ * Business rule: Fetch fiches from external API based on selection criteria
+ * 
+ * @deprecated Use calculateDatesToQuery + fetchFichesForDate in workflows instead
  */
-export async function sendNotificationWebhook(
-  webhookUrl: string,
-  payload: any
+export async function fetchFichesBySelection(
+  selection: FicheSelection,
+  apiKey?: string
+): Promise<ProcessedFicheData> {
+  const { mode, onlyWithRecordings, maxFiches, ficheIds } = selection;
+
+  // Manual mode: return provided fiche IDs (no full data available)
+  if (mode === "manual" && ficheIds) {
+    const limitedIds = ficheIds.slice(0, maxFiches || ficheIds.length);
+    logger.info("Using manual fiche selection", { count: limitedIds.length });
+    return { ficheIds: limitedIds, fichesData: [], cles: {} };
+  }
+
+  // Calculate dates to query
+  const dates = calculateDatesToQuery(selection);
+
+  logger.info("Fetching fiches from API", {
+    totalDays: dates.length,
+    onlyWithRecordings,
+    maxFiches,
+  });
+
+  // Fetch from API for each date in parallel and combine results
+  const fetchPromises = dates.map(async (date) => {
+    try {
+      const dateFiches = await automationApi.fetchFichesForDate(
+        date,
+        onlyWithRecordings || false,
+        apiKey
+      );
+      logger.debug(`Fetched ${dateFiches.length} fiches for ${date}`);
+      return dateFiches;
+    } catch (error: any) {
+      logger.error(`Failed to fetch fiches for ${date}`, {
+        error: error.message,
+      });
+      return [];
+    }
+  });
+
+  const dateResults = await Promise.all(fetchPromises);
+  const allFiches = dateResults.flat();
+
+  logger.info("Fetched fiches from all dates", {
+    totalFiches: allFiches.length,
+    dates: dates.length,
+  });
+
+  return processFichesData(allFiches, maxFiches, onlyWithRecordings);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SCHEDULE CRUD WITH TRANSFORMATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Create automation schedule
+ * Business rule: Validate input, generate cron if needed, delegate to repository
+ */
+export async function createAutomationSchedule(
+  input: CreateAutomationScheduleInput
+): Promise<AutomationSchedule> {
+  logger.info("Creating automation schedule", { name: input.name });
+
+  // Business validation: Check schedule type requirements
+  if (input.scheduleType === "DAILY" && !input.timeOfDay) {
+    throw new Error("DAILY schedule requires timeOfDay");
+  }
+
+  if (
+    input.scheduleType === "WEEKLY" &&
+    (!input.timeOfDay || input.dayOfWeek === undefined)
+  ) {
+    throw new Error("WEEKLY schedule requires timeOfDay and dayOfWeek");
+  }
+
+  if (
+    input.scheduleType === "MONTHLY" &&
+    (!input.timeOfDay || !input.dayOfMonth)
+  ) {
+    throw new Error("MONTHLY schedule requires timeOfDay and dayOfMonth");
+  }
+
+  if (input.scheduleType === "CRON" && !input.cronExpression) {
+    throw new Error("CRON schedule requires cronExpression");
+  }
+
+  // Generate cron expression if not provided
+  const cronExpression =
+    input.cronExpression ||
+    generateCronExpression(
+      input.scheduleType,
+      input.timeOfDay,
+      input.dayOfWeek,
+      input.dayOfMonth,
+      input.cronExpression
+    );
+
+  // Delegate to repository
+  const schedule = await automationRepository.createAutomationSchedule({
+    ...input,
+    cronExpression: cronExpression || undefined, // Convert null to undefined
+  });
+
+  logger.info("Automation schedule created", {
+    id: schedule.id.toString(),
+    name: schedule.name,
+  });
+
+  // Transform to API-friendly format (BigInt → string)
+  return transformScheduleToApi(schedule);
+}
+
+/**
+ * Get all automation schedules
+ */
+export async function getAllAutomationSchedules(
+  includeInactive = false
+): Promise<AutomationSchedule[]> {
+  logger.debug("Fetching all automation schedules", { includeInactive });
+
+  const schedules = await automationRepository.getAllAutomationSchedules(
+    includeInactive
+  );
+
+  logger.info("Fetched automation schedules", { count: schedules.length });
+
+  // Transform to API-friendly format
+  return schedules.map(transformScheduleToApi);
+}
+
+/**
+ * Get automation schedule by ID
+ */
+export async function getAutomationScheduleById(
+  id: string | bigint
+): Promise<AutomationScheduleWithRuns | null> {
+  const scheduleId = typeof id === "string" ? BigInt(id) : id;
+
+  logger.debug("Fetching automation schedule", { id: scheduleId.toString() });
+
+  const schedule = await automationRepository.getAutomationScheduleById(
+    scheduleId
+  );
+
+  if (!schedule) {
+    logger.warn("Automation schedule not found", { id: scheduleId.toString() });
+    return null;
+  }
+
+  logger.debug("Fetched automation schedule", {
+    id: schedule.id.toString(),
+    name: schedule.name,
+    runsCount: schedule.runs?.length || 0,
+  });
+
+  // Transform to API-friendly format
+  return transformScheduleWithRunsToApi(schedule);
+}
+
+/**
+ * Update automation schedule
+ */
+export async function updateAutomationSchedule(
+  id: string | bigint,
+  input: UpdateAutomationScheduleInput
+): Promise<AutomationSchedule> {
+  const scheduleId = typeof id === "string" ? BigInt(id) : id;
+
+  logger.info("Updating automation schedule", { id: scheduleId.toString() });
+
+  // Business validation: Check schedule type requirements if being updated
+  if (input.scheduleType === "DAILY" && input.timeOfDay === null) {
+    throw new Error("DAILY schedule requires timeOfDay");
+  }
+
+  if (
+    input.scheduleType === "WEEKLY" &&
+    (input.timeOfDay === null || input.dayOfWeek === null)
+  ) {
+    throw new Error("WEEKLY schedule requires timeOfDay and dayOfWeek");
+  }
+
+  if (
+    input.scheduleType === "MONTHLY" &&
+    (input.timeOfDay === null || input.dayOfMonth === null)
+  ) {
+    throw new Error("MONTHLY schedule requires timeOfDay and dayOfMonth");
+  }
+
+  // Delegate to repository (it handles cron regeneration)
+  const schedule = await automationRepository.updateAutomationSchedule(
+    scheduleId,
+    input
+  );
+
+  logger.info("Automation schedule updated", {
+    id: schedule.id.toString(),
+    name: schedule.name,
+  });
+
+  // Transform to API-friendly format
+  return transformScheduleToApi(schedule);
+}
+
+/**
+ * Delete automation schedule
+ */
+export async function deleteAutomationSchedule(
+  id: string | bigint
 ): Promise<void> {
-  try {
-    await axios.post(webhookUrl, payload, {
-      timeout: 10000,
-      headers: {
-        "Content-Type": "application/json",
-      },
-    });
-  } catch (error: any) {
-    console.error("Failed to send webhook notification:", error.message);
-    // Don't throw - notifications are best-effort
-  }
+  const scheduleId = typeof id === "string" ? BigInt(id) : id;
+
+  logger.info("Deleting automation schedule", { id: scheduleId.toString() });
+
+  await automationRepository.deleteAutomationSchedule(scheduleId);
+
+  logger.info("Automation schedule deleted", { id: scheduleId.toString() });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RUN CRUD WITH TRANSFORMATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Get automation runs for a schedule
+ */
+export async function getAutomationRuns(
+  scheduleId: string | bigint,
+  limit = 20,
+  offset = 0
+): Promise<AutomationRun[]> {
+  const id = typeof scheduleId === "string" ? BigInt(scheduleId) : scheduleId;
+
+  logger.debug("Fetching automation runs", {
+    scheduleId: id.toString(),
+    limit,
+    offset,
+  });
+
+  const runs = await automationRepository.getAutomationRuns(id, limit, offset);
+
+  logger.debug("Fetched automation runs", {
+    scheduleId: id.toString(),
+    count: runs.length,
+  });
+
+  // Transform to API-friendly format
+  return runs.map(transformRunToApi);
 }
 
 /**
- * Send email notification (placeholder)
+ * Get automation run by ID
  */
-export async function sendEmailNotification(
-  emails: string[],
-  subject: string,
-  message: string
-): Promise<void> {
-  // TODO: Implement email sending
-  // This would typically use a service like SendGrid, AWS SES, etc.
-  console.log("Email notification would be sent to:", emails);
-  console.log("Subject:", subject);
-  console.log("Message:", message);
+export async function getAutomationRunById(
+  id: string | bigint
+): Promise<AutomationRunWithLogs | null> {
+  const runId = typeof id === "string" ? BigInt(id) : id;
+
+  logger.debug("Fetching automation run", { id: runId.toString() });
+
+  const run = await automationRepository.getAutomationRunById(runId);
+
+  if (!run) {
+    logger.warn("Automation run not found", { id: runId.toString() });
+    return null;
+  }
+
+  logger.debug("Fetched automation run", {
+    id: run.id.toString(),
+    status: run.status,
+    logsCount: run.logs?.length || 0,
+  });
+
+  // Transform to API-friendly format
+  return transformRunWithLogsToApi(run);
 }
 
+/**
+ * Get automation logs for a run
+ */
+export async function getAutomationLogs(
+  runId: string | bigint,
+  level?: string,
+  limit = 100
+): Promise<AutomationLog[]> {
+  const id = typeof runId === "string" ? BigInt(runId) : runId;
+
+  logger.debug("Fetching automation logs", {
+    runId: id.toString(),
+    level,
+    limit,
+  });
+
+  const logs = await automationRepository.getAutomationLogs(id, level, limit);
+
+  logger.debug("Fetched automation logs", {
+    runId: id.toString(),
+    count: logs.length,
+  });
+
+  // Transform to API-friendly format
+  return logs.map(transformLogToApi);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TRANSFORMATIONS (BigInt ↔ string)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Transform schedule from database (BigInt) to API (string)
+ */
+function transformScheduleToApi(schedule: any): AutomationSchedule {
+  return {
+    id: schedule.id.toString(),
+    name: schedule.name,
+    description: schedule.description,
+    isActive: schedule.isActive,
+    createdBy: schedule.createdBy,
+    createdAt: schedule.createdAt,
+    updatedAt: schedule.updatedAt,
+    scheduleType: schedule.scheduleType,
+    cronExpression: schedule.cronExpression,
+    timezone: schedule.timezone,
+    timeOfDay: schedule.timeOfDay,
+    dayOfWeek: schedule.dayOfWeek,
+    dayOfMonth: schedule.dayOfMonth,
+    ficheSelection: schedule.ficheSelection,
+    runTranscription: schedule.runTranscription,
+    skipIfTranscribed: schedule.skipIfTranscribed,
+    transcriptionPriority: schedule.transcriptionPriority,
+    runAudits: schedule.runAudits,
+    useAutomaticAudits: schedule.useAutomaticAudits,
+    specificAuditConfigs: schedule.specificAuditConfigs
+      ? schedule.specificAuditConfigs.map((id: any) =>
+          typeof id === "bigint" ? id.toString() : String(id)
+        )
+      : [],
+    continueOnError: schedule.continueOnError,
+    retryFailed: schedule.retryFailed,
+    maxRetries: schedule.maxRetries,
+    notifyOnComplete: schedule.notifyOnComplete,
+    notifyOnError: schedule.notifyOnError,
+    webhookUrl: schedule.webhookUrl,
+    notifyEmails: schedule.notifyEmails,
+    externalApiKey: schedule.externalApiKey,
+    lastRunAt: schedule.lastRunAt,
+    lastRunStatus: schedule.lastRunStatus,
+    totalRuns: schedule.totalRuns,
+    successfulRuns: schedule.successfulRuns,
+    failedRuns: schedule.failedRuns,
+  };
+}
+
+/**
+ * Transform schedule with runs from database to API
+ */
+function transformScheduleWithRunsToApi(
+  schedule: any
+): AutomationScheduleWithRuns {
+  return {
+    ...transformScheduleToApi(schedule),
+    runs: schedule.runs
+      ? schedule.runs.map((run: any) => ({
+          id: run.id.toString(),
+          status: run.status,
+          startedAt: run.startedAt,
+          completedAt: run.completedAt,
+          durationMs: run.durationMs,
+          totalFiches: run.totalFiches,
+          successfulFiches: run.successfulFiches,
+          failedFiches: run.failedFiches,
+        }))
+      : [],
+  };
+}
+
+/**
+ * Transform run from database to API
+ */
+function transformRunToApi(run: any): AutomationRun {
+  return {
+    id: run.id.toString(),
+    scheduleId: run.scheduleId.toString(),
+    status: run.status,
+    startedAt: run.startedAt,
+    completedAt: run.completedAt,
+    durationMs: run.durationMs,
+    totalFiches: run.totalFiches,
+    successfulFiches: run.successfulFiches,
+    failedFiches: run.failedFiches,
+    transcriptionsRun: run.transcriptionsRun,
+    auditsRun: run.auditsRun,
+    errorMessage: run.errorMessage,
+    errorDetails: run.errorDetails,
+    configSnapshot: run.configSnapshot,
+    resultSummary: run.resultSummary,
+  };
+}
+
+/**
+ * Transform run with logs from database to API
+ */
+function transformRunWithLogsToApi(run: any): AutomationRunWithLogs {
+  return {
+    ...transformRunToApi(run),
+    logs: run.logs
+      ? run.logs.map((log: any) => ({
+          id: log.id.toString(),
+          level: log.level,
+          message: log.message,
+          timestamp: log.timestamp,
+          metadata: log.metadata,
+        }))
+      : [],
+  };
+}
+
+/**
+ * Transform log from database to API
+ */
+function transformLogToApi(log: any): AutomationLog {
+  return {
+    id: log.id.toString(),
+    runId: log.runId.toString(),
+    level: log.level,
+    message: log.message,
+    timestamp: log.timestamp,
+    metadata: log.metadata,
+  };
+}

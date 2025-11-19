@@ -14,16 +14,17 @@ import {
   getLatestActiveConfig,
 } from "../audit-configs/audit-configs.repository.js";
 import { enrichRecording } from "../../utils/recording-parser.js";
-import { cacheFiche, getCachedFiche } from "../fiches/fiches.repository.js";
+import { getCachedFiche } from "../fiches/fiches.repository.js";
+import { cacheFicheDetails } from "../fiches/fiches.cache.js";
+import { fetchFicheDetails } from "../fiches/fiches.api.js";
 import { saveAuditResult } from "./audits.repository.js";
-import { fetchApiFicheDetails } from "../fiches/fiches.service.js";
 import { updateRecordingTranscription } from "../recordings/recordings.repository.js";
 import {
   COMPLIANCE_THRESHOLDS,
   TIMELINE_CHUNK_SIZE,
 } from "../../shared/constants.js";
 import "dotenv/config";
-
+import { FicheDetailsResponse } from "../fiches/fiches.schemas.js";
 const DATA_DIR = "./data";
 
 /**
@@ -158,10 +159,20 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
     console.log(`✓ Using cached fiche data`);
     ficheData = cached.rawData;
     ficheCache = cached;
+    
+    // Check if cached data is only sales list (minimal data without recordings)
+    if (ficheData._salesListOnly) {
+      console.log(`⚠️ Cached data is sales list only, fetching full details...`);
+      const cle = ficheData.cle;
+      if (!cle) {
+        throw new Error(`Cannot fetch fiche ${options.ficheId}: missing cle parameter`);
+      }
+      ficheData = await fetchFicheDetails(options.ficheId, cle);
+      ficheCache = await cacheFicheDetails(ficheData as FicheDetailsResponse);
+      console.log(`✓ Fiche refreshed with full details (ID: ${ficheCache.id})`);
+    }
   } else {
-    ficheData = await fetchApiFicheDetails(options.ficheId);
-    ficheCache = await cacheFiche(ficheData);
-    console.log(`✓ Fiche cached (ID: ${ficheCache.id})`);
+    throw new Error(`Fiche ${options.ficheId} not found in cache. Fetch via date range endpoint first to get cle.`);
   }
 
   ficheData.recordings = ficheData.recordings.map(enrichRecording);

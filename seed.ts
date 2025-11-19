@@ -105,6 +105,64 @@ Audit ultra-rapide : focus sur conformité légale uniquement.`,
   console.log(`✅ Created Quick Audit Config: ${quickConfig.id}`);
 
   // ============================================================================
+  // 4. LOI DE DÉMARCHAGE AUDIT CONFIG (5 steps - Legal compliance focus)
+  // ============================================================================
+  console.log("\n📋 Creating Loi de Démarchage Audit Config...");
+  const loiDemarchageConfig = await prisma.auditConfig.create({
+    data: {
+      name: "Audit Loi de Démarchage - NCA (Tolérance ASR / Phonétique)",
+      description:
+        "Audit dédié au contrôle strict de la Loi de Démarchage pour les appels de vente Complémentaire Santé NCA. Focalisé sur : présentation (identité + NCA + ORIAS), annonce d'enregistrement, droit de refus, conservation 2 ans, droit de copie, respect des oppositions et absence de fausse présentation. Intègre une tolérance explicite aux erreurs de transcription (ASR) et aux approximations phonétiques.",
+      systemPrompt: `Vous êtes un expert qualité NCA chargé d'évaluer un appel selon la Loi de Démarchage pour la vente de complémentaire santé.
+
+Votre mission : vérifier si le conseiller respecte les obligations légales suivantes :
+- Présentation de son identité
+- Mention de Net Courtage Assurance (NCA) en tant que courtier
+- Annonce de l'immatriculation ORIAS
+- Annonce claire de l'enregistrement de l'appel
+- Information sur le droit de refus / opposition à l'enregistrement
+- Mention de la conservation de l'enregistrement pendant 2 ans
+- Mention du droit de demander une copie de l'enregistrement
+- Absence de fausse présentation (mutuelle, Sécurité sociale, CPAM, organisme public, etc.)
+
+IMPORTANT — TOLÉRANCE TRANSCRIPTION / PHONÉTIQUE :
+Les transcriptions peuvent contenir des erreurs (mots mal reconnus, coupés, homophones, fautes d'orthographe). Vous devez baser votre analyse avant tout sur :
+- le sens global,
+- le contexte logique de l'échange,
+- la proximité phonétique des termes attendus.
+
+Exemples acceptables (si le sens est clair) :
+- « net courach », « net courta » ≈ Net Courtage Assurance
+- « oriasse », « o rias » ≈ ORIAS
+- « enregisté », « enrégistré » ≈ enregistré
+- « vou pouvé refuzé », « vous avé le drwa de vous oposé » ≈ droit de refuser l'enregistrement
+
+Absence d'une mention dans la transcription seule ≠ NON CONFORME.
+Absence réelle dans l'audio (au son) = NON CONFORME.
+
+Pour chaque étape de l'audit :
+1. Indiquez si le point est traité ou non.
+2. Indiquez les minutages précis où il apparaît.
+3. Évaluez la conformité par rapport aux exigences légales et aux standards NCA.
+4. Fournissez un commentaire pédagogique (ce qui est bien, ce qui manque, ce qui est problématique).
+
+CAS DE REJET AUTOMATIQUE (NON CONFORME LOI DE DÉMARCHAGE) :
+- Aucune annonce d'enregistrement alors que l'appel est enregistré.
+- Refus explicite d'enregistrement ignoré par le conseiller.
+- Présentation du conseiller comme mutuelle, Sécurité sociale, CPAM, organisme public ou tout autre organisme trompeur.
+- Aucune mention de NCA / Net Courtage Assurance et aucune mention de l'ORIAS.
+
+En présence d'un seul de ces cas, l'appel doit être marqué comme NON CONFORME LOI DE DÉMARCHAGE, même si le reste du call est qualitatif.`,
+      createdBy: "Qualiticien AGENT INTELLIGENCE ARTIFICIELLE - NCA",
+      isActive: true,
+    },
+  });
+
+  console.log(
+    `✅ Created Loi de Démarchage Audit Config: ${loiDemarchageConfig.id}`
+  );
+
+  // ============================================================================
   // COMPREHENSIVE AUDIT STEPS (All 18 steps)
   // ============================================================================
   console.log("\n📝 Creating Comprehensive Audit Steps (18 steps)...");
@@ -1159,17 +1217,215 @@ Audit ultra-rapide : focus sur conformité légale uniquement.`,
     console.log(`  ✅ Quick - Step ${step.position}: ${step.name}`);
   }
 
+  // ============================================================================
+  // LOI DE DÉMARCHAGE AUDIT STEPS (5 specialized legal compliance steps)
+  // ============================================================================
+  console.log("\n📝 Creating Loi de Démarchage Audit Steps (5 steps)...");
+
+  const loiDemarchageSteps = [
+    {
+      name: "Présentation identité + NCA + ORIAS",
+      description:
+        "Valider que le conseiller se présente clairement (identité), mentionne Net Courtage Assurance (NCA) comme courtier et indique l'immatriculation ORIAS, en prenant en compte les approximations phonétiques possibles.",
+      prompt: `Vérifier en début d'appel :
+- Que le conseiller donne son prénom (et idéalement son nom).
+- Qu'il mentionne clairement Net Courtage Assurance ou NCA en tant que cabinet de courtage (tolérance phonétique : « net courach », « net courta », etc.).
+- Qu'il indique l'immatriculation ORIAS, même de façon approximative (« oriasse », « o rias », « numéroroias », etc.).
+- Qu'il ne se présente jamais comme une mutuelle, la Sécurité sociale, la CPAM ou un organisme public.
+
+Si un élément manque réellement au son, noter le point comme NON CONFORME en expliquant précisément ce qui manque.
+Si la transcription est imparfaite mais que l'audio permet de comprendre que l'info est donnée, considérer le point comme traité et l'indiquer clairement.`,
+      controlPoints: [
+        "Identité du conseiller annoncée (prénom au minimum)",
+        "Mention de Net Courtage Assurance ou NCA comme courtier",
+        "Annonce de l'immatriculation ORIAS (même phonétique approximative)",
+        "Absence de fausse qualité (mutuelle, CPAM, Sécurité sociale, organisme public)",
+        "Compréhension possible par le client qu'il parle à un courtier en assurances",
+      ],
+      keywords: [
+        "NCA",
+        "Net Courtage",
+        "Net Courtage Assurance",
+        "courtier",
+        "ORIAS",
+        "immatriculé",
+        "mutuelle",
+        "Sécurité sociale",
+        "CPAM",
+        "service qualité",
+      ],
+      severityLevel: AuditSeverity.CRITICAL,
+      isCritical: true,
+      position: 1,
+      chronologicalImportant: true,
+      weight: 25,
+    },
+    {
+      name: "Annonce de l'enregistrement + droit de refus",
+      description:
+        "Valider que le conseiller annonce que l'appel est enregistré, informe le client de son droit d'opposition et respecte un éventuel refus, en tenant compte des erreurs de transcription éventuelles.",
+      prompt: `Vérifier :
+- Que le conseiller annonce clairement que l'appel est enregistré (tolérance phonétique : « enregisté », « enrégistré », « anregistré », etc.).
+- Qu'il informe le client de son droit de refuser l'enregistrement ou de s'y opposer (« vous pouvez refuser », « vous avez le droit de vous opposer », etc., même si la transcription est approximative).
+- Qu'il laisse un minimum d'espace au client pour réagir (ne pas enchaîner immédiatement).
+- Qu'en cas de refus explicite d'enregistrement, l'appel est arrêté ou l'enregistrement n'est pas poursuivi.
+
+Ignorer un refus explicite d'enregistrement = NON CONFORME CRITIQUE et rejet Loi de Démarchage.
+Absence réelle d'annonce d'enregistrement dans l'audio = NON CONFORME CRITIQUE.
+
+Ne pas sanctionner une simple faute de transcription si le son montre que l'information a bien été donnée.`,
+      controlPoints: [
+        "Annonce explicite que l'appel est enregistré",
+        "Mention claire du droit de refus / opposition",
+        "Temps de réaction laissé au client",
+        "Respect du refus si le client s'oppose",
+        "Absence de pression ou de minimisation du droit de refus",
+      ],
+      keywords: [
+        "appel enregistré",
+        "enregistrement",
+        "enregistré pour des raisons de qualité",
+        "qualité",
+        "vous pouvez refuser",
+        "droit de refus",
+        "droit d'opposition",
+        "s'y opposer",
+        "refuser l'enregistrement",
+      ],
+      severityLevel: AuditSeverity.CRITICAL,
+      isCritical: true,
+      position: 2,
+      chronologicalImportant: true,
+      weight: 25,
+    },
+    {
+      name: "Conservation 2 ans + droit de copie",
+      description:
+        "Valider que le conseiller informe le client de la durée de conservation de l'enregistrement (2 ans) et de son droit de demander une copie, en tolérant les approximations de transcription.",
+      prompt: `Vérifier :
+- Que le conseiller indique que l'enregistrement est conservé pendant 2 ans (tolérance phonétique : « deu an », « deux ans », « dé an », etc.).
+- Qu'il mentionne le droit pour le client de demander une copie de l'enregistrement.
+- Que ces informations sont compréhensibles et pas noyées dans une phrase incompréhensible.
+
+Si l'un de ces deux éléments manque réellement dans l'audio (et pas seulement dans la transcription), considérer le point comme NON CONFORME.
+Si la transcription est approximative mais que le sens est clair au son, considérer le point comme traité.`,
+      controlPoints: [
+        "Mention explicite de la conservation 2 ans",
+        "Mention du droit de demander une copie de l'enregistrement",
+        "Information donnée à un moment logique",
+        "Formulation globalement compréhensible pour le client",
+      ],
+      keywords: [
+        "conservation",
+        "conservé",
+        "2 ans",
+        "deux ans",
+        "droit de copie",
+        "copie de l'enregistrement",
+        "enregistrement conservé",
+      ],
+      severityLevel: AuditSeverity.HIGH,
+      isCritical: false,
+      position: 3,
+      chronologicalImportant: true,
+      weight: 20,
+    },
+    {
+      name: "Respect des oppositions (Bloctel + refus de démarchage)",
+      description:
+        "Vérifier que toute opposition explicite du client au démarchage ou au fait d'être rappelé est respectée et que l'appel est clôturé sans insistance abusive.",
+      prompt: `Vérifier :
+- Si le client exprime une opposition claire au fait d'être démarché ou rappelé (« ne m'appelez plus », « je suis sur Bloctel », « je ne veux pas être dérangé », etc.).
+- Que le conseiller respecte cette opposition et met fin à l'appel sans contourner le refus.
+- Qu'il n'y a pas d'insistance abusive après un refus clair.
+
+Les erreurs de transcription (orthographe, découpage) ne doivent pas masquer le sens réel : si le client refuse clairement au son, ce refus doit être respecté.
+Ignorer une opposition explicite = NON CONFORME MAJEUR.`,
+      controlPoints: [
+        "Opposition explicite du client identifiée si présente",
+        "Arrêt de l'appel en cas de refus de démarchage",
+        "Pas d'insistance abusive après un refus",
+        "Pas de contournement de la demande de ne plus être appelé",
+      ],
+      keywords: [
+        "Bloctel",
+        "liste rouge",
+        "ne m'appelez plus",
+        "je ne veux plus être appelé",
+        "je ne veux pas être démarché",
+        "refus de poursuivre",
+        "raccrocher",
+        "arrêter l'appel",
+      ],
+      severityLevel: AuditSeverity.HIGH,
+      isCritical: false,
+      position: 4,
+      chronologicalImportant: false,
+      weight: 15,
+    },
+    {
+      name: "Absence de fausse présentation",
+      description:
+        "Contrôler que le conseiller ne se présente jamais comme un organisme public ou une mutuelle, et ne crée pas de confusion intentionnelle sur le rôle de NCA.",
+      prompt: `Vérifier tout au long de l'appel :
+- Que le conseiller ne se présente pas comme une mutuelle, la Sécurité sociale, la CPAM, un « service qualité de votre caisse » ou autre organisme public.
+- Qu'il n'induit pas le client en erreur sur le rôle de NCA (NCA reste clairement un courtier).
+- Qu'il n'y a pas de contradiction entre l'introduction (courtier) et la suite de l'appel (où il parlerait comme s'il était l'organisme payeur).
+
+Toute fausse présentation ou confusion volontaire sur la nature de NCA = NON CONFORME CRITIQUE.
+Les fautes de transcription (ex : « mutuele », « securité socal ») ne changent pas le sens : c'est le contenu audio réel qui compte.`,
+      controlPoints: [
+        "Aucune présentation comme mutuelle ou organisme public",
+        "Aucune mention trompeuse du type « service qualité de votre caisse »",
+        "Cohérence entre la présentation initiale et le reste de l'appel",
+        "Statut de courtier en assurances restant clair pour le client",
+      ],
+      keywords: [
+        "mutuelle",
+        "Sécurité sociale",
+        "CPAM",
+        "service qualité",
+        "caisse",
+        "organisme",
+        "assurance maladie",
+        "organisme public",
+      ],
+      severityLevel: AuditSeverity.CRITICAL,
+      isCritical: true,
+      position: 5,
+      chronologicalImportant: false,
+      weight: 15,
+    },
+  ];
+
+  // Create Loi de Démarchage audit steps
+  for (const stepData of loiDemarchageSteps) {
+    const step = await prisma.auditStep.create({
+      data: {
+        auditConfigId: loiDemarchageConfig.id,
+        ...stepData,
+      },
+    });
+    console.log(`  ✅ Loi de Démarchage - Step ${step.position}: ${step.name}`);
+  }
+
   console.log("\n🎉 Seed completed successfully!");
   console.log(`\n📊 Summary:`);
-  console.log(`   - 3 Audit Configs created:`);
+  console.log(`   - 4 Audit Configs created:`);
   console.log(
     `     • Comprehensive Audit (${comprehensiveConfig.id}) - 18 steps`
   );
   console.log(`     • Essential Audit (${essentialConfig.id}) - 8 steps`);
   console.log(`     • Quick Audit (${quickConfig.id}) - 5 steps`);
   console.log(
+    `     • Loi de Démarchage Audit (${loiDemarchageConfig.id}) - 5 steps`
+  );
+  console.log(
     `   - Total: ${
-      comprehensiveSteps.length + essentialSteps.length + quickSteps.length
+      comprehensiveSteps.length +
+      essentialSteps.length +
+      quickSteps.length +
+      loiDemarchageSteps.length
     } Audit Steps created`
   );
 }

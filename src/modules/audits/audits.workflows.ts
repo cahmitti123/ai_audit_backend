@@ -9,10 +9,13 @@ import { NonRetriableError } from "inngest";
 import { getCachedFiche } from "../fiches/fiches.repository.js";
 import { getFicheTranscriptionStatus } from "../transcriptions/transcriptions.service.js";
 import { isFullyTranscribed } from "../transcriptions/transcriptions.types.js";
-import { runAudit } from "./audits.runner.js";
+import { runAudit } from "./audits.service.js";
 import { fetchFicheFunction } from "../fiches/fiches.workflows.js";
 import { transcribeFicheFunction } from "../transcriptions/transcriptions.workflows.js";
-import type { AuditFunctionResult, BatchAuditResult } from "./audits.types.js";
+import type {
+  AuditFunctionResult,
+  BatchAuditResult,
+} from "./audits.schemas.js";
 import {
   CONCURRENCY,
   TIMEOUTS,
@@ -49,6 +52,29 @@ export const runAuditFunction = inngest.createFunction(
     onFailure: async ({ error, step, event }) => {
       const fiche_id = (event as any)?.data?.fiche_id || "unknown";
       const audit_config_id = (event as any)?.data?.audit_config_id || 0;
+
+      // Try to mark audit as failed in database
+      try {
+        const { prisma } = await import("../../shared/prisma.js");
+
+        // Find the most recent running audit for this fiche+config
+        const runningAudit = await prisma.audit.findFirst({
+          where: {
+            ficheCache: { ficheId: fiche_id },
+            auditConfigId: BigInt(audit_config_id),
+            status: "running",
+          },
+          orderBy: { createdAt: "desc" },
+        });
+
+        if (runningAudit) {
+          const { markAuditAsFailed } = await import("./audits.repository.js");
+          await markAuditAsFailed(runningAudit.id, error.message);
+          console.log("Marked audit as failed in database:", runningAudit.id);
+        }
+      } catch (dbError) {
+        console.error("Failed to mark audit as failed in database:", dbError);
+      }
 
       // Send webhook notification (don't use step.run in onFailure - causes serialization errors)
       try {
@@ -181,6 +207,38 @@ export const runAuditFunction = inngest.createFunction(
     logger.info("Audit config loaded", {
       config_name: auditConfig.name,
       total_steps: auditConfig.auditSteps.length,
+    });
+
+    // Create audit record in database with "running" status
+    const auditDbId = await step.run("create-audit-record", async () => {
+      logger.info("Creating audit record in database", {
+        fiche_id,
+        audit_config_id,
+      });
+
+      const { getCachedFiche } = await import("../fiches/fiches.repository.js");
+      const { createPendingAudit } = await import("./audits.repository.js");
+
+      const cached = await getCachedFiche(fiche_id);
+      if (!cached) {
+        throw new NonRetriableError(
+          `Fiche ${fiche_id} not cached - cannot create audit`
+        );
+      }
+
+      const createdAudit = await createPendingAudit(
+        cached.id,
+        BigInt(audit_config_id),
+        auditId
+      );
+
+      logger.info("Audit record created", {
+        audit_db_id: String(createdAudit.id),
+        status: "running",
+      });
+
+      // Return as string to avoid BigInt serialization issues with Inngest
+      return String(createdAudit.id);
     });
 
     // Send audit started webhook
@@ -666,9 +724,9 @@ export const runAuditFunction = inngest.createFunction(
       return { notified: true };
     });
 
-    // Step 7: Save audit results
-    const savedAudit = await step.run("save-audit-results", async () => {
-      logger.info("Saving audit results to database", { fiche_id });
+    // Step 7: Update audit with results
+    const savedAudit = await step.run("update-audit-with-results", async () => {
+      logger.info("Updating audit with results in database", { fiche_id });
 
       // Verify citations are enriched before saving
       console.log(`\n📍 [Save] Checking enrichedStepResults before save:`, {
@@ -694,7 +752,7 @@ export const runAuditFunction = inngest.createFunction(
           : "No citations",
       });
 
-      const { saveAuditResult } = await import("./audits.repository.js");
+      const { updateAuditWithResults } = await import("./audits.repository.js");
       const { getCachedFiche } = await import("../fiches/fiches.repository.js");
 
       const cached = await getCachedFiche(fiche_id);
@@ -778,9 +836,10 @@ export const runAuditFunction = inngest.createFunction(
         });
       }
 
-      const saved = await saveAuditResult(auditData, cached.id);
+      // Convert string back to BigInt for database operation
+      const saved = await updateAuditWithResults(BigInt(auditDbId), auditData);
 
-      logger.info("Audit saved to database", {
+      logger.info("Audit updated in database", {
         audit_id: String(saved.id),
         fiche_id,
       });
@@ -1022,39 +1081,4 @@ export const batchAuditFunction = inngest.createFunction(
   }
 );
 
-/**
- * Cleanup Cron Job
- * =================
- * Scheduled daily cache cleanup
- */
-export const cleanupOldCachesFunction = inngest.createFunction(
-  {
-    id: "cleanup-old-caches",
-    name: "Cleanup Expired Cache Entries",
-    retries: 1,
-  },
-  { cron: "0 2 * * *" },
-  async ({ step, logger }) => {
-    logger.info("Starting cache cleanup");
-
-    const deleted = await step.run("delete-expired-caches", async () => {
-      const { deleteExpiredCaches } = await import(
-        "../fiches/fiches.repository.js"
-      );
-      return await deleteExpiredCaches();
-    });
-
-    logger.info("Cache cleanup completed", { deleted });
-
-    return {
-      success: true,
-      deleted,
-    };
-  }
-);
-
-export const functions = [
-  runAuditFunction,
-  batchAuditFunction,
-  cleanupOldCachesFunction,
-];
+export const functions = [runAuditFunction, batchAuditFunction];

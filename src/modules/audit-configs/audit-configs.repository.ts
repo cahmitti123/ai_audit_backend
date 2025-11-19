@@ -1,7 +1,13 @@
 /**
  * Audit Configs Repository
  * =========================
- * Database operations for audit configurations and steps
+ * RESPONSIBILITY: Direct database operations
+ * - CRUD operations for audit configs and steps
+ * - Database queries and mutations
+ * - No business logic
+ * - No external API calls
+ *
+ * LAYER: Data Access
  */
 
 import { prisma } from "../../shared/prisma.js";
@@ -38,7 +44,8 @@ export async function getAuditConfigById(id: bigint) {
 }
 
 /**
- * Create new audit configuration with optional steps
+ * Create new audit configuration with steps (atomic transaction)
+ * This function ensures all-or-nothing creation using a database transaction
  */
 export async function createAuditConfig(data: {
   name: string;
@@ -58,18 +65,28 @@ export async function createAuditConfig(data: {
     verifyProductInfo?: boolean;
   }>;
   isActive?: boolean;
+  runAutomatically?: boolean;
   createdBy?: string;
 }) {
-  return await prisma.auditConfig.create({
+  // Use transaction to ensure atomicity
+  return await prisma.$transaction(async (tx) => {
+    // Create config first
+    const newConfig = await tx.auditConfig.create({
     data: {
       name: data.name,
       description: data.description,
       systemPrompt: data.systemPrompt,
       isActive: data.isActive ?? true,
+        runAutomatically: data.runAutomatically ?? false,
       createdBy: data.createdBy,
-      ...(data.steps && data.steps.length > 0 && {
-        steps: {
-          create: data.steps.map((step) => ({
+      },
+    });
+
+    // Create all steps if provided
+    if (data.steps && data.steps.length > 0) {
+      await tx.auditStep.createMany({
+        data: data.steps.map((step) => ({
+          auditConfigId: newConfig.id,
             name: step.name,
             description: step.description,
             prompt: step.prompt,
@@ -82,14 +99,18 @@ export async function createAuditConfig(data: {
             chronologicalImportant: step.chronologicalImportant ?? false,
             verifyProductInfo: step.verifyProductInfo ?? false,
           })),
-        },
-      }),
-    },
+      });
+    }
+
+    // Return complete config with steps
+    return await tx.auditConfig.findUnique({
+      where: { id: newConfig.id },
     include: {
       steps: {
         orderBy: { position: "asc" },
       },
     },
+    });
   });
 }
 
@@ -103,6 +124,7 @@ export async function updateAuditConfig(
     description: string;
     systemPrompt: string;
     isActive: boolean;
+    runAutomatically: boolean;
   }>
 ) {
   return await prisma.auditConfig.update({
@@ -178,6 +200,7 @@ export async function updateAuditStep(
     weight: number;
     chronologicalImportant: boolean;
     verifyProductInfo: boolean;
+    position: number;
   }>
 ) {
   return await prisma.auditStep.update({
@@ -211,4 +234,29 @@ export async function getActiveAuditConfigs() {
 export async function getLatestActiveConfig() {
   const configs = await getAllAuditConfigs(false);
   return configs[0] || null;
+}
+
+/**
+ * Count audits for a specific audit config
+ */
+export async function countAuditsByConfigId(auditConfigId: bigint) {
+  return await prisma.audit.count({
+    where: { auditConfigId },
+  });
+}
+
+/**
+ * Get audit statistics for a specific audit config
+ */
+export async function getAuditStatsByConfigId(auditConfigId: bigint) {
+  return await prisma.audit.findMany({
+    where: { auditConfigId },
+    select: {
+      status: true,
+      scorePercentage: true,
+      isCompliant: true,
+      durationMs: true,
+      completedAt: true,
+    },
+  });
 }

@@ -1,350 +1,66 @@
 /**
  * Fiches Service
  * ==============
- * Business logic for fiche operations
+ * RESPONSIBILITY: Business logic and orchestration
+ * - Status calculations (transcription/audit)
+ * - Data enrichment (adding status to fiches)
+ * - High-level workflows (get fiche, get sales)
+ * - Coordinates between cache, API, and repository
+ *
+ * LAYER: Business Logic / Orchestration
  */
 
-import axios from "axios";
-import { logger } from "../../shared/logger.js";
-import {
-  type SalesResponse,
-  type SalesFiche,
-  type FicheDetailsResponse,
-  validateSalesResponse,
-  validateFicheDetailsResponse,
+import type {
+  FicheStatus,
+  RecordingStatus,
+  AuditStatusRecord,
+  SalesFiche,
+  SalesWithCallsResponse,
+  SalesResponseWithStatus,
+  DateRangeStatusResponse,
+  ProgressiveDateRangeResponse,
 } from "./fiches.schemas.js";
+import * as fichesRepository from "./fiches.repository.js";
+import * as fichesApi from "./fiches.api.js";
+import * as fichesCache from "./fiches.cache.js";
+import * as fichesRevalidation from "./fiches.revalidation.js";
+import { logger } from "../../shared/logger.js";
+import { prisma } from "../../shared/prisma.js";
 
-const baseUrl =
-  process.env.FICHE_API_BASE_URL || "https://api.devis-mutuelle-pas-cher.com";
-const apiBase = `${baseUrl}/api`;
+// ═══════════════════════════════════════════════════════════════════════════
+// UTILITY HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
- * Validate date format (YYYY-MM-DD)
+ * Generate array of dates between start and end (inclusive)
  */
-function validateDateFormat(date: string): boolean {
-  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-  if (!dateRegex.test(date)) {
-    return false;
+function generateDateRange(startDate: string, endDate: string): string[] {
+  const dates: string[] = [];
+  const current = new Date(startDate);
+  const end = new Date(endDate);
+
+  while (current <= end) {
+    dates.push(current.toISOString().split("T")[0]);
+    current.setDate(current.getDate() + 1);
   }
 
-  const [year, month, day] = date.split("-").map(Number);
-
-  // Validate year (reasonable range)
-  if (year < 2000 || year > 2100) {
-    return false;
-  }
-
-  // Validate month
-  if (month < 1 || month > 12) {
-    return false;
-  }
-
-  // Validate day
-  if (day < 1 || day > 31) {
-    return false;
-  }
-
-  // Validate actual date exists
-  const dateObj = new Date(year, month - 1, day);
-  if (
-    dateObj.getFullYear() !== year ||
-    dateObj.getMonth() !== month - 1 ||
-    dateObj.getDate() !== day
-  ) {
-    return false;
-  }
-
-  return true;
+  return dates;
 }
 
-/**
- * Fetch sales list by date
- * @param date - Date in YYYY-MM-DD format
- * @returns Promise<SalesResponse> - Validated sales response with fiches array and total count
- * @throws Error if date format is invalid, API call fails, or response validation fails
- */
-export async function fetchApiSales(date: string): Promise<SalesResponse> {
-  // Validate date format
-  if (!validateDateFormat(date)) {
-    const error = new Error(
-      `Invalid date format: "${date}". Expected format: YYYY-MM-DD (e.g., 2025-11-12)`
-    );
-    console.error("fetchApiSales - Invalid date format", {
-      date,
-      expected_format: "YYYY-MM-DD",
-    });
-    logger.error("Invalid date format", {
-      date,
-      expected_format: "YYYY-MM-DD",
-    });
-    throw error;
-  }
-
-  const formattedDate = date.split("-").reverse().join("/");
-  console.log("fetchApiSales - Starting fetch", { date, formattedDate });
-  logger.info("Fetching sales list", { date, formatted_date: formattedDate });
-
-  try {
-    const params = new URLSearchParams({
-      date: formattedDate,
-      criteria_type: "1",
-      force_new_session: "false",
-    });
-
-    console.log("fetchApiSales - Request params", {
-      params: params.toString(),
-    });
-    console.log("fetchApiSales - API URL", {
-      url: `${apiBase}/fiches/search/by-date?${params}`,
-    });
-
-    const response = await axios.get<SalesResponse>(
-      `${apiBase}/fiches/search/by-date?${params}`,
-      {
-        timeout: 60000,
-      }
-    );
-
-    console.log("fetchApiSales - Response received", {
-      status: response.status,
-      dataKeys: Object.keys(response.data || {}),
-      fichesLength: response.data?.fiches?.length,
-      total: response.data?.total,
-    });
-
-    // Validate response structure at runtime
-    const validatedData = validateSalesResponse(response.data);
-
-    console.log("fetchApiSales - Response validated", {
-      fiches_count: validatedData.fiches.length,
-      total: validatedData.total,
-    });
-    logger.info("Sales list fetched and validated", {
-      date,
-      fiches_count: validatedData.fiches.length,
-      total: validatedData.total,
-    });
-
-    return validatedData;
-  } catch (error: any) {
-    console.error("fetchApiSales - Error occurred", {
-      date,
-      status: error.response?.status,
-      message: error.message,
-      stack: error.stack,
-    });
-    logger.error("Failed to fetch sales", {
-      date,
-      status: error.response?.status,
-      message: error.message,
-    });
-    throw error;
-  }
-}
-/**
- * Fetch fiche details from API
- * @param ficheId - Fiche ID to fetch
- * @param cle - Optional authentication key
- * @returns Promise<FicheDetailsResponse> - Validated fiche details
- * @throws Error if API call fails, response validation fails, or fiche not found
- */
-export async function fetchApiFicheDetails(
-  ficheId: string,
-  cle?: string
-): Promise<FicheDetailsResponse> {
-  logger.info("Fetching fiche details", {
-    fiche_id: ficheId,
-    has_cle: Boolean(cle),
-  });
-
-  try {
-    const params: Record<string, string> = {
-      include_recordings: "true",
-      include_transcriptions: "false",
-    };
-    if (cle) params.cle = cle;
-
-    const query = new URLSearchParams(params);
-    const response = await axios.get<FicheDetailsResponse>(
-      `${apiBase}/fiches/by-id/${ficheId}?${query}`,
-      {
-        timeout: 30000,
-      }
-    );
-
-    if (!response.data || !response.data.success) {
-      throw new Error("Fiche not found");
-    }
-
-    // Validate response structure at runtime
-    const validatedData = validateFicheDetailsResponse(response.data);
-
-    logger.info("Fiche details fetched and validated successfully", {
-      fiche_id: ficheId,
-      recordings_count: validatedData.recordings?.length || 0,
-      has_prospect: Boolean(validatedData.prospect),
-      groupe: validatedData.information?.groupe,
-    });
-
-    return validatedData;
-  } catch (error: any) {
-    logger.error("Failed to fetch fiche details", {
-      fiche_id: ficheId,
-      status: error.response?.status,
-      message: error.message,
-    });
-
-    if (error.response?.status === 404) {
-      throw new Error(`Fiche ${ficheId} not found`);
-    }
-    throw error;
-  }
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// STATUS CALCULATION HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Get fiche with auto-caching
+ * Calculate transcription status from recordings
  */
-export async function getFicheWithCache(ficheId: string, cle?: string) {
-  console.log("Getting fiche with cache", {
-    fiche_id: ficheId,
-    has_cle: Boolean(cle),
-  });
-  logger.info("Getting fiche with cache", {
-    fiche_id: ficheId,
-    has_cle: Boolean(cle),
-  });
-
-  console.log("Importing repository functions");
-  const { getCachedFiche, cacheFiche } = await import("./fiches.repository.js");
-
-  // Check cache
-  console.log("Looking up fiche in cache", { fiche_id: ficheId });
-  logger.debug("Looking up fiche in cache", { fiche_id: ficheId });
-  const cached = await getCachedFiche(ficheId);
-
-  if (cached && cached.expiresAt > new Date()) {
-    console.log("Fiche retrieved from cache", {
-      fiche_id: ficheId,
-      cache_id: cached.id.toString(),
-      recordings_count: cached.recordingsCount,
-      cached_count: cached.recordingsCount,
-    });
-    logger.debug("Fiche retrieved from cache", {
-      fiche_id: ficheId,
-      cache_id: cached.id.toString(),
-      recordings_count: cached.recordingsCount,
-      cached_count: cached.recordingsCount,
-    });
-    return cached.rawData;
-  }
-
-  console.log("Fiche not found in cache or expired", { fiche_id: ficheId });
-  logger.debug("Fiche not found in cache", { fiche_id: ficheId });
-  console.log("Cache miss, fetching from API", { fiche_id: ficheId });
-  logger.info("Cache miss, fetching from API", { fiche_id: ficheId });
-
-  // Fetch and cache
-  console.log("Fetching fiche details from API", { fiche_id: ficheId });
-  const ficheData = await fetchApiFicheDetails(ficheId, cle);
-  console.log("Caching fiche data", { fiche_id: ficheId });
-  await cacheFiche(ficheData);
-
-  console.log("Fiche cached successfully", {
-    fiche_id: ficheId,
-    recordings_count: ficheData.recordings?.length || 0,
-  });
-  logger.info("Fiche cached successfully", {
-    fiche_id: ficheId,
-    recordings_count: ficheData.recordings?.length || 0,
-  });
-
-  return ficheData;
-}
-
-/**
- * Force refresh fiche from API and upsert to database
- * This bypasses the cache and always fetches fresh data
- */
-export async function refreshFicheFromApi(ficheId: string, cle?: string) {
-  console.log("Force refreshing fiche from API", {
-    fiche_id: ficheId,
-    has_cle: Boolean(cle),
-  });
-  logger.info("Force refreshing fiche from API", {
-    fiche_id: ficheId,
-    has_cle: Boolean(cle),
-  });
-
-  // Always fetch from API
-  console.log("Fetching fresh fiche details from API", { fiche_id: ficheId });
-  const ficheData = await fetchApiFicheDetails(ficheId, cle);
-
-  // Import repository and upsert to database
-  console.log("Importing repository functions");
-  const { cacheFiche } = await import("./fiches.repository.js");
-
-  console.log("Upserting fresh fiche data to database", { fiche_id: ficheId });
-  await cacheFiche(ficheData);
-
-  console.log("Fiche refreshed and upserted successfully", {
-    fiche_id: ficheId,
-    recordings_count: ficheData.recordings?.length || 0,
-  });
-  logger.info("Fiche refreshed and upserted successfully", {
-    fiche_id: ficheId,
-    recordings_count: ficheData.recordings?.length || 0,
-  });
-
-  return ficheData;
-}
-
-/**
- * Get fiche status from database (transcription and audit info)
- */
-export async function getFicheStatus(ficheId: string) {
-  const { prisma } = await import("../../shared/prisma.js");
-
-  const ficheCache = await prisma.ficheCache.findUnique({
-    where: { ficheId },
-    include: {
-      recordings: {
-        select: {
-          id: true,
-          hasTranscription: true,
-          transcribedAt: true,
-        },
-      },
-      audits: {
-        where: { isLatest: true },
-        select: {
-          id: true,
-          overallScore: true,
-          scorePercentage: true,
-          niveau: true,
-          isCompliant: true,
-          status: true,
-          completedAt: true,
-          auditConfig: {
-            select: {
-              name: true,
-            },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      },
-    },
-  });
-
-  if (!ficheCache) {
-    return null;
-  }
-
-  // Calculate transcription status
-  const totalRecordings = ficheCache.recordings.length;
-  const transcribedRecordings = ficheCache.recordings.filter(
+function calculateTranscriptionStatus(recordings: RecordingStatus[]) {
+  const totalRecordings = recordings.length;
+  const transcribedRecordings = recordings.filter(
     (r) => r.hasTranscription
   ).length;
 
-  const transcriptionStatus = {
+  return {
     total: totalRecordings,
     transcribed: transcribedRecordings,
     pending: totalRecordings - transcribedRecordings,
@@ -353,24 +69,26 @@ export async function getFicheStatus(ficheId: string) {
     isComplete:
       totalRecordings > 0 && transcribedRecordings === totalRecordings,
     lastTranscribedAt:
-      ficheCache.recordings
+      recordings
         .filter((r) => r.transcribedAt)
         .sort(
           (a, b) => b.transcribedAt!.getTime() - a.transcribedAt!.getTime()
         )[0]?.transcribedAt || null,
   };
+}
 
-  // Calculate audit status
-  const completedAudits = ficheCache.audits.filter(
-    (a) => a.status === "completed"
-  );
+/**
+ * Calculate audit status from audits
+ */
+function calculateAuditStatus(audits: AuditStatusRecord[]) {
+  const completedAudits = audits.filter((a) => a.status === "completed");
   const compliantAudits = completedAudits.filter((a) => a.isCompliant);
 
-  const auditStatus = {
-    total: ficheCache.audits.length,
+  return {
+    total: audits.length,
     completed: completedAudits.length,
-    pending: ficheCache.audits.filter((a) => a.status === "pending").length,
-    running: ficheCache.audits.filter((a) => a.status === "running").length,
+    pending: audits.filter((a) => a.status === "pending").length,
+    running: audits.filter((a) => a.status === "running").length,
     compliant: compliantAudits.length,
     nonCompliant: completedAudits.length - compliantAudits.length,
     averageScore:
@@ -380,20 +98,74 @@ export async function getFicheStatus(ficheId: string) {
             0
           ) / completedAudits.length
         : null,
-    latestAudit: ficheCache.audits[0]
+    latestAudit: audits[0]
       ? {
-          ...ficheCache.audits[0],
-          id: ficheCache.audits[0].id.toString(),
-          auditConfig: ficheCache.audits[0].auditConfig || null,
+          id: audits[0].id.toString(),
+          status: audits[0].status,
+          overallScore: audits[0].overallScore.toString(),
+          scorePercentage: audits[0].scorePercentage.toString(),
+          niveau: audits[0].niveau,
+          isCompliant: audits[0].isCompliant,
+          completedAt: audits[0].completedAt,
+          auditConfig: {
+            id: audits[0].auditConfig.id.toString(),
+            name: audits[0].auditConfig.name,
+          },
         }
       : null,
+  };
+}
+
+/**
+ * Create default empty status
+ */
+function createDefaultStatus(): FicheStatus {
+  return {
+    hasData: false,
+    transcription: {
+      total: 0,
+      transcribed: 0,
+      pending: 0,
+      percentage: 0,
+      isComplete: false,
+      lastTranscribedAt: null,
+    },
+    audit: {
+      total: 0,
+      completed: 0,
+      pending: 0,
+      running: 0,
+      compliant: 0,
+      nonCompliant: 0,
+      averageScore: null,
+      latestAudit: null,
+    },
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATUS SERVICES
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Get fiche status (transcription and audit info)
+ */
+export async function getFicheStatus(ficheId: string) {
+  const ficheCache = await fichesRepository.getFicheWithStatus(ficheId);
+
+  if (!ficheCache) {
+    return null;
+  }
+
+  const status: FicheStatus = {
+    hasData: true,
+    transcription: calculateTranscriptionStatus(ficheCache.recordings),
+    audit: calculateAuditStatus(ficheCache.audits),
   };
 
   return {
     ficheId,
-    hasData: true,
-    transcription: transcriptionStatus,
-    audit: auditStatus,
+    ...status,
   };
 }
 
@@ -401,129 +173,23 @@ export async function getFicheStatus(ficheId: string) {
  * Get status for multiple fiches
  */
 export async function getFichesStatus(ficheIds: string[]) {
-  const { prisma } = await import("../../shared/prisma.js");
-
-  const fichesCache = await prisma.ficheCache.findMany({
-    where: { ficheId: { in: ficheIds } },
-    include: {
-      recordings: {
-        select: {
-          id: true,
-          hasTranscription: true,
-          transcribedAt: true,
-        },
-      },
-      audits: {
-        where: { isLatest: true },
-        select: {
-          id: true,
-          overallScore: true,
-          scorePercentage: true,
-          niveau: true,
-          isCompliant: true,
-          status: true,
-          completedAt: true,
-          auditConfig: {
-            select: {
-              name: true,
-            },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      },
-    },
-  });
+  const fichesCache = await fichesRepository.getFichesWithStatus(ficheIds);
 
   // Create a map of ficheId to status
-  const statusMap: Record<string, any> = {};
+  const statusMap: Record<string, FicheStatus> = {};
 
   for (const ficheId of ficheIds) {
     const ficheCache = fichesCache.find((f) => f.ficheId === ficheId);
 
     if (!ficheCache) {
-      statusMap[ficheId] = {
-        ficheId,
-        hasData: false,
-        transcription: {
-          total: 0,
-          transcribed: 0,
-          pending: 0,
-          percentage: 0,
-          isComplete: false,
-          lastTranscribedAt: null,
-        },
-        audit: {
-          total: 0,
-          completed: 0,
-          pending: 0,
-          running: 0,
-          compliant: 0,
-          nonCompliant: 0,
-          averageScore: null,
-          latestAudit: null,
-        },
-      };
+      statusMap[ficheId] = createDefaultStatus();
       continue;
     }
 
-    // Calculate transcription status
-    const totalRecordings = ficheCache.recordings.length;
-    const transcribedRecordings = ficheCache.recordings.filter(
-      (r) => r.hasTranscription
-    ).length;
-
-    const transcriptionStatus = {
-      total: totalRecordings,
-      transcribed: transcribedRecordings,
-      pending: totalRecordings - transcribedRecordings,
-      percentage:
-        totalRecordings > 0
-          ? (transcribedRecordings / totalRecordings) * 100
-          : 0,
-      isComplete:
-        totalRecordings > 0 && transcribedRecordings === totalRecordings,
-      lastTranscribedAt:
-        ficheCache.recordings
-          .filter((r) => r.transcribedAt)
-          .sort(
-            (a, b) => b.transcribedAt!.getTime() - a.transcribedAt!.getTime()
-          )[0]?.transcribedAt || null,
-    };
-
-    // Calculate audit status
-    const completedAudits = ficheCache.audits.filter(
-      (a) => a.status === "completed"
-    );
-    const compliantAudits = completedAudits.filter((a) => a.isCompliant);
-
-    const auditStatus = {
-      total: ficheCache.audits.length,
-      completed: completedAudits.length,
-      pending: ficheCache.audits.filter((a) => a.status === "pending").length,
-      running: ficheCache.audits.filter((a) => a.status === "running").length,
-      compliant: compliantAudits.length,
-      nonCompliant: completedAudits.length - compliantAudits.length,
-      averageScore:
-        completedAudits.length > 0
-          ? completedAudits.reduce(
-              (sum, a) => sum + Number(a.scorePercentage),
-              0
-            ) / completedAudits.length
-          : null,
-      latestAudit: ficheCache.audits[0]
-        ? {
-            ...ficheCache.audits[0],
-            id: ficheCache.audits[0].id.toString(),
-            auditConfig: ficheCache.audits[0].auditConfig || null,
-          }
-        : null,
-    };
-
     statusMap[ficheId] = {
-      ficheId,
       hasData: true,
-      transcription: transcriptionStatus,
-      audit: auditStatus,
+      transcription: calculateTranscriptionStatus(ficheCache.recordings),
+      audit: calculateAuditStatus(ficheCache.audits),
     };
   }
 
@@ -531,89 +197,23 @@ export async function getFichesStatus(ficheIds: string[]) {
 }
 
 /**
- * Get all fiches for a date with their statuses from database
- * This returns cached fiches with their processing status
+ * Get all fiches for a date with their statuses
  */
 export async function getFichesByDateWithStatus(date: string) {
-  const { prisma } = await import("../../shared/prisma.js");
+  // Use UTC to avoid timezone issues
+  const startDate = new Date(date + "T00:00:00.000Z");
+  const endDate = new Date(date + "T23:59:59.999Z");
 
-  // Convert date to start and end of day
-  const startDate = new Date(date);
-  startDate.setHours(0, 0, 0, 0);
-
-  const endDate = new Date(date);
-  endDate.setHours(23, 59, 59, 999);
-
-  const fichesCache = await prisma.ficheCache.findMany({
-    where: {
-      createdAt: {
-        gte: startDate,
-        lte: endDate,
-      },
-    },
-    include: {
-      recordings: {
-        select: {
-          id: true,
-          hasTranscription: true,
-          transcribedAt: true,
-          callId: true,
-          startTime: true,
-          durationSeconds: true,
-        },
-        orderBy: { startTime: "desc" },
-      },
-      audits: {
-        where: { isLatest: true },
-        select: {
-          id: true,
-          overallScore: true,
-          scorePercentage: true,
-          niveau: true,
-          isCompliant: true,
-          status: true,
-          completedAt: true,
-          createdAt: true,
-          auditConfig: {
-            select: {
-              id: true,
-              name: true,
-            },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      },
-    },
-    orderBy: { createdAt: "desc" },
-  });
+  const fichesCache = await fichesRepository.getFichesByDateRange(
+    startDate,
+    endDate
+  );
 
   // Transform to status-focused format
   const fichesWithStatus = fichesCache.map((ficheCache) => {
-    // Calculate transcription status
-    const totalRecordings = ficheCache.recordings.length;
-    const transcribedRecordings = ficheCache.recordings.filter(
-      (r) => r.hasTranscription
-    ).length;
-
-    const transcriptionStatus = {
-      total: totalRecordings,
-      transcribed: transcribedRecordings,
-      pending: totalRecordings - transcribedRecordings,
-      percentage:
-        totalRecordings > 0
-          ? (transcribedRecordings / totalRecordings) * 100
-          : 0,
-      isComplete:
-        totalRecordings > 0 && transcribedRecordings === totalRecordings,
-      lastTranscribedAt:
-        ficheCache.recordings
-          .filter((r) => r.transcribedAt)
-          .sort(
-            (a, b) => b.transcribedAt!.getTime() - a.transcribedAt!.getTime()
-          )[0]?.transcribedAt || null,
-    };
-
-    // Calculate audit status
+    const transcriptionStatus = calculateTranscriptionStatus(
+      ficheCache.recordings
+    );
     const completedAudits = ficheCache.audits.filter(
       (a) => a.status === "completed"
     );
@@ -635,8 +235,13 @@ export async function getFichesByDateWithStatus(date: string) {
           : null,
       latestAudit: ficheCache.audits[0]
         ? {
-            ...ficheCache.audits[0],
             id: ficheCache.audits[0].id.toString(),
+            overallScore: ficheCache.audits[0].overallScore.toString(),
+            scorePercentage: ficheCache.audits[0].scorePercentage.toString(),
+            niveau: ficheCache.audits[0].niveau,
+            isCompliant: ficheCache.audits[0].isCompliant,
+            status: ficheCache.audits[0].status,
+            completedAt: ficheCache.audits[0].completedAt,
             auditConfig: ficheCache.audits[0].auditConfig
               ? {
                   id: ficheCache.audits[0].auditConfig.id.toString(),
@@ -694,87 +299,22 @@ export async function getFichesByDateWithStatus(date: string) {
 }
 
 /**
- * Get all fiches for a date range with their statuses from database
+ * Get all fiches for a date range with their statuses
  */
 export async function getFichesByDateRangeWithStatus(
   startDate: string,
   endDate: string
 ) {
-  const { prisma } = await import("../../shared/prisma.js");
+  // Use UTC to avoid timezone issues - pass Date objects for backward compatibility
+  const start = new Date(startDate + "T00:00:00.000Z");
+  const end = new Date(endDate + "T23:59:59.999Z");
 
-  const start = new Date(startDate);
-  start.setHours(0, 0, 0, 0);
-
-  const end = new Date(endDate);
-  end.setHours(23, 59, 59, 999);
-
-  const fichesCache = await prisma.ficheCache.findMany({
-    where: {
-      createdAt: {
-        gte: start,
-        lte: end,
-      },
-    },
-    include: {
-      recordings: {
-        select: {
-          id: true,
-          hasTranscription: true,
-          transcribedAt: true,
-          callId: true,
-          startTime: true,
-          durationSeconds: true,
-        },
-        orderBy: { startTime: "desc" },
-      },
-      audits: {
-        where: { isLatest: true },
-        select: {
-          id: true,
-          overallScore: true,
-          scorePercentage: true,
-          niveau: true,
-          isCompliant: true,
-          status: true,
-          completedAt: true,
-          createdAt: true,
-          auditConfig: {
-            select: {
-              id: true,
-              name: true,
-            },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      },
-    },
-    orderBy: { createdAt: "desc" },
-  });
+  const fichesCache = await fichesRepository.getFichesByDateRange(start, end);
 
   const fichesWithStatus = fichesCache.map((ficheCache) => {
-    const totalRecordings = ficheCache.recordings.length;
-    const transcribedRecordings = ficheCache.recordings.filter(
-      (r) => r.hasTranscription
-    ).length;
-
-    const transcriptionStatus = {
-      total: totalRecordings,
-      transcribed: transcribedRecordings,
-      pending: totalRecordings - transcribedRecordings,
-      percentage:
-        totalRecordings > 0
-          ? (transcribedRecordings / totalRecordings) * 100
-          : 0,
-      isComplete:
-        totalRecordings > 0 && transcribedRecordings === totalRecordings,
-      lastTranscribedAt:
-        ficheCache.recordings
-          .filter((r) => r.transcribedAt)
-          .sort(
-            (a, b) => b.transcribedAt!.getTime() - a.transcribedAt!.getTime()
-          )[0]?.transcribedAt || null,
-    };
-
+    const transcriptionStatus = calculateTranscriptionStatus(
+      ficheCache.recordings
+    );
     const completedAudits = ficheCache.audits.filter(
       (a) => a.status === "completed"
     );
@@ -796,8 +336,13 @@ export async function getFichesByDateRangeWithStatus(
           : null,
       latestAudit: ficheCache.audits[0]
         ? {
-            ...ficheCache.audits[0],
             id: ficheCache.audits[0].id.toString(),
+            overallScore: ficheCache.audits[0].overallScore.toString(),
+            scorePercentage: ficheCache.audits[0].scorePercentage.toString(),
+            niveau: ficheCache.audits[0].niveau,
+            isCompliant: ficheCache.audits[0].isCompliant,
+            status: ficheCache.audits[0].status,
+            completedAt: ficheCache.audits[0].completedAt,
             auditConfig: ficheCache.audits[0].auditConfig
               ? {
                   id: ficheCache.audits[0].auditConfig.id.toString(),
@@ -855,13 +400,449 @@ export async function getFichesByDateRangeWithStatus(
   };
 }
 
-export const FichesService = {
-  fetchApiSales,
-  fetchApiFicheDetails,
-  getFicheWithCache,
-  refreshFicheFromApi,
-  getFicheStatus,
-  getFichesStatus,
-  getFichesByDateWithStatus,
-  getFichesByDateRangeWithStatus,
-};
+// ═══════════════════════════════════════════════════════════════════════════
+// ENRICHMENT & ORCHESTRATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Enrich sales response with status information
+ * Business logic to add transcription and audit status to sales fiches
+ */
+export async function enrichSalesWithStatus(
+  sales: SalesWithCallsResponse
+): Promise<SalesResponseWithStatus> {
+  if (!sales.fiches || sales.fiches.length === 0) {
+    return { ...sales, fiches: [] };
+  }
+
+  // Extract fiche IDs
+  const ficheIds = sales.fiches
+    .map((fiche) => fiche.id)
+    .filter((id): id is string => Boolean(id));
+
+  if (ficheIds.length === 0) {
+    return {
+      ...sales,
+      fiches: sales.fiches.map((f) => ({
+        ...f,
+        status: createDefaultStatus(),
+      })),
+    };
+  }
+
+  // Get status for all fiches
+  const statusMap = await getFichesStatus(ficheIds);
+
+  // Enrich each fiche with its status
+  const enrichedFiches = sales.fiches.map((fiche) => {
+    const ficheId = fiche.id;
+    const status = ficheId ? statusMap[ficheId] : null;
+
+    return {
+      ...fiche,
+      status: status || createDefaultStatus(),
+    };
+  });
+
+  return {
+    fiches: enrichedFiches,
+    total: sales.total,
+  };
+}
+
+/**
+ * Get fiche from cache or API
+ * Orchestrates cache lookup and API fetch
+ */
+export async function getFiche(ficheId: string, forceRefresh = false) {
+  if (forceRefresh) {
+    return fichesCache.refreshFicheFromApi(ficheId);
+  }
+
+  return fichesCache.getFicheWithCache(ficheId);
+}
+
+/**
+ * Fetch sales by date range with optional status enrichment
+ */
+export async function getSalesByDateRange(
+  startDate: string,
+  endDate: string,
+  includeStatus = true
+): Promise<SalesWithCallsResponse | SalesResponseWithStatus> {
+  const sales = await fichesApi.fetchSalesWithCalls(startDate, endDate);
+
+  if (!includeStatus) {
+    return sales;
+  }
+
+  return enrichSalesWithStatus(sales);
+}
+
+/**
+ * Progressive fetch: Return first available data immediately, continue in background
+ * Strategy: Check cache, fetch first missing day synchronously, continue rest async
+ *
+ * @param startDate - Start date YYYY-MM-DD
+ * @param endDate - End date YYYY-MM-DD
+ * @param options - Configuration options
+ * @returns Progressive response with partial data and metadata
+ */
+export async function getFichesByDateRangeProgressive(
+  startDate: string,
+  endDate: string,
+  options?: {
+    webhookUrl?: string;
+    webhookSecret?: string;
+    triggerBackgroundFetch?: (
+      jobId: string,
+      remainingDates: string[],
+      firstFetchedDate: string | null
+    ) => Promise<void>;
+  }
+): Promise<ProgressiveDateRangeResponse> {
+  // Create Date objects for legacy compatibility (some functions still expect Date objects)
+  // Use UTC to avoid timezone issues
+  const start = new Date(startDate + "T00:00:00.000Z");
+  const end = new Date(endDate + "T23:59:59.999Z");
+
+  logger.info("Starting progressive fetch", { startDate, endDate });
+
+  // STEP 0: Check for existing recent job (deduplication)
+  // Check for any job (pending, processing, or recently completed) within last 5 minutes
+  const allDates = generateDateRange(startDate, endDate);
+  const existingJob = await prisma.progressiveFetchJob.findFirst({
+    where: {
+      startDate,
+      endDate,
+      createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) }, // Last 5 mins
+    },
+    orderBy: { createdAt: "desc" }, // Most recent first
+  });
+
+  if (existingJob) {
+    logger.info("Found existing in-progress job, reusing", {
+      jobId: existingJob.id,
+      status: existingJob.status,
+      progress: existingJob.progress,
+    });
+
+    // Return cached data with existing job ID
+    const cachedData = await getFichesByDateRangeWithStatus(startDate, endDate);
+
+    return {
+      startDate,
+      endDate,
+      total: cachedData.total,
+      fiches: cachedData.fiches,
+      meta: {
+        complete: existingJob.status === "complete",
+        partial: existingJob.status !== "complete",
+        backgroundJobId: existingJob.id,
+        totalDaysRequested: existingJob.totalDays,
+        daysFetched: existingJob.completedDays,
+        daysRemaining: existingJob.datesRemaining.length,
+        daysCached: existingJob.datesAlreadyFetched.length,
+        cacheCoverage: {
+          datesWithData: existingJob.datesAlreadyFetched,
+          datesMissing: existingJob.datesRemaining,
+        },
+      },
+    };
+  }
+
+  // STEP 1: Check cache coverage - pass strings directly to avoid timezone issues
+  const coverage = await fichesRepository.getDateRangeCoverage(
+    startDate,
+    endDate
+  );
+  const { datesWithData, datesMissing } = coverage;
+
+  logger.info("Cache coverage analyzed", {
+    totalDays: datesWithData.length + datesMissing.length,
+    cached: datesWithData.length,
+    missing: datesMissing.length,
+  });
+
+  // STEP 2: Fetch cached data
+  const cachedFichesResult = await getFichesByDateRangeWithStatus(
+    startDate,
+    endDate
+  );
+  const cachedFiches = cachedFichesResult.fiches;
+
+  // STEP 3: Always return cached data immediately - NEVER wait for CRM
+  // Trigger background fetch for ALL missing dates (no synchronous fetch)
+
+  logger.info("Returning cached data immediately", {
+    cachedFiches: cachedFiches.length,
+    missingDates: datesMissing.length,
+  });
+
+  // All fiches we have right now (cached only)
+  const allFiches = cachedFiches;
+  const daysFetched = datesWithData.length;
+  const remainingDates = datesMissing; // All missing dates go to background
+
+  // STEP 4: Create job record if there are missing dates
+  let jobId: string | undefined = undefined;
+
+  if (remainingDates.length > 0) {
+    const job = await prisma.progressiveFetchJob.create({
+      data: {
+        startDate,
+        endDate,
+        status: "processing",
+        totalDays: allDates.length,
+        completedDays: daysFetched,
+        datesAlreadyFetched: datesWithData,
+        datesRemaining: remainingDates,
+        datesFailed: [],
+        webhookUrl: options?.webhookUrl,
+        webhookSecret: options?.webhookSecret,
+        webhookEvents: options?.webhookUrl
+          ? ["progress", "complete", "failed"]
+          : [],
+        progress: Math.round((daysFetched / allDates.length) * 100),
+        totalFiches: allFiches.length,
+        resultFicheIds: allFiches.map((f) => f.ficheId),
+      },
+    });
+
+    jobId = job.id;
+
+    logger.info("Background job created for missing dates", {
+      jobId,
+      remainingDays: remainingDates.length,
+      dates: remainingDates.slice(0, 3),
+    });
+
+    // Trigger background fetch for ALL missing dates (no synchronous wait)
+    if (options?.triggerBackgroundFetch) {
+      await options.triggerBackgroundFetch(jobId, remainingDates, null);
+    }
+  }
+
+  // STEP 5: Return cached data immediately
+  return {
+    startDate,
+    endDate,
+    total: allFiches.length,
+    fiches: allFiches,
+    meta: {
+      complete: remainingDates.length === 0,
+      partial: remainingDates.length > 0,
+      backgroundJobId: jobId,
+      totalDaysRequested: allDates.length,
+      daysFetched,
+      daysRemaining: remainingDates.length,
+      daysCached: datesWithData.length,
+      cacheCoverage: {
+        datesWithData,
+        datesMissing: remainingDates,
+      },
+    },
+  };
+}
+
+/**
+ * Get fiches by date range with smart caching and revalidation
+ * Orchestrates cache lookup, API fallback, and background revalidation
+ *
+ * @returns Object with data and meta information about caching/revalidation
+ */
+export async function getFichesByDateRangeWithSmartCache(
+  startDate: string,
+  endDate: string,
+  options?: {
+    triggerRevalidation?: (startDate: string, endDate: string) => Promise<void>;
+  }
+): Promise<{
+  data:
+    | DateRangeStatusResponse
+    | {
+        startDate: string;
+        endDate: string;
+        total: number;
+        fiches: unknown[];
+      };
+  meta: {
+    cached: boolean;
+    source?: string;
+    revalidating?: boolean;
+    revalidationReason?: string;
+    message?: string;
+  };
+}> {
+  // STEP 1: Get cached data (always query database first)
+  const result = await getFichesByDateRangeWithStatus(startDate, endDate);
+
+  // STEP 2: If NO CACHE at all - fetch from API
+  if (result.total === 0) {
+    logger.info("No cache found - fetching from API", {
+      startDate,
+      endDate,
+    });
+
+    try {
+      // Fetch sales with recordings (single API call for entire range!)
+      const salesWithCalls = await fichesApi.fetchSalesWithCalls(
+        startDate,
+        endDate
+      );
+
+      logger.info("Sales with calls fetched from API", {
+        startDate,
+        endDate,
+        total: salesWithCalls.total,
+      });
+
+      // Transform API data to status format
+      const fichesResponse = salesWithCalls.fiches.map((fiche) => ({
+        ficheId: fiche.id,
+        groupe: null,
+        agenceNom: null,
+        prospectNom: fiche.nom,
+        prospectPrenom: fiche.prenom,
+        prospectEmail: fiche.email,
+        prospectTel: fiche.telephone,
+        fetchedAt: new Date(),
+        createdAt: new Date(),
+        transcription: {
+          total: fiche.recordings?.length || 0,
+          transcribed: 0,
+          pending: fiche.recordings?.length || 0,
+          percentage: 0,
+          isComplete: false,
+          lastTranscribedAt: null,
+        },
+        audit: {
+          total: 0,
+          completed: 0,
+          pending: 0,
+          running: 0,
+          compliant: 0,
+          nonCompliant: 0,
+          averageScore: null,
+          latestAudit: null,
+          audits: [],
+        },
+        recordings: (fiche.recordings || []).map((rec: unknown) => {
+          const recording = rec as {
+            call_id: string;
+            start_time?: string;
+            duration_seconds?: number;
+          };
+          return {
+            id: "0",
+            callId: recording.call_id,
+            hasTranscription: false,
+            transcribedAt: null,
+            startTime: recording.start_time
+              ? new Date(recording.start_time)
+              : null,
+            durationSeconds: recording.duration_seconds || 0,
+          };
+        }),
+      }));
+
+      // Trigger background caching if callback provided
+      if (options?.triggerRevalidation) {
+        await options.triggerRevalidation(startDate, endDate);
+      }
+
+      return {
+        data: {
+          startDate,
+          endDate,
+          total: salesWithCalls.total,
+          fiches: fichesResponse,
+        },
+        meta: {
+          cached: false,
+          source: "api",
+          revalidationReason: "initial_fetch",
+        },
+      };
+    } catch (apiError) {
+      const err = apiError as Error;
+      logger.warn("API fetch failed, returning empty", {
+        startDate,
+        endDate,
+        error: err.message,
+      });
+
+      // Trigger background revalidation if callback provided
+      if (options?.triggerRevalidation) {
+        await options.triggerRevalidation(startDate, endDate);
+      }
+
+      return {
+        data: {
+          startDate,
+          endDate,
+          total: 0,
+          fiches: [],
+        },
+        meta: {
+          cached: false,
+          source: "api_error",
+          revalidating: true,
+          revalidationReason: "api_timeout",
+          message: "API timeout - data will be available shortly",
+        },
+      };
+    }
+  }
+
+  // STEP 3: Cache exists - determine if background revalidation needed
+  const isQueryingToday =
+    fichesRevalidation.isToday(startDate) ||
+    fichesRevalidation.isToday(endDate);
+
+  let shouldRevalidate = false;
+  let revalidationReason = "not_needed";
+
+  if (isQueryingToday) {
+    shouldRevalidate = true;
+    revalidationReason = "date_is_today";
+  } else {
+    const start = new Date(startDate);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(endDate);
+    end.setHours(23, 59, 59, 999);
+
+    const oldestRevalidation =
+      await fichesRepository.getOldestRevalidationInRange(start, end);
+
+    const revalidationCheck = fichesRevalidation.shouldRevalidate(
+      startDate,
+      oldestRevalidation
+    );
+
+    shouldRevalidate = revalidationCheck.shouldRevalidate;
+    revalidationReason = revalidationCheck.reason;
+  }
+
+  // Trigger background revalidation if needed
+  if (shouldRevalidate && options?.triggerRevalidation) {
+    await options.triggerRevalidation(startDate, endDate);
+  }
+
+  logger.info("Returning cached data", {
+    startDate,
+    endDate,
+    total: result.total,
+    should_revalidate: shouldRevalidate,
+    revalidation_reason: revalidationReason,
+  });
+
+  return {
+    data: result,
+    meta: {
+      cached: true,
+      revalidating: shouldRevalidate,
+      revalidationReason,
+    },
+  };
+}

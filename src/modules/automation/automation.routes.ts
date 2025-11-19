@@ -1,49 +1,33 @@
 /**
  * Automation Routes
  * =================
- * REST API endpoints for automation management
+ * RESPONSIBILITY: HTTP endpoints
+ * - Define routes
+ * - Request/response handling
+ * - Input validation using schema validators
+ * - Delegate to service layer
+ * - No business logic
+ * - No direct database calls
+ * - No direct repository calls
+ *
+ * LAYER: Presentation (HTTP endpoints)
  */
 
 import { Router, Request, Response } from "express";
 import {
-  AutomationScheduleCreateSchema,
-  AutomationScheduleUpdateSchema,
-  TriggerAutomationSchema,
-} from "../../schemas.js";
-import {
-  createAutomationSchedule,
-  getAllAutomationSchedules,
-  getAutomationScheduleById,
-  updateAutomationSchedule,
-  deleteAutomationSchedule,
-  getAutomationRuns,
-  getAutomationRunById,
-  getAutomationLogs,
-} from "./automation.repository.js";
+  validateCreateAutomationScheduleInput,
+  validateUpdateAutomationScheduleInput,
+  validateTriggerAutomationInput,
+} from "./automation.schemas.js";
+import * as automationService from "./automation.service.js";
 import { inngest } from "../../inngest/client.js";
 import { logger } from "../../shared/logger.js";
-import {
-  serializeBigInt,
-  jsonResponse,
-} from "../../shared/bigint-serializer.js";
 
 const router = Router();
 
-/**
- * DEPRECATED: Use serializeBigInt from bigint-serializer.ts instead
- * These are kept for backward compatibility but now use the universal serializer
- */
-function serializeSchedule(schedule: any) {
-  return serializeBigInt(schedule);
-}
-
-function serializeRun(run: any) {
-  return serializeBigInt(run);
-}
-
-function serializeLog(log: any) {
-  return serializeBigInt(log);
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// SCHEDULE ENDPOINTS
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * @swagger
@@ -51,39 +35,21 @@ function serializeLog(log: any) {
  *   post:
  *     summary: Create automation schedule
  *     tags: [Automation]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *     responses:
- *       201:
- *         description: Schedule created successfully
  */
 router.post("/schedules", async (req: Request, res: Response) => {
   try {
-    const data = AutomationScheduleCreateSchema.parse(req.body);
-    const schedule = await createAutomationSchedule(data);
+    const input = validateCreateAutomationScheduleInput(req.body);
+    const schedule = await automationService.createAutomationSchedule(input);
 
-    logger.info("Automation schedule created", {
-      id: String(schedule.id),
-      name: schedule.name,
+    res.status(201).json({
+      success: true,
+      data: schedule,
     });
-
-    return jsonResponse(
-      res,
-      {
-        success: true,
-        data: serializeSchedule(schedule),
-      },
-      201
-    );
   } catch (error: any) {
     logger.error("Failed to create automation schedule", {
       error: error.message,
     });
-    return res.status(400).json({
+    res.status(400).json({
       success: false,
       error: error.message,
     });
@@ -96,23 +62,17 @@ router.post("/schedules", async (req: Request, res: Response) => {
  *   get:
  *     summary: List all automation schedules
  *     tags: [Automation]
- *     parameters:
- *       - in: query
- *         name: include_inactive
- *         schema:
- *           type: boolean
- *     responses:
- *       200:
- *         description: List of schedules
  */
 router.get("/schedules", async (req: Request, res: Response) => {
   try {
     const includeInactive = req.query.include_inactive === "true";
-    const schedules = await getAllAutomationSchedules(includeInactive);
+    const schedules = await automationService.getAllAutomationSchedules(
+      includeInactive
+    );
 
-    return jsonResponse(res, {
+    res.json({
       success: true,
-      data: schedules.map(serializeSchedule),
+      data: schedules,
       count: schedules.length,
     });
   } catch (error: any) {
@@ -132,20 +92,12 @@ router.get("/schedules", async (req: Request, res: Response) => {
  *   get:
  *     summary: Get automation schedule by ID
  *     tags: [Automation]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: Schedule details
  */
 router.get("/schedules/:id", async (req: Request, res: Response) => {
   try {
-    const id = BigInt(req.params.id);
-    const schedule = await getAutomationScheduleById(id);
+    const schedule = await automationService.getAutomationScheduleById(
+      req.params.id
+    );
 
     if (!schedule) {
       return res.status(404).json({
@@ -154,27 +106,14 @@ router.get("/schedules/:id", async (req: Request, res: Response) => {
       });
     }
 
-    // Enhanced response with diagnostic information
-    const serialized = serializeSchedule(schedule);
-
-    return jsonResponse(res, {
+    res.json({
       success: true,
-      data: {
-        ...serialized,
-        runs: schedule.runs?.map(serializeRun),
-        // Add diagnostic info for troubleshooting
-        _diagnostic: {
-          specificAuditConfigsCount: schedule.specificAuditConfigs?.length || 0,
-          specificAuditConfigsRaw: schedule.specificAuditConfigs
-            ? schedule.specificAuditConfigs.map((id: bigint) => String(id))
-            : [],
-          useAutomaticAudits: schedule.useAutomaticAudits,
-          runAudits: schedule.runAudits,
-        },
-      },
+      data: schedule,
     });
   } catch (error: any) {
-    logger.error("Failed to get automation schedule", { error: error.message });
+    logger.error("Failed to get automation schedule", {
+      error: error.message,
+    });
     res.status(500).json({
       success: false,
       error: error.message,
@@ -188,30 +127,18 @@ router.get("/schedules/:id", async (req: Request, res: Response) => {
  *   patch:
  *     summary: Update automation schedule
  *     tags: [Automation]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: Schedule updated
  */
 router.patch("/schedules/:id", async (req: Request, res: Response) => {
   try {
-    const id = BigInt(req.params.id);
-    const data = AutomationScheduleUpdateSchema.parse(req.body);
-    const schedule = await updateAutomationSchedule(id, data);
+    const input = validateUpdateAutomationScheduleInput(req.body);
+    const schedule = await automationService.updateAutomationSchedule(
+      req.params.id,
+      input
+    );
 
-    logger.info("Automation schedule updated", {
-      id: String(schedule.id),
-      name: schedule.name,
-    });
-
-    return jsonResponse(res, {
+    res.json({
       success: true,
-      data: serializeSchedule(schedule),
+      data: schedule,
     });
   } catch (error: any) {
     logger.error("Failed to update automation schedule", {
@@ -230,24 +157,12 @@ router.patch("/schedules/:id", async (req: Request, res: Response) => {
  *   delete:
  *     summary: Delete automation schedule
  *     tags: [Automation]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: Schedule deleted
  */
 router.delete("/schedules/:id", async (req: Request, res: Response) => {
   try {
-    const id = BigInt(req.params.id);
-    await deleteAutomationSchedule(id);
+    await automationService.deleteAutomationSchedule(req.params.id);
 
-    logger.info("Automation schedule deleted", { id: String(id) });
-
-    return jsonResponse(res, {
+    res.json({
       success: true,
       message: "Schedule deleted successfully",
     });
@@ -262,88 +177,61 @@ router.delete("/schedules/:id", async (req: Request, res: Response) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// TRIGGER ENDPOINT
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
  * @swagger
  * /api/automation/trigger:
  *   post:
  *     summary: Trigger automation schedule manually
  *     tags: [Automation]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               scheduleId:
- *                 type: number
- *               overrideFicheSelection:
- *                 type: object
- *     responses:
- *       200:
- *         description: Automation triggered
  */
 router.post("/trigger", async (req: Request, res: Response) => {
   try {
-    const data = TriggerAutomationSchema.parse(req.body);
+    const input = validateTriggerAutomationInput(req.body);
 
     logger.info("Triggering automation", {
-      schedule_id: data.scheduleId,
-      has_override: Boolean(data.overrideFicheSelection),
-      inngest_config: {
-        base_url: process.env.INNGEST_BASE_URL || "cloud",
-        is_dev: process.env.INNGEST_DEV,
-        has_event_key: Boolean(process.env.INNGEST_EVENT_KEY),
-        node_env: process.env.NODE_ENV,
-      },
+      schedule_id: input.scheduleId,
+      has_override: Boolean(input.overrideFicheSelection),
     });
 
     // Send event to Inngest
     const result = await inngest.send({
       name: "automation/run" as "automation/run",
       data: {
-        schedule_id: data.scheduleId,
-        override_fiche_selection: data.overrideFicheSelection,
+        schedule_id: input.scheduleId,
+        override_fiche_selection: input.overrideFicheSelection,
       },
     });
 
     logger.info("Automation triggered successfully", {
-      schedule_id: data.scheduleId,
+      schedule_id: input.scheduleId,
       event_ids: result.ids,
     });
 
-    return jsonResponse(res, {
+    res.json({
       success: true,
       message: "Automation triggered successfully",
-      schedule_id: data.scheduleId,
+      schedule_id: input.scheduleId,
       event_ids: result.ids,
     });
   } catch (error: any) {
     logger.error("Failed to trigger automation", {
       error: error.message,
-      error_stack: error.stack,
-      error_name: error.name,
-      error_cause: error.cause,
-      inngest_debug: {
-        base_url: process.env.INNGEST_BASE_URL,
-        is_dev: process.env.INNGEST_DEV,
-        has_event_key: Boolean(process.env.INNGEST_EVENT_KEY),
-        has_signing_key: Boolean(process.env.INNGEST_SIGNING_KEY),
-      },
+      stack: error.stack,
     });
     res.status(500).json({
       success: false,
       error: error.message,
-      debug: {
-        inngest_mode:
-          process.env.INNGEST_DEV === "1" ? "development" : "production",
-        inngest_configured: Boolean(
-          process.env.INNGEST_DEV === "1" || process.env.INNGEST_BASE_URL
-        ),
-      },
     });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DIAGNOSTIC ENDPOINT
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * @swagger
@@ -351,9 +239,6 @@ router.post("/trigger", async (req: Request, res: Response) => {
  *   get:
  *     summary: Get Inngest configuration diagnostic
  *     tags: [Automation]
- *     responses:
- *       200:
- *         description: Diagnostic information
  */
 router.get("/diagnostic", async (req: Request, res: Response) => {
   try {
@@ -395,7 +280,7 @@ router.get("/diagnostic", async (req: Request, res: Response) => {
       warnings.push("⚠️ INNGEST_EVENT_KEY not set (required for cloud)");
     }
 
-    return jsonResponse(res, {
+    res.json({
       success: true,
       inngest: {
         mode,
@@ -424,39 +309,31 @@ router.get("/diagnostic", async (req: Request, res: Response) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// RUN ENDPOINTS
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
  * @swagger
  * /api/automation/schedules/{id}/runs:
  *   get:
  *     summary: Get runs for a schedule
  *     tags: [Automation]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *       - in: query
- *         name: limit
- *         schema:
- *           type: number
- *       - in: query
- *         name: offset
- *         schema:
- *           type: number
- *     responses:
- *       200:
- *         description: List of runs
  */
 router.get("/schedules/:id/runs", async (req: Request, res: Response) => {
   try {
-    const id = BigInt(req.params.id);
     const limit = parseInt(req.query.limit as string) || 20;
     const offset = parseInt(req.query.offset as string) || 0;
 
-    const runs = await getAutomationRuns(id, limit, offset);
+    const runs = await automationService.getAutomationRuns(
+      req.params.id,
+      limit,
+      offset
+    );
 
-    return jsonResponse(res, {
+    res.json({
       success: true,
-      data: runs.map(serializeRun),
+      data: runs,
       count: runs.length,
       limit,
       offset,
@@ -476,18 +353,10 @@ router.get("/schedules/:id/runs", async (req: Request, res: Response) => {
  *   get:
  *     summary: Get automation run by ID
  *     tags: [Automation]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *     responses:
- *       200:
- *         description: Run details
  */
 router.get("/runs/:id", async (req: Request, res: Response) => {
   try {
-    const id = BigInt(req.params.id);
-    const run = await getAutomationRunById(id);
+    const run = await automationService.getAutomationRunById(req.params.id);
 
     if (!run) {
       return res.status(404).json({
@@ -496,9 +365,9 @@ router.get("/runs/:id", async (req: Request, res: Response) => {
       });
     }
 
-    return jsonResponse(res, {
+    res.json({
       success: true,
-      data: serializeRun(run),
+      data: run,
     });
   } catch (error: any) {
     logger.error("Failed to get automation run", { error: error.message });
@@ -515,28 +384,18 @@ router.get("/runs/:id", async (req: Request, res: Response) => {
  *   get:
  *     summary: Get logs for an automation run
  *     tags: [Automation]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *       - in: query
- *         name: level
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: Run logs
  */
 router.get("/runs/:id/logs", async (req: Request, res: Response) => {
   try {
-    const id = BigInt(req.params.id);
     const level = req.query.level as string | undefined;
+    const logs = await automationService.getAutomationLogs(
+      req.params.id,
+      level
+    );
 
-    const logs = await getAutomationLogs(id, level);
-
-    return jsonResponse(res, {
+    res.json({
       success: true,
-      data: logs.map(serializeLog),
+      data: logs,
       count: logs.length,
     });
   } catch (error: any) {
@@ -548,4 +407,8 @@ router.get("/runs/:id/logs", async (req: Request, res: Response) => {
   }
 });
 
-export default router;
+// ═══════════════════════════════════════════════════════════════════════════
+// EXPORTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const automationRouter = router;

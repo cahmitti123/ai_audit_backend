@@ -1,82 +1,30 @@
 /**
  * Automation Repository
- * ====================
- * Database operations for automation schedules and runs
+ * =====================
+ * RESPONSIBILITY: Database operations only
+ * - Direct Prisma calls
+ * - CRUD operations
+ * - Database transactions
+ * - No business logic
+ * - No external API calls
+ * - Returns raw Prisma types (BigInt)
+ *
+ * LAYER: Data (Database operations)
  */
 
 import { prisma } from "../../shared/prisma.js";
-import type {
-  AutomationScheduleCreate,
-  AutomationScheduleUpdate,
-  FicheSelection,
-} from "../../schemas.js";
+import type { CreateAutomationScheduleInput, UpdateAutomationScheduleInput } from "./automation.schemas.js";
 
-/**
- * Generate cron expression based on schedule type and parameters
- */
-function generateCronExpression(
-  scheduleType: string,
-  timeOfDay?: string | null,
-  dayOfWeek?: number | null,
-  dayOfMonth?: number | null,
-  customCron?: string | null
-): string | null {
-  // If custom cron provided, use it
-  if (scheduleType === "CRON" && customCron) {
-    return customCron;
-  }
-
-  // MANUAL schedules don't need cron
-  if (scheduleType === "MANUAL") {
-    return null;
-  }
-
-  // All other types need timeOfDay
-  if (!timeOfDay) {
-    return null;
-  }
-
-  const [hours, minutes] = timeOfDay.split(":").map((n) => parseInt(n, 10));
-
-  if (scheduleType === "DAILY") {
-    // Every day at specified time: "minute hour * * *"
-    return `${minutes} ${hours} * * *`;
-  }
-
-  if (scheduleType === "WEEKLY") {
-    // Specific day of week at specified time: "minute hour * * day"
-    if (dayOfWeek === null || dayOfWeek === undefined) {
-      return null;
-    }
-    return `${minutes} ${hours} * * ${dayOfWeek}`;
-  }
-
-  if (scheduleType === "MONTHLY") {
-    // Specific day of month at specified time: "minute hour day * *"
-    if (!dayOfMonth) {
-      return null;
-    }
-    return `${minutes} ${hours} ${dayOfMonth} * *`;
-  }
-
-  return null;
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTOMATION SCHEDULE CRUD
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * Create automation schedule
  */
-export async function createAutomationSchedule(data: AutomationScheduleCreate) {
-  // Auto-generate cron expression if not provided
-  const cronExpression =
-    data.cronExpression ||
-    generateCronExpression(
-      data.scheduleType,
-      data.timeOfDay,
-      data.dayOfWeek,
-      data.dayOfMonth,
-      data.cronExpression
-    );
-
+export async function createAutomationSchedule(
+  data: CreateAutomationScheduleInput & { cronExpression?: string | null }
+) {
   return await prisma.automationSchedule.create({
     data: {
       name: data.name,
@@ -84,7 +32,7 @@ export async function createAutomationSchedule(data: AutomationScheduleCreate) {
       isActive: data.isActive ?? true,
       createdBy: data.createdBy,
       scheduleType: data.scheduleType,
-      cronExpression,
+      cronExpression: data.cronExpression,
       timezone: data.timezone,
       timeOfDay: data.timeOfDay,
       dayOfWeek: data.dayOfWeek,
@@ -138,7 +86,7 @@ export async function getAutomationScheduleById(id: bigint) {
  */
 export async function updateAutomationSchedule(
   id: bigint,
-  data: AutomationScheduleUpdate
+  data: UpdateAutomationScheduleInput
 ) {
   // Get current schedule to determine if we need to regenerate cron
   const current = await prisma.automationSchedule.findUnique({
@@ -158,10 +106,9 @@ export async function updateAutomationSchedule(
   const dayOfMonth =
     data.dayOfMonth !== undefined ? data.dayOfMonth : current.dayOfMonth;
 
-  // Auto-generate cron if schedule parameters changed and no explicit cron provided
+  // Import service function for cron generation if schedule parameters changed
   let cronExpression = data.cronExpression;
   if (cronExpression === undefined) {
-    // Only regenerate if relevant fields changed
     const relevantFieldsChanged =
       data.scheduleType !== undefined ||
       data.timeOfDay !== undefined ||
@@ -169,6 +116,10 @@ export async function updateAutomationSchedule(
       data.dayOfMonth !== undefined;
 
     if (relevantFieldsChanged) {
+      // Import dynamically to avoid circular dependency
+      const { generateCronExpression } = await import(
+        "./automation.service.js"
+      );
       const generated = generateCronExpression(
         scheduleType,
         timeOfDay,
@@ -249,6 +200,10 @@ export async function getActiveAutomationSchedules() {
     orderBy: { createdAt: "desc" },
   });
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTOMATION RUN CRUD
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * Create automation run
@@ -350,6 +305,10 @@ export async function getAutomationRunById(id: bigint) {
   });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTOMATION LOGS
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
  * Add automation log
  */
@@ -386,6 +345,10 @@ export async function getAutomationLogs(
     take: limit,
   });
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UTILITY QUERIES
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * Get audit configs marked for automatic execution

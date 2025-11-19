@@ -6,19 +6,9 @@
 
 import { inngest } from "../../inngest/client.js";
 import { NonRetriableError } from "inngest";
-import {
-  getAutomationScheduleById,
-  createAutomationRun,
-  updateAutomationRun,
-  updateScheduleStats,
-  addAutomationLog,
-  getAutomaticAuditConfigs,
-} from "./automation.repository.js";
-import {
-  fetchFichesBySelection,
-  sendNotificationWebhook,
-  sendEmailNotification,
-} from "./automation.service.js";
+import * as automationRepository from "./automation.repository.js";
+import * as automationService from "./automation.service.js";
+import * as automationApi from "./automation.api.js";
 import { TIMEOUTS } from "../../shared/constants.js";
 import { runAuditFunction } from "../audits/audits.workflows.js";
 import { fetchFicheFunction } from "../fiches/fiches.workflows.js";
@@ -58,7 +48,9 @@ export const runAutomationFunction = inngest.createFunction(
 
     // Step 1: Load schedule configuration
     const schedule = await step.run("load-schedule", async () => {
-      const scheduleData = await getAutomationScheduleById(BigInt(schedule_id));
+      const scheduleData = await automationRepository.getAutomationScheduleById(
+        BigInt(schedule_id)
+      );
       if (!scheduleData) {
         throw new NonRetriableError(`Schedule ${schedule_id} not found`);
       }
@@ -84,13 +76,16 @@ export const runAutomationFunction = inngest.createFunction(
 
     // Step 2: Create automation run record
     const runIdString = await step.run("create-run-record", async () => {
-      const run = await createAutomationRun(BigInt(schedule_id), {
-        schedule: {
-          name: schedule.name,
-          scheduleType: schedule.scheduleType,
-        },
-        overrides: override_fiche_selection || null,
-      });
+      const run = await automationRepository.createAutomationRun(
+        BigInt(schedule_id),
+        {
+          schedule: {
+            name: schedule.name,
+            scheduleType: schedule.scheduleType,
+          },
+          overrides: override_fiche_selection || null,
+        }
+      );
       return String(run.id); // Convert BigInt to string for serialization
     });
 
@@ -99,7 +94,12 @@ export const runAutomationFunction = inngest.createFunction(
 
     // Helper to add logs
     const log = async (level: string, message: string, metadata?: any) => {
-      await addAutomationLog(runId, level, message, metadata);
+      await automationRepository.addAutomationLog(
+        runId,
+        level,
+        message,
+        metadata
+      );
       logger.info(message, metadata);
     };
 
@@ -139,7 +139,7 @@ export const runAutomationFunction = inngest.createFunction(
         if (ficheIds.length === 0) {
           await log("warning", "No fiches in manual selection");
           await step.run("update-run-no-fiches", async () => {
-            await updateAutomationRun(runId, {
+            await automationRepository.updateAutomationRun(runId, {
               status: "completed",
               completedAt: new Date(),
               durationMs: Date.now() - startTime!,
@@ -148,7 +148,10 @@ export const runAutomationFunction = inngest.createFunction(
               failedFiches: 0,
               resultSummary: { message: "No fiches found", ficheIds: [] },
             });
-            await updateScheduleStats(BigInt(schedule_id), "success");
+            await automationRepository.updateScheduleStats(
+              BigInt(schedule_id),
+              "success"
+            );
           });
 
           return {
@@ -162,10 +165,8 @@ export const runAutomationFunction = inngest.createFunction(
       } else {
         // Step 3b: Calculate dates for API mode
         const dates = await step.run("calculate-dates", async () => {
-          const { calculateDatesToQuery } = await import(
-            "./automation.service.js"
-          );
-          const datesToQuery = calculateDatesToQuery(selection);
+          const datesToQuery =
+            automationService.calculateDatesToQuery(selection);
           await log(
             "info",
             `Calculated ${datesToQuery.length} dates to query`,
@@ -183,7 +184,7 @@ export const runAutomationFunction = inngest.createFunction(
         if (dates.length === 0) {
           await log("warning", "No dates to query");
           await step.run("update-run-no-dates", async () => {
-            await updateAutomationRun(runId, {
+            await automationRepository.updateAutomationRun(runId, {
               status: "completed",
               completedAt: new Date(),
               durationMs: Date.now() - startTime!,
@@ -192,7 +193,10 @@ export const runAutomationFunction = inngest.createFunction(
               failedFiches: 0,
               resultSummary: { message: "No dates to query", ficheIds: [] },
             });
-            await updateScheduleStats(BigInt(schedule_id), "success");
+            await automationRepository.updateScheduleStats(
+              BigInt(schedule_id),
+              "success"
+            );
           });
 
           return {
@@ -231,10 +235,6 @@ export const runAutomationFunction = inngest.createFunction(
           const batchResults = await Promise.all(
             batchDates.map((date, idx) =>
               step.run(`fetch-date-${date}`, async () => {
-                const { fetchFichesForDate } = await import(
-                  "./automation.service.js"
-                );
-
                 // Retry logic: try up to 3 times with exponential backoff
                 let lastError: any = null;
                 for (let attempt = 1; attempt <= 3; attempt++) {
@@ -244,7 +244,7 @@ export const runAutomationFunction = inngest.createFunction(
                       `Fetching fiches for ${date} (attempt ${attempt}/3)`
                     );
 
-                    const dateFiches = await fetchFichesForDate(
+                    const dateFiches = await automationApi.fetchFichesForDate(
                       date,
                       selection.onlyWithRecordings || false,
                       apiKey
@@ -303,10 +303,7 @@ export const runAutomationFunction = inngest.createFunction(
         const processedData = await step.run(
           "process-fiches-data",
           async () => {
-            const { processFichesData } = await import(
-              "./automation.service.js"
-            );
-            const result = processFichesData(
+            const result = automationService.processFichesData(
               allFiches,
               selection.maxFiches,
               selection.onlyWithRecordings
@@ -330,7 +327,7 @@ export const runAutomationFunction = inngest.createFunction(
 
         // Update run status
         await step.run("update-run-no-fiches-found", async () => {
-          await updateAutomationRun(runId, {
+          await automationRepository.updateAutomationRun(runId, {
             status: "completed",
             completedAt: new Date(),
             durationMs: Date.now() - startTime!,
@@ -342,7 +339,10 @@ export const runAutomationFunction = inngest.createFunction(
               ficheIds: [],
             },
           });
-          await updateScheduleStats(BigInt(schedule_id), "success");
+          await automationRepository.updateScheduleStats(
+            BigInt(schedule_id),
+            "success"
+          );
         });
 
         return {
@@ -356,7 +356,7 @@ export const runAutomationFunction = inngest.createFunction(
 
       // Update run with total fiches
       await step.run("update-run-total", async () => {
-        await updateAutomationRun(runId, {
+        await automationRepository.updateAutomationRun(runId, {
           totalFiches: ficheIds.length,
         });
       });
@@ -394,57 +394,59 @@ export const runAutomationFunction = inngest.createFunction(
         );
 
         // Process each fiche in the batch
-        // STEP 1: Fetch all fiches in this batch SEQUENTIALLY (CRM API needs delays)
+        // STEP 1: Ensure all fiches have full details (same as frontend flow)
+        // Track which fiches have recordings AFTER fetching full details
+        const fichesWithRecordings: string[] = [];
+        const fichesWithoutRecordings: string[] = [];
+
         for (let i = 0; i < batchFicheIds.length; i++) {
           const ficheId = batchFicheIds[i];
-          const ficheCle = fichesCles[ficheId];
 
           try {
-            // Check cache first to avoid rate limiting
-            const isCached = await step.run(
-              `check-cache-${ficheId}`,
+            // Add delay to avoid overwhelming API
+            if (i > 0) {
+              await step.sleep(`delay-fetch-${ficheId}`, 2000);
+            }
+
+            // Use the SAME function the frontend uses when clicking on a sale
+            // This handles everything automatically:
+            // - Checks cache
+            // - If _salesListOnly, fetches full details with cle
+            // - Caches full details
+            // - Returns complete data with recordings
+            const fetchResult = await step.run(
+              `ensure-fiche-${ficheId}`,
               async () => {
-                const { getCachedFiche } = await import(
-                  "../fiches/fiches.repository.js"
+                const { getFicheWithCache } = await import(
+                  "../fiches/fiches.cache.js"
                 );
-                const cached = await getCachedFiche(ficheId);
-                const isValid = cached && cached.expiresAt > new Date();
 
-                if (isValid) {
-                  await log(
-                    "info",
-                    `Fiche ${ficheId} already cached, skipping fetch`,
-                    {
-                      cache_id: String(cached.id),
-                      recordings: cached.recordingsCount,
-                      expires_at: cached.expiresAt,
-                    }
-                  );
-                }
+                await log("info", `Ensuring fiche ${ficheId} has full details`);
+                const ficheData = await getFicheWithCache(ficheId);
+                const recordingsCount =
+                  (ficheData as any).recordings?.length || 0;
 
-                return isValid;
+                await log(
+                  "info",
+                  `Fiche ${ficheId} ready with ${recordingsCount} recordings`
+                );
+                return { ficheId, recordingsCount };
               }
             );
 
-            // Only fetch if not cached or expired
-            if (!isCached) {
-              // Delay to avoid overwhelming Inngest step.invoke() rate limits
-              // This is Inngest's internal limit, not our function's rate limit
-              if (i > 0) {
-                await step.sleep(`delay-fetch-${ficheId}`, 2000); // 2s delay between fetch invocations
-              }
-
-              await log("info", `Fetching fiche ${ficheId} from API`);
-
-              // Step 5a: Fetch/cache fiche using existing tested function
-              // This handles cache check and API fetch with recordings automatically
-              await step.invoke(`fetch-fiche-${ficheId}`, {
-                function: fetchFicheFunction,
-                data: {
-                  fiche_id: ficheId,
-                  cle: ficheCle || undefined,
-                },
-              });
+            // Track fiches based on whether they have recordings (AFTER full details fetched)
+            if (fetchResult.recordingsCount > 0) {
+              fichesWithRecordings.push(ficheId);
+              await log(
+                "info",
+                `Fiche ${ficheId} has ${fetchResult.recordingsCount} recordings - will process`
+              );
+            } else {
+              fichesWithoutRecordings.push(ficheId);
+              await log(
+                "info",
+                `Fiche ${ficheId} has no recordings - skipping transcription and audit`
+              );
             }
           } catch (error: any) {
             await log(
@@ -459,16 +461,25 @@ export const runAutomationFunction = inngest.createFunction(
           }
         }
 
+        // Log summary of fiches with/without recordings
+        await log("info", `Batch fiche check complete`, {
+          total: batchFicheIds.length,
+          withRecordings: fichesWithRecordings.length,
+          withoutRecordings: fichesWithoutRecordings.length,
+          skipped: fichesWithoutRecordings,
+        });
+
         // STEP 2: Transcribe fiches sequentially with delays (to avoid Inngest rate limits)
         // Note: The actual transcription work happens in parallel via the transcribeFicheFunction
-        if (schedule.runTranscription) {
+        // ONLY process fiches that have recordings
+        if (schedule.runTranscription && fichesWithRecordings.length > 0) {
           await log(
             "info",
-            `Transcribing ${batchFicheIds.length} fiches with delays`
+            `Transcribing ${fichesWithRecordings.length} fiches with recordings (skipping ${fichesWithoutRecordings.length} without recordings)`
           );
 
-          for (let i = 0; i < batchFicheIds.length; i++) {
-            const ficheId = batchFicheIds[i];
+          for (let i = 0; i < fichesWithRecordings.length; i++) {
+            const ficheId = fichesWithRecordings[i];
 
             try {
               // Add delay between transcription invocations (deterministic step IDs)
@@ -516,10 +527,16 @@ export const runAutomationFunction = inngest.createFunction(
           }
 
           await log("info", `Batch transcriptions complete`);
+        } else if (fichesWithRecordings.length === 0) {
+          await log(
+            "info",
+            `No fiches with recordings to transcribe in this batch`
+          );
         }
 
         // STEP 3: Run audits for each fiche in the batch
-        for (const ficheId of batchFicheIds) {
+        // ONLY audit fiches that have recordings
+        for (const ficheId of fichesWithRecordings) {
           try {
             await log("info", `Running audits for fiche ${ficheId}`);
 
@@ -591,7 +608,7 @@ export const runAutomationFunction = inngest.createFunction(
                 const automaticConfigs = await step.run(
                   `get-automatic-audits-${ficheId}`,
                   async () => {
-                    return await getAutomaticAuditConfigs();
+                    return await automationRepository.getAutomaticAuditConfigs();
                   }
                 );
                 const automaticIds = automaticConfigs.map((c) => Number(c.id));
@@ -677,10 +694,23 @@ export const runAutomationFunction = inngest.createFunction(
           }
         }
 
+        // Log audit completion summary
+        if (fichesWithoutRecordings.length > 0) {
+          await log(
+            "info",
+            `Skipped ${fichesWithoutRecordings.length} fiches without recordings`,
+            {
+              skipped_fiches: fichesWithoutRecordings,
+            }
+          );
+        }
+
         // Log batch completion
         await log("info", `Completed batch ${batchIndex + 1}`, {
           successful: results.successful.length,
           failed: results.failed.length,
+          withRecordings: fichesWithRecordings.length,
+          withoutRecordings: fichesWithoutRecordings.length,
         });
       }
 
@@ -694,7 +724,7 @@ export const runAutomationFunction = inngest.createFunction(
           : "failed";
 
       await step.run("finalize-run", async () => {
-        await updateAutomationRun(runId, {
+        await automationRepository.updateAutomationRun(runId, {
           status: finalStatus,
           completedAt: new Date(),
           durationMs,
@@ -711,7 +741,7 @@ export const runAutomationFunction = inngest.createFunction(
           },
         });
 
-        await updateScheduleStats(
+        await automationRepository.updateScheduleStats(
           BigInt(schedule_id),
           finalStatus === "completed" ? "success" : finalStatus
         );
@@ -739,7 +769,10 @@ export const runAutomationFunction = inngest.createFunction(
 
           // Webhook notification
           if (schedule.webhookUrl) {
-            await sendNotificationWebhook(schedule.webhookUrl, notification);
+            await automationApi.sendNotificationWebhook(
+              schedule.webhookUrl,
+              notification
+            );
           }
 
           // Email notification
@@ -767,7 +800,7 @@ ${
 }
             `.trim();
 
-            await sendEmailNotification(
+            await automationApi.sendEmailNotification(
               schedule.notifyEmails,
               subject,
               message
@@ -798,7 +831,7 @@ ${
       const durationMs = Date.now() - startTime!;
 
       await step.run("handle-failure", async () => {
-        await updateAutomationRun(runId, {
+        await automationRepository.updateAutomationRun(runId, {
           status: "failed",
           completedAt: new Date(),
           durationMs,
@@ -809,7 +842,10 @@ ${
           },
         });
 
-        await updateScheduleStats(BigInt(schedule_id), "failed");
+        await automationRepository.updateScheduleStats(
+          BigInt(schedule_id),
+          "failed"
+        );
         await log("error", `Automation failed: ${error.message}`, {
           error: error.stack,
         });
@@ -828,11 +864,14 @@ ${
           };
 
           if (schedule.webhookUrl) {
-            await sendNotificationWebhook(schedule.webhookUrl, notification);
+            await automationApi.sendNotificationWebhook(
+              schedule.webhookUrl,
+              notification
+            );
           }
 
           if (schedule.notifyEmails.length > 0) {
-            await sendEmailNotification(
+            await automationApi.sendEmailNotification(
               schedule.notifyEmails,
               `Automation ${schedule.name} - FAILED`,
               `Automation failed with error: ${error.message}`
@@ -868,17 +907,13 @@ export const scheduledAutomationCheck = inngest.createFunction(
 
     // Get all active schedules
     const schedules = await step.run("get-active-schedules", async () => {
-      const { getAllAutomationSchedules } = await import(
-        "./automation.repository.js"
-      );
-      return await getAllAutomationSchedules(false); // Only active
+      return await automationRepository.getAllAutomationSchedules(false); // Only active
     });
 
     logger.info(`Found ${schedules.length} active schedules`);
 
     // Filter schedules that should run now
     const schedulesToRun = await step.run("filter-schedules", async () => {
-      const { getNextRunTime } = await import("./automation.service.js");
       const now = new Date();
       const toRun = [];
 
@@ -915,7 +950,7 @@ export const scheduledAutomationCheck = inngest.createFunction(
         }
 
         // Calculate next run time
-        const nextRun = getNextRunTime(
+        const nextRun = automationService.getNextRunTime(
           schedule.scheduleType,
           schedule.cronExpression || undefined,
           schedule.timeOfDay || undefined,

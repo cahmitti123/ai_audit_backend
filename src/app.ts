@@ -21,14 +21,14 @@ import { transcriptionsRouter } from "./modules/transcriptions/index.js";
 import { auditConfigsRouter } from "./modules/audit-configs/index.js";
 import { auditsRouter } from "./modules/audits/index.js";
 import { webhooksRoutes } from "./modules/webhooks/index.js";
-import { automationRoutes } from "./modules/automation/index.js";
+import { automationRouter } from "./modules/automation/index.js";
 import { chatRouter } from "./modules/chat/index.js";
 
 // Middleware
-import {
-  payloadSizeLogger,
-  payloadSizeResponseLogger,
-} from "./middleware/payload-logger.js";
+// import {
+//   payloadSizeLogger,
+//   payloadSizeResponseLogger,
+// } from "./middleware/payload-logger.js";
 
 // Config
 import { swaggerSpec } from "./config/swagger.js";
@@ -52,8 +52,9 @@ export function createApp() {
   app.use(express.json({ limit: "50mb" })); // Increase limit for Inngest workflows with large timelines
 
   // Payload size monitoring middleware (logs request/response sizes)
-  app.use(payloadSizeLogger);
-  app.use(payloadSizeResponseLogger);
+  // Disabled for performance
+  // app.use(payloadSizeLogger);
+  // app.use(payloadSizeResponseLogger);
 
   // Inngest endpoint
   app.use(
@@ -88,7 +89,7 @@ export function createApp() {
   app.use("/api/audit-configs", auditConfigsRouter);
   app.use("/api/audits", auditsRouter);
   app.use("/api/webhooks", webhooksRoutes);
-  app.use("/api/automation", automationRoutes);
+  app.use("/api/automation", automationRouter);
   app.use("/api", chatRouter);
 
   return app;

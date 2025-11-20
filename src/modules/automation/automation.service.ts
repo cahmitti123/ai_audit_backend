@@ -359,8 +359,20 @@ export async function fetchFichesBySelection(
 
   // Manual mode: return provided fiche IDs (no full data available)
   if (mode === "manual" && ficheIds) {
-    const limitedIds = ficheIds.slice(0, maxFiches || ficheIds.length);
-    logger.info("Using manual fiche selection", { count: limitedIds.length });
+    // Parse fiche IDs - handle various separators (spaces, commas, mixed)
+    // Split on any combination of commas, spaces, tabs, newlines
+    const allIds = ficheIds
+      .flatMap((id: string) => 
+        id.trim().split(/[\s,]+/)
+      )
+      .filter(Boolean) // Remove empty strings
+      .map((id: string) => id.trim()); // Trim each ID
+    
+    const limitedIds = allIds.slice(0, maxFiches || allIds.length);
+    logger.info("Using manual fiche selection", { 
+      count: limitedIds.length,
+      ficheIds: limitedIds 
+    });
     return { ficheIds: limitedIds, fichesData: [], cles: {} };
   }
 

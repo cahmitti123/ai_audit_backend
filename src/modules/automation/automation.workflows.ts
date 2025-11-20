@@ -120,13 +120,24 @@ export const runAutomationFunction = inngest.createFunction(
           "process-manual-fiches",
           async () => {
             await log("info", "Processing manual fiche selection");
-            const limitedIds = selection.ficheIds.slice(
+            
+            // Parse fiche IDs - handle various separators (spaces, commas, mixed)
+            // Split on any combination of commas, spaces, tabs, newlines
+            const allIds = selection.ficheIds
+              .flatMap((id: string) => 
+                id.trim().split(/[\s,]+/)
+              )
+              .filter(Boolean) // Remove empty strings
+              .map((id: string) => id.trim()); // Trim each ID
+            
+            const limitedIds = allIds.slice(
               0,
-              selection.maxFiches || selection.ficheIds.length
+              selection.maxFiches || allIds.length
             );
             await log(
               "info",
-              `Using ${limitedIds.length} manually selected fiches`
+              `Using ${limitedIds.length} manually selected fiches`,
+              { ficheIds: limitedIds }
             );
             return { ficheIds: limitedIds, fichesData: [], cles: {} };
           }

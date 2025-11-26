@@ -41,12 +41,14 @@ export async function getFicheWithCache(ficheId: string) {
 
       // Extract cle from cached data
       const cle = rawData.cle;
-      
+
       if (!cle) {
         logger.error("No cle found in cached data", {
           fiche_id: ficheId,
         });
-        throw new Error(`Cannot fetch fiche ${ficheId}: missing cle parameter in cached data`);
+        throw new Error(
+          `Cannot fetch fiche ${ficheId}: missing cle parameter in cached data`
+        );
       }
 
       // Fetch and cache full details with cle
@@ -69,7 +71,9 @@ export async function getFicheWithCache(ficheId: string) {
   logger.info("Cache miss, fetching from API", { fiche_id: ficheId });
 
   // Cannot fetch without cle - fiches should come from sales list first
-  throw new Error(`Fiche ${ficheId} not found in cache. Fetch via date range endpoint first to get cle.`);
+  throw new Error(
+    `Fiche ${ficheId} not found in cache. Fetch via date range endpoint first to get cle.`
+  );
 }
 
 /**
@@ -83,7 +87,7 @@ export async function refreshFicheFromApi(ficheId: string) {
 
   // Get cached data to extract cle
   const cached = await fichesRepository.getCachedFiche(ficheId);
-  
+
   if (!cached) {
     throw new Error(`Cannot refresh fiche ${ficheId}: not in cache`);
   }
@@ -142,11 +146,14 @@ export async function cacheFicheDetails(
   if (!salesDate && ficheData.information.date_insertion) {
     const dateStr = ficheData.information.date_insertion;
     // Split by space to get date part only (ignore time)
-    const datePart = dateStr.split(' ')[0];
+    const datePart = dateStr.split(" ")[0];
     const parts = datePart.split("/");
     if (parts.length === 3 && parts[2].length === 4) {
       // Validate year is 4 digits
-      salesDate = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`; // DD/MM/YYYY -> YYYY-MM-DD
+      salesDate = `${parts[2]}-${parts[1].padStart(2, "0")}-${parts[0].padStart(
+        2,
+        "0"
+      )}`; // DD/MM/YYYY -> YYYY-MM-DD
     }
   }
 

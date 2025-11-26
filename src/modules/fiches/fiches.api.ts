@@ -137,6 +137,7 @@ export async function fetchSalesWithCalls(
  * @param cle - The fiche security key (required by CRM)
  * @param options - Optional parameters
  * @param options.includeRecordings - Include call recordings (default: TRUE - recordings fetched here!)
+ * @param options.includeMailDevis - Include Mail Devis Personnalisé details (default: FALSE - opt-in)
  */
 export async function fetchFicheDetails(
   ficheId: string,
@@ -159,6 +160,7 @@ export async function fetchFicheDetails(
       cle: cle, // Required by CRM
       include_recordings: String(includeRecordings),
       include_transcriptions: "false", // Always false - we use our own transcription system
+      include_mail_devis: "false", // Always false - mail devis feature disabled
     });
 
     const response = await axios.get<FicheDetailsResponse>(

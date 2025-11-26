@@ -460,3 +460,137 @@ model WebhookDelivery {
     @@index([createdAt])
     @@map("webhook_deliveries")
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INSURANCE PRODUCTS SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model Groupe {
+    id        BigInt   @id @default(autoincrement()) @map("groupe_id")
+    code      String   @map("id") @db.VarChar(2)
+    libelle   String   @db.VarChar(17)
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    gammes Gamme[]
+
+    @@index([libelle])
+    @@map("groupes")
+}
+
+model Gamme {
+    id        BigInt   @id @default(autoincrement()) @map("gamme_id")
+    groupeId  BigInt   @map("groupe_id")
+    groupe    Groupe   @relation(fields: [groupeId], references: [id], onDelete: Cascade)
+    documents Json     @db.JsonB
+    code      String   @map("id") @db.VarChar(3)
+    libelle   String   @db.VarChar(29)
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    formules        Formule[]
+    garantiesParsed GarantieParsed[]
+    documentsTable  Document[]
+
+    @@index([groupeId], map: "idx_gammes_groupe")
+    @@index([libelle], map: "idx_gammes_libelle")
+    @@map("gammes")
+}
+
+model Formule {
+    id                  BigInt   @id @default(autoincrement()) @map("formule_id")
+    gammeId             BigInt   @map("gamme_id")
+    gamme               Gamme    @relation(fields: [gammeId], references: [id], onDelete: Cascade)
+    appareilsAuditifs   String?  @map("appareils_auditifs") @db.VarChar(46)
+    chambreParticuliere String?  @map("chambre_particuliere") @db.VarChar(47)
+    cureThermale        String?  @map("cure_thermale") @db.VarChar(42)
+    delaiAttente        String?  @map("delai_attente") @db.VarChar(50)
+    dentaire            String?  @map("dentaire") @db.VarChar(50)
+    fraisDossier        String?  @map("frais_dossier") @db.VarChar(13)
+    garantiesHtml       String   @map("garanties_html") @db.VarChar(87)
+    hospiNonOptam       String?  @map("hospi_non_optam") @db.VarChar(4)
+    hospitalisation     String?  @map("hospitalisation") @db.VarChar(46)
+    code                String   @map("id") @db.VarChar(4)
+    libelle             String   @db.VarChar(14)
+    libelleAlternatif   String?  @map("libelle_alternatif") @db.VarChar(13)
+    maternite           String?  @map("maternite") @db.VarChar(48)
+    medecineDouce       String?  @map("medecine_douce") @db.VarChar(40)
+    medecines           String?  @map("medecines") @db.VarChar(50)
+    optique             String?  @map("optique") @db.VarChar(50)
+    optiqueVc           String?  @map("optique_vc") @db.VarChar(43)
+    soinsNonOptam       String?  @map("soins_non_optam") @db.VarChar(12)
+    createdAt           DateTime @default(now()) @map("created_at")
+    updatedAt           DateTime @updatedAt @map("updated_at")
+
+    garantiesParsed GarantieParsed[]
+    documents       Document[]
+
+    @@index([gammeId], map: "idx_formules_gamme")
+    @@index([libelle], map: "idx_formules_libelle")
+    @@map("formules")
+}
+
+model GarantieParsed {
+    id               BigInt   @id @default(autoincrement()) @map("garantie_parsed_id")
+    gammeId          BigInt?  @map("gamme_id")
+    gamme            Gamme?   @relation(fields: [gammeId], references: [id], onDelete: Cascade)
+    formuleId        BigInt?  @map("formule_id")
+    formule          Formule? @relation(fields: [formuleId], references: [id], onDelete: Cascade)
+    title            String?  @db.VarChar(255)
+    introText        String[] @map("intro_text")
+    formuleIndicator String?  @map("formule_indicator") @db.VarChar(50)
+    notesAndLegal    String?  @map("notes_and_legal") @db.Text
+    createdAt        DateTime @default(now()) @map("created_at")
+
+    categories GarantieCategory[]
+
+    @@index([gammeId], map: "idx_garanties_parsed_gamme")
+    @@index([formuleId], map: "idx_garanties_parsed_formule")
+    @@map("garanties_parsed")
+}
+
+model GarantieCategory {
+    id               BigInt         @id @default(autoincrement()) @map("category_id")
+    garantieParsedId BigInt         @map("garantie_parsed_id")
+    garantieParsed   GarantieParsed @relation(fields: [garantieParsedId], references: [id], onDelete: Cascade)
+    sectionIndex     Int            @map("section_index")
+    categoryName     String         @map("category_name") @db.Text
+    displayOrder     Int            @default(0) @map("display_order")
+    createdAt        DateTime       @default(now()) @map("created_at")
+
+    items GarantieItem[]
+
+    @@index([garantieParsedId], map: "idx_categories_parsed")
+    @@index([categoryName], map: "idx_categories_name")
+    @@map("garantie_categories")
+}
+
+model GarantieItem {
+    id             BigInt           @id @default(autoincrement()) @map("item_id")
+    categoryId     BigInt           @map("category_id")
+    category       GarantieCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+    guaranteeName  String           @map("guarantee_name") @db.Text
+    guaranteeValue String           @map("guarantee_value") @db.Text
+    displayOrder   Int              @default(0) @map("display_order")
+    createdAt      DateTime         @default(now()) @map("created_at")
+
+    @@index([categoryId], map: "idx_items_category")
+    @@index([guaranteeName], map: "idx_items_name")
+    @@map("garantie_items")
+}
+
+model Document {
+    id           BigInt   @id @default(autoincrement()) @map("document_id")
+    gammeId      BigInt?  @map("gamme_id")
+    gamme        Gamme?   @relation(fields: [gammeId], references: [id], onDelete: Cascade)
+    formuleId    BigInt?  @map("formule_id")
+    formule      Formule? @relation(fields: [formuleId], references: [id], onDelete: Cascade)
+    documentType String   @map("document_type") @db.VarChar(50)
+    url          String   @db.Text
+    createdAt    DateTime @default(now()) @map("created_at")
+
+    @@index([gammeId], map: "idx_documents_gamme")
+    @@index([formuleId], map: "idx_documents_formule")
+    @@index([documentType], map: "idx_documents_type")
+    @@map("documents")
+}

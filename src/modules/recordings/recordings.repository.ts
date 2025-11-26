@@ -14,7 +14,7 @@ export async function getRecordingsByFiche(ficheId: string) {
     where: { ficheId },
     include: {
       recordings: {
-        orderBy: { startTime: "desc" },
+        orderBy: { startTime: "asc" }, // Chronological order (oldest first)
       },
     },
   });

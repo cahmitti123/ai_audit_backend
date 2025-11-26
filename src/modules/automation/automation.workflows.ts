@@ -120,16 +120,14 @@ export const runAutomationFunction = inngest.createFunction(
           "process-manual-fiches",
           async () => {
             await log("info", "Processing manual fiche selection");
-            
+
             // Parse fiche IDs - handle various separators (spaces, commas, mixed)
             // Split on any combination of commas, spaces, tabs, newlines
             const allIds = selection.ficheIds
-              .flatMap((id: string) => 
-                id.trim().split(/[\s,]+/)
-              )
+              .flatMap((id: string) => id.trim().split(/[\s,]+/))
               .filter(Boolean) // Remove empty strings
               .map((id: string) => id.trim()); // Trim each ID
-            
+
             const limitedIds = allIds.slice(
               0,
               selection.maxFiches || allIds.length
@@ -219,117 +217,123 @@ export const runAutomationFunction = inngest.createFunction(
           };
         }
 
-        // Step 3c: Fetch fiches for each date in PARALLEL
-        // Split into batches for better control (batch of 2 concurrent requests to avoid overloading API)
-        const BATCH_SIZE = 2;
-        const allFiches: any[] = [];
-
-        for (
-          let batchStart = 0;
-          batchStart < dates.length;
-          batchStart += BATCH_SIZE
-        ) {
-          const batchDates = dates.slice(batchStart, batchStart + BATCH_SIZE);
-          const batchIndex = Math.floor(batchStart / BATCH_SIZE);
-
-          await log(
-            "info",
-            `Fetching batch ${batchIndex + 1} of ${Math.ceil(
-              dates.length / BATCH_SIZE
-            )}`,
-            {
-              dates: batchDates,
-            }
+        // Step 3c: Fetch fiches (DB-first, then API for missing with max 3 concurrent)
+        const allFiches = await step.run("fetch-all-fiches", async () => {
+          const { getFichesByDateRangeWithStatus } = await import("../fiches/fiches.service.js");
+          const { hasDataForDate } = await import("../fiches/fiches.repository.js");
+          
+          // Convert DD/MM/YYYY to YYYY-MM-DD for DB queries
+          const convertDate = (d: string) => {
+            const [day, month, year] = d.split("/");
+            return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+          };
+          
+          // Check which dates are in DB
+          const dateStatus = await Promise.all(
+            dates.map(async date => ({
+              date,
+              inDB: await hasDataForDate(convertDate(date))
+            }))
           );
-
-          // Fetch all dates in this batch in parallel with retry logic
-          const batchResults = await Promise.all(
-            batchDates.map((date, idx) =>
-              step.run(`fetch-date-${date}`, async () => {
-                // Retry logic: try up to 3 times with exponential backoff
-                let lastError: any = null;
-                for (let attempt = 1; attempt <= 3; attempt++) {
-                  try {
-                    await log(
-                      "info",
-                      `Fetching fiches for ${date} (attempt ${attempt}/3)`
-                    );
-
-                    const dateFiches = await automationApi.fetchFichesForDate(
-                      date,
-                      selection.onlyWithRecordings || false,
-                      apiKey
-                    );
-
-                    await log(
-                      "info",
-                      `Fetched ${dateFiches.length} fiches for ${date}`
-                    );
-                    return dateFiches;
-                  } catch (error: any) {
-                    lastError = error;
-                    await log(
-                      "warning",
-                      `Attempt ${attempt} failed for ${date}: ${error.message}`
-                    );
-
-                    // If not the last attempt, wait before retrying (exponential backoff)
-                    if (attempt < 3) {
-                      const waitTime = Math.pow(2, attempt) * 1000; // 2s, 4s
-                      await log(
-                        "info",
-                        `Waiting ${waitTime}ms before retry for ${date}`
-                      );
-                      await new Promise((resolve) =>
-                        setTimeout(resolve, waitTime)
-                      );
-                    }
-                  }
-                }
-
-                // All retries failed
-                await log(
-                  "error",
-                  `Failed to fetch fiches for ${date} after 3 attempts: ${lastError?.message}`
-                );
-
-                if (!schedule.continueOnError) {
-                  throw lastError;
-                }
-                return []; // Return empty array to continue
-              })
-            )
-          );
-
-          // Flatten batch results
-          batchResults.forEach((result) => allFiches.push(...result));
-
-          await log("info", `Batch ${batchIndex + 1} complete`, {
-            batchFiches: batchResults.reduce((sum, r) => sum + r.length, 0),
-            totalSoFar: allFiches.length,
+          
+          const datesInDB = dateStatus.filter(d => d.inDB).map(d => d.date);
+          const datesMissing = dateStatus.filter(d => !d.inDB).map(d => d.date);
+          
+          await log("info", `Dates in DB: ${datesInDB.length}, Missing: ${datesMissing.length}`);
+          
+          // Fetch from DB
+          const sortedDates = dates.sort((a, b) => {
+            const [dayA, monthA, yearA] = a.split("/");
+            const [dayB, monthB, yearB] = b.split("/");
+            return new Date(+yearA, +monthA - 1, +dayA).getTime() - 
+                   new Date(+yearB, +monthB - 1, +dayB).getTime();
           });
-        }
-
-        // Step 3d: Process and transform all fetched fiches
-        const processedData = await step.run(
-          "process-fiches-data",
-          async () => {
-            const result = automationService.processFichesData(
-              allFiches,
-              selection.maxFiches,
-              selection.onlyWithRecordings
-            );
-            await log("info", `Processed ${result.ficheIds.length} fiches`, {
-              count: result.ficheIds.length,
-              hasFichesData: result.fichesData.length > 0,
-              hasCles: Object.keys(result.cles).length > 0,
-            });
-            return result;
+          
+          const startDate = convertDate(sortedDates[0]);
+          const endDate = convertDate(sortedDates[sortedDates.length - 1]);
+          
+          const dbResult = await getFichesByDateRangeWithStatus(startDate, endDate);
+          await log("info", `Loaded ${dbResult.fiches.length} fiches from DB`);
+          
+          // Fetch missing dates from API (max 3 concurrent)
+          const apiFiches: any[] = [];
+          if (datesMissing.length > 0) {
+            await log("info", `Fetching ${datesMissing.length} missing dates from API (max 3 concurrent)`);
+            
+            for (let i = 0; i < datesMissing.length; i += 3) {
+              const batch = datesMissing.slice(i, i + 3);
+              const batchResults = await Promise.allSettled(
+                batch.map(async date => {
+                  try {
+                    const fiches = await automationApi.fetchFichesForDate(date, false, apiKey);
+                    await log("info", `Fetched ${fiches.length} fiches for ${date} from API`);
+                    
+                    // Cache them
+                    for (const fiche of fiches) {
+                      if (fiche.cle) {
+                        const { cacheFicheSalesSummary } = await import("../fiches/fiches.cache.js");
+                        await cacheFicheSalesSummary({
+                          id: fiche.id,
+                          cle: fiche.cle,
+                          nom: fiche.nom,
+                          prenom: fiche.prenom,
+                          email: fiche.email,
+                          telephone: fiche.telephone,
+                          recordings: fiche.recordings,
+                        }, { salesDate: convertDate(date) });
+                      }
+                    }
+                    
+                    return fiches;
+                  } catch (error: any) {
+                    await log("error", `Failed to fetch ${date}: ${error.message}`);
+                    return [];
+                  }
+                })
+              );
+              
+              batchResults.forEach(r => {
+                if (r.status === "fulfilled") apiFiches.push(...r.value);
+              });
+              
+              // Small delay between API batches
+              if (i + 3 < datesMissing.length) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+              }
+            }
           }
-        );
-        ficheIds = processedData.ficheIds;
-        fichesData = processedData.fichesData;
-        fichesCles = processedData.cles;
+          
+          return [...dbResult.fiches, ...apiFiches];
+        });
+        
+        // Process fiches (extract IDs)
+        await log("info", `Processing ${allFiches.length} fiches from DB+API`);
+        
+        // Extract all IDs
+        const allIds = allFiches.map(f => f.ficheId || f.fiche_id || f.id).filter(Boolean);
+        
+        // Apply recording filter if needed
+        let filteredFiches = allFiches;
+        if (selection.onlyWithRecordings) {
+          filteredFiches = allFiches.filter(f => {
+            const recCount = f.transcription?.total || f.recordingsCount || (f.recordings?.length || 0);
+            return recCount > 0;
+          });
+          await log("info", `Filtered to ${filteredFiches.length}/${allFiches.length} fiches with recordings`);
+        }
+        
+        // Apply max limit
+        if (selection.maxFiches && filteredFiches.length > selection.maxFiches) {
+          filteredFiches = filteredFiches.slice(0, selection.maxFiches);
+          await log("info", `Limited to ${selection.maxFiches} fiches`);
+        }
+        
+        // Extract final IDs
+        ficheIds = filteredFiches.map(f => f.ficheId || f.fiche_id || f.id).filter(Boolean);
+        fichesData = filteredFiches;
+        fichesCles = {};
+        
+        await log("info", `Final: ${ficheIds.length} fiches to process`);
       }
 
       // Step 4: Check if we have fiches to process
@@ -380,349 +384,258 @@ export const runAutomationFunction = inngest.createFunction(
         audits: 0,
       };
 
-      // Process fiches in batches to leverage parallelism while maintaining control
-      const FICHE_BATCH_SIZE = 5; // Process 5 fiches in parallel (balanced for Inngest limits)
+      // STEP 1: Ensure all fiches cached (in batches to avoid API overload)
+      const {
+        withRecordings: fichesWithRecordings,
+        withoutRecordings: fichesWithoutRecordings,
+      } = await step.run("ensure-all-fiches-cached", async () => {
+        const { getFicheWithCache } = await import("../fiches/fiches.cache.js");
 
-      for (
-        let batchStart = 0;
-        batchStart < ficheIds.length;
-        batchStart += FICHE_BATCH_SIZE
-      ) {
-        const batchFicheIds = ficheIds.slice(
-          batchStart,
-          batchStart + FICHE_BATCH_SIZE
-        );
-        const batchIndex = Math.floor(batchStart / FICHE_BATCH_SIZE);
+        // Process in batches of 50 to avoid overwhelming the API
+        const FETCH_BATCH_SIZE = 50;
+        const allResults = [];
 
+        for (let i = 0; i < ficheIds.length; i += FETCH_BATCH_SIZE) {
+          const batchIds = ficheIds.slice(i, i + FETCH_BATCH_SIZE);
+          await log(
+            "info",
+            `Fetching batch ${Math.floor(i / FETCH_BATCH_SIZE) + 1}/${Math.ceil(
+              ficheIds.length / FETCH_BATCH_SIZE
+            )} (${batchIds.length} fiches)`
+          );
+
+          const batchResults = await Promise.allSettled(
+            batchIds.map(async (ficheId) => {
+              const ficheData = await getFicheWithCache(ficheId);
+              return {
+                ficheId,
+                recordingsCount: (ficheData as any).recordings?.length || 0,
+              };
+            })
+          );
+
+          allResults.push(...batchResults);
+
+          // Small delay between batches
+          if (i + FETCH_BATCH_SIZE < ficheIds.length) {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+          }
+        }
+
+        const fetchResults = allResults;
+
+        const withRecordings: string[] = [];
+        const withoutRecordings: string[] = [];
+
+        for (let i = 0; i < fetchResults.length; i++) {
+          if (fetchResults[i].status === "fulfilled") {
+            const { ficheId, recordingsCount } = (fetchResults[i] as any).value;
+            if (recordingsCount > 0) withRecordings.push(ficheId);
+            else withoutRecordings.push(ficheId);
+          } else {
+            results.failed.push({
+              ficheId: ficheIds[i],
+              error: (fetchResults[i] as any).reason?.message,
+            });
+          }
+        }
+
+        return { withRecordings, withoutRecordings };
+      });
+
+      // STEP 2: Fan out ALL transcriptions at once
+      if (schedule.runTranscription && fichesWithRecordings.length > 0) {
         await log(
           "info",
-          `Processing fiche batch ${batchIndex + 1} of ${Math.ceil(
-            ficheIds.length / FICHE_BATCH_SIZE
-          )}`,
-          {
-            fiches: batchFicheIds,
+          `Sending ${fichesWithRecordings.length} transcription events (FULL FAN-OUT)`
+        );
+
+        await step.sendEvent(
+          "fan-out-all-transcriptions",
+          fichesWithRecordings.map((ficheId, idx) => ({
+            name: "fiche/transcribe",
+            data: {
+              fiche_id: ficheId,
+              priority:
+                (schedule.transcriptionPriority as "normal" | "high" | "low") ||
+                "normal",
+            },
+            id: `transcribe-${ficheId}-${Date.now()}-${idx}`,
+          }))
+        );
+
+        // Wait for transcriptions with smart completion detection
+        await step.run("wait-for-transcriptions", async () => {
+          const { getFicheTranscriptionStatus } = await import(
+            "../transcriptions/transcriptions.service.js"
+          );
+
+          const maxWait = 15 * 60 * 1000; // 15 min max
+          const pollInterval = 30000; // 30 seconds
+          const startTime = Date.now();
+          let lastCompleted = 0;
+          let stableCount = 0;
+
+          while (Date.now() - startTime < maxWait) {
+            const statuses = await Promise.all(
+              fichesWithRecordings.map((id) => getFicheTranscriptionStatus(id))
+            );
+            const completed = statuses.filter(
+              (s) => s.total && s.transcribed === s.total
+            ).length;
+
+            await log(
+              "info",
+              `Transcription progress: ${completed}/${fichesWithRecordings.length}`
+            );
+
+            // Exit if all complete
+            if (completed === fichesWithRecordings.length) {
+              results.transcriptions = completed;
+              await log(
+                "info",
+                `All transcriptions complete in ${Math.round(
+                  (Date.now() - startTime) / 1000
+                )}s!`
+              );
+              return { completed };
+            }
+
+            // Exit if progress has stalled for 3 polls (likely some failed)
+            if (completed === lastCompleted) {
+              stableCount++;
+              if (stableCount >= 3) {
+                results.transcriptions = completed;
+                await log(
+                  "info",
+                  `Transcriptions stable at ${completed}/${fichesWithRecordings.length} - continuing`
+                );
+                return { completed };
+              }
+            } else {
+              stableCount = 0;
+              lastCompleted = completed;
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, pollInterval));
+          }
+
+          // Timeout - use whatever we have
+          results.transcriptions = lastCompleted;
+          await log("warning", `Transcription timeout - completed ${lastCompleted}/${fichesWithRecordings.length}`);
+          return { completed: lastCompleted };
+        });
+      }
+
+      // STEP 3: Fan out ALL audits at once
+      if (schedule.runAudits && fichesWithRecordings.length > 0) {
+        const auditConfigIds = await step.run(
+          "resolve-all-audit-configs",
+          async () => {
+            let configIds: number[] = [];
+
+            if (schedule.specificAuditConfigs?.length > 0) {
+              configIds.push(
+                ...schedule.specificAuditConfigs
+                  .filter((id) => id && id !== 0)
+                  .map((id) => Number(id))
+              );
+            }
+
+            if (schedule.useAutomaticAudits) {
+              const automaticConfigs =
+                await automationRepository.getAutomaticAuditConfigs();
+              configIds.push(...automaticConfigs.map((c) => Number(c.id)));
+            }
+
+            configIds = [...new Set(configIds)];
+            await log(
+              "info",
+              `Running ${configIds.length} configs × ${
+                fichesWithRecordings.length
+              } fiches = ${
+                configIds.length * fichesWithRecordings.length
+              } total audits`
+            );
+            return configIds;
           }
         );
 
-        // Process each fiche in the batch
-        // STEP 1: Ensure all fiches have full details (same as frontend flow)
-        // Track which fiches have recordings AFTER fetching full details
-        const fichesWithRecordings: string[] = [];
-        const fichesWithoutRecordings: string[] = [];
+        const auditTasks = fichesWithRecordings.flatMap((ficheId) =>
+          auditConfigIds.map((configId) => ({ ficheId, configId }))
+        );
 
-        for (let i = 0; i < batchFicheIds.length; i++) {
-          const ficheId = batchFicheIds[i];
-
-          try {
-            // Add delay to avoid overwhelming API
-            if (i > 0) {
-              await step.sleep(`delay-fetch-${ficheId}`, 2000);
-            }
-
-            // Use the SAME function the frontend uses when clicking on a sale
-            // This handles everything automatically:
-            // - Checks cache
-            // - If _salesListOnly, fetches full details with cle
-            // - Caches full details
-            // - Returns complete data with recordings
-            const fetchResult = await step.run(
-              `ensure-fiche-${ficheId}`,
-              async () => {
-                const { getFicheWithCache } = await import(
-                  "../fiches/fiches.cache.js"
-                );
-
-                await log("info", `Ensuring fiche ${ficheId} has full details`);
-                const ficheData = await getFicheWithCache(ficheId);
-                const recordingsCount =
-                  (ficheData as any).recordings?.length || 0;
-
-                await log(
-                  "info",
-                  `Fiche ${ficheId} ready with ${recordingsCount} recordings`
-                );
-                return { ficheId, recordingsCount };
-              }
-            );
-
-            // Track fiches based on whether they have recordings (AFTER full details fetched)
-            if (fetchResult.recordingsCount > 0) {
-              fichesWithRecordings.push(ficheId);
-              await log(
-                "info",
-                `Fiche ${ficheId} has ${fetchResult.recordingsCount} recordings - will process`
-              );
-            } else {
-              fichesWithoutRecordings.push(ficheId);
-              await log(
-                "info",
-                `Fiche ${ficheId} has no recordings - skipping transcription and audit`
-              );
-            }
-          } catch (error: any) {
-            await log(
-              "error",
-              `Failed to fetch fiche ${ficheId}: ${error.message}`
-            );
-            results.failed.push({ ficheId, error: error.message });
-
-            if (!schedule.continueOnError) {
-              throw error;
-            }
-          }
-        }
-
-        // Log summary of fiches with/without recordings
-        await log("info", `Batch fiche check complete`, {
-          total: batchFicheIds.length,
-          withRecordings: fichesWithRecordings.length,
-          withoutRecordings: fichesWithoutRecordings.length,
-          skipped: fichesWithoutRecordings,
-        });
-
-        // STEP 2: Transcribe fiches sequentially with delays (to avoid Inngest rate limits)
-        // Note: The actual transcription work happens in parallel via the transcribeFicheFunction
-        // ONLY process fiches that have recordings
-        if (schedule.runTranscription && fichesWithRecordings.length > 0) {
+        if (auditTasks.length > 0) {
           await log(
             "info",
-            `Transcribing ${fichesWithRecordings.length} fiches with recordings (skipping ${fichesWithoutRecordings.length} without recordings)`
+            `Sending ${auditTasks.length} audit events (FULL FAN-OUT)`
           );
 
-          for (let i = 0; i < fichesWithRecordings.length; i++) {
-            const ficheId = fichesWithRecordings[i];
-
-            try {
-              // Add delay between transcription invocations (deterministic step IDs)
-              if (i > 0) {
-                await step.sleep(
-                  `delay-transcribe-batch-${batchStart}-${i}`,
-                  1000
-                ); // 1s delay between invocations
-              }
-
-              await log("info", `Starting transcription for fiche ${ficheId}`);
-
-              await step.invoke(`transcribe-fiche-${ficheId}`, {
-                function: transcribeFicheFunction,
-                data: {
-                  fiche_id: ficheId,
-                  priority:
-                    (schedule.transcriptionPriority as
-                      | "normal"
-                      | "high"
-                      | "low") || "normal",
-                },
-              });
-              results.transcriptions++;
-              await log("info", `Transcription complete for fiche ${ficheId}`);
-            } catch (error: any) {
-              if (
-                schedule.skipIfTranscribed &&
-                error.message?.includes("already transcribed")
-              ) {
-                await log(
-                  "info",
-                  `Fiche ${ficheId} already transcribed, skipping`
-                );
-              } else {
-                await log(
-                  "error",
-                  `Transcription failed for fiche ${ficheId}: ${error.message}`
-                );
-                if (!schedule.continueOnError) {
-                  throw error;
-                }
-              }
-            }
-          }
-
-          await log("info", `Batch transcriptions complete`);
-        } else if (fichesWithRecordings.length === 0) {
-          await log(
-            "info",
-            `No fiches with recordings to transcribe in this batch`
+          await step.sendEvent(
+            "fan-out-all-audits",
+            auditTasks.map(({ ficheId, configId }, idx) => ({
+              name: "audit/run",
+              data: { fiche_id: ficheId, audit_config_id: configId },
+              id: `audit-${ficheId}-${configId}-${Date.now()}-${idx}`,
+            }))
           );
-        }
 
-        // STEP 3: Run audits for each fiche in the batch
-        // ONLY audit fiches that have recordings
-        for (const ficheId of fichesWithRecordings) {
-          try {
-            await log("info", `Running audits for fiche ${ficheId}`);
+            // Poll for audits with smart completion detection
+            await step.run("wait-for-audits", async () => {
+              const { prisma } = await import("../../shared/prisma.js");
 
-            // Step 5c: Run audits if configured
-            if (schedule.runAudits) {
-              // Determine which audit configs to run
-              let auditConfigIds: number[] = [];
+              const maxWait = 30 * 60 * 1000; // 30 min max
+              const pollInterval = 60000; // 60 seconds
+              const startTime = Date.now();
+              let lastCompleted = 0;
+              let stableCount = 0;
 
-              // Log schedule audit configuration for debugging
-              await log("debug", `Audit configuration for schedule`, {
-                useAutomaticAudits: schedule.useAutomaticAudits,
-                specificAuditConfigs: schedule.specificAuditConfigs,
-                specificAuditConfigsType: typeof schedule.specificAuditConfigs,
-                specificAuditConfigsIsArray: Array.isArray(
-                  schedule.specificAuditConfigs
-                ),
-                specificAuditConfigsLength:
-                  schedule.specificAuditConfigs?.length,
-              });
-
-              // First, add specific audit configs if provided
-              if (
-                schedule.specificAuditConfigs &&
-                Array.isArray(schedule.specificAuditConfigs) &&
-                schedule.specificAuditConfigs.length > 0
-              ) {
-                // Handle Number formats, filter out null/undefined/invalid
-                // Note: BigInts are already converted to Numbers in load-schedule step
-                const specificIds = schedule.specificAuditConfigs
-                  .filter((id) => {
-                    // Filter out null, undefined, 0, and invalid values
-                    if (id === null || id === undefined || id === 0) {
-                      return false;
-                    }
-                    return true;
-                  })
-                  .map((id) => Number(id)) // Ensure it's a number
-                  .filter((id) => !isNaN(id) && id > 0); // Additional safety check
-
-                if (specificIds.length > 0) {
-                  auditConfigIds.push(...specificIds);
-
-                  await log(
-                    "info",
-                    `Added ${specificIds.length} specific audit configs`,
-                    { specific_audit_config_ids: specificIds }
-                  );
-                } else {
-                  await log(
-                    "warning",
-                    `Specific audit configs array contains only null/invalid values`,
-                    {
-                      raw_configs: schedule.specificAuditConfigs,
-                      hint: "The schedule was saved with invalid audit config IDs. Please edit the schedule and re-select audit configs.",
-                    }
-                  );
-                }
-              } else {
-                await log("info", `No specific audit configs configured`, {
-                  specificAuditConfigsProvided: !!schedule.specificAuditConfigs,
-                  specificAuditConfigsLength:
-                    schedule.specificAuditConfigs?.length || 0,
+              while (Date.now() - startTime < maxWait) {
+                const completed = await prisma.audit.count({
+                  where: {
+                    ficheCache: { ficheId: { in: fichesWithRecordings } },
+                    auditConfigId: { in: auditConfigIds.map((id) => BigInt(id)) },
+                    status: "completed",
+                  },
                 });
-              }
 
-              // Then, add automatic audits ONLY if explicitly enabled
-              // (removed fallback behavior - only use selected audits)
-              if (schedule.useAutomaticAudits) {
-                const automaticConfigs = await step.run(
-                  `get-automatic-audits-${ficheId}`,
-                  async () => {
-                    return await automationRepository.getAutomaticAuditConfigs();
-                  }
-                );
-                const automaticIds = automaticConfigs.map((c) => Number(c.id));
-
-                if (automaticIds.length > 0) {
-                  auditConfigIds.push(...automaticIds);
-
-                  await log(
-                    "info",
-                    `Added ${automaticIds.length} automatic audit configs`,
-                    { automatic_audit_config_ids: automaticIds }
-                  );
-                } else {
-                  await log(
-                    "info",
-                    `No automatic audit configs found in database`,
-                    { checked_automatic_audits: true }
-                  );
-                }
-              }
-
-              // Remove duplicates
-              auditConfigIds = [...new Set(auditConfigIds)];
-
-              if (auditConfigIds.length === 0) {
-                await log(
-                  "warning",
-                  `No valid audit configs found for fiche ${ficheId}, skipping audits`,
-                  {
-                    useAutomaticAudits: schedule.useAutomaticAudits,
-                    specificAuditConfigs: schedule.specificAuditConfigs,
-                    troubleshooting:
-                      "Please ensure: 1) Specific audit config IDs are saved in the schedule, OR 2) At least one audit config is marked as 'automatic' in the database",
-                  }
-                );
-              } else {
                 await log(
                   "info",
-                  `Running ${auditConfigIds.length} audit(s) for fiche ${ficheId}`,
-                  { audit_config_ids: auditConfigIds }
+                  `Audit progress: ${completed}/${auditTasks.length}`
                 );
-              }
 
-              // Run each audit
-              for (const auditConfigId of auditConfigIds) {
-                try {
-                  await step.invoke(`audit-${ficheId}-${auditConfigId}`, {
-                    function: runAuditFunction,
-                    data: {
-                      fiche_id: ficheId,
-                      audit_config_id: auditConfigId,
-                    },
-                  });
-                  results.audits++;
-                } catch (error: any) {
-                  await log(
-                    "error",
-                    `Audit failed for fiche ${ficheId}, config ${auditConfigId}`,
-                    {
-                      error: error.message,
-                    }
-                  );
-
-                  if (!schedule.continueOnError) {
-                    throw error;
-                  }
+                // Exit if all complete
+                if (completed === auditTasks.length) {
+                  results.audits = completed;
+                  results.successful = [...fichesWithRecordings];
+                  await log("info", `All audits complete in ${Math.round((Date.now() - startTime)/1000)}s!`);
+                  return { completed };
                 }
+
+                // Exit if progress has stalled for 3 polls (some may have failed)
+                if (completed === lastCompleted) {
+                  stableCount++;
+                  if (stableCount >= 3) {
+                    results.audits = completed;
+                    results.successful = [...fichesWithRecordings];
+                    await log("info", `Audits stable at ${completed}/${auditTasks.length} - continuing`);
+                    return { completed };
+                  }
+                } else {
+                  stableCount = 0;
+                  lastCompleted = completed;
+                }
+
+                await new Promise((resolve) => setTimeout(resolve, pollInterval));
               }
-            }
 
-            results.successful.push(ficheId);
-            await log("info", `Successfully processed fiche ${ficheId}`);
-          } catch (error: any) {
-            await log(
-              "error",
-              `Failed to process fiche ${ficheId}: ${error.message}`
-            );
-            results.failed.push({ ficheId, error: error.message });
-
-            if (!schedule.continueOnError) {
-              throw error;
-            }
-          }
+              // Timeout - use whatever we have
+              results.audits = lastCompleted;
+              results.successful = [...fichesWithRecordings];
+              await log("warning", `Audit timeout - completed ${lastCompleted}/${auditTasks.length}`);
+              return { completed: lastCompleted };
+            });
         }
-
-        // Log audit completion summary
-        if (fichesWithoutRecordings.length > 0) {
-          await log(
-            "info",
-            `Skipped ${fichesWithoutRecordings.length} fiches without recordings`,
-            {
-              skipped_fiches: fichesWithoutRecordings,
-            }
-          );
-        }
-
-        // Log batch completion
-        await log("info", `Completed batch ${batchIndex + 1}`, {
-          successful: results.successful.length,
-          failed: results.failed.length,
-          withRecordings: fichesWithRecordings.length,
-          withoutRecordings: fichesWithoutRecordings.length,
-        });
       }
 
       // Step 6: Finalize run

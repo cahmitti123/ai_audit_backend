@@ -38,6 +38,7 @@ export async function analyzeStep(
   timelineText: string,
   auditId: string,
   ficheId: string,
+  productInfo: any = null,
   options: AuditOptions = {}
 ) {
   const opts = { ...DEFAULT_OPTIONS, ...options };
@@ -62,17 +63,30 @@ export async function analyzeStep(
   // Check if product verification is required
   let productVerificationContext: ProductVerificationContext[] | null = null;
   if (step.verifyProductInfo === true) {
-    console.log(
-      "🔍 Product verification enabled - fetching documentation from vector store..."
-    );
-    try {
-      productVerificationContext = await getProductVerificationContext(step);
+    // Check if product info is available from database
+    if (productInfo && productInfo.matched && productInfo.formule) {
+      console.log(`✅ Product data available from database - SKIPPING vector store`);
+      console.log(`   Groupe: ${productInfo.formule.gamme.groupe.libelle}`);
+      console.log(`   Gamme: ${productInfo.formule.gamme.libelle}`);
+      console.log(`   Formule: ${productInfo.formule.libelle}`);
+      console.log(`   Guarantees: ${productInfo.formule._counts.garanties}`);
+      console.log(`   Categories: ${productInfo.formule._counts.categories}`);
+      console.log(`   Items: ${productInfo.formule._counts.items}`);
+      // Database has complete guarantee data - no need for vector store
+    } else {
+      // Fallback to vector store only if no database match
       console.log(
-        `✅ Retrieved verification context for ${productVerificationContext.length} checkpoints`
+        "⚠️ Product not matched in database - fetching from vector store as fallback..."
       );
-    } catch (error) {
-      console.error("⚠️ Failed to fetch product verification context:", error);
-      // Continue without verification context rather than failing the entire step
+      try {
+        productVerificationContext = await getProductVerificationContext(step);
+        console.log(
+          `✅ Retrieved verification context from vector store for ${productVerificationContext.length} checkpoints`
+        );
+      } catch (error) {
+        console.error("⚠️ Failed to fetch product verification context:", error);
+        // Continue without verification context rather than failing the entire step
+      }
     }
   }
 
@@ -80,7 +94,8 @@ export async function analyzeStep(
     step,
     auditConfig,
     timelineText,
-    productVerificationContext
+    productVerificationContext,
+    productInfo
   );
   console.log(`Envoi à ${opts.model}...`);
 
@@ -154,6 +169,7 @@ export async function analyzeAllSteps(
   timelineText: string,
   auditId: string,
   ficheId: string,
+  productInfo: any = null,
   options: AuditOptions = {}
 ) {
   console.log("\n🚀 Analyse parallèle de toutes les étapes...\n");
@@ -170,7 +186,7 @@ export async function analyzeAllSteps(
   );
 
   const stepPromises = auditConfig.auditSteps.map((step: any, index: number) =>
-    analyzeStep(step, auditConfig, timelineText, auditId, ficheId, options)
+    analyzeStep(step, auditConfig, timelineText, auditId, ficheId, productInfo, options)
       .then((result) => {
         // Send progress webhook after each step completes
         const completedSteps = index + 1;

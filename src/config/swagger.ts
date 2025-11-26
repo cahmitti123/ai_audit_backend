@@ -24,6 +24,7 @@ const options: swaggerJsdoc.Options = {
       { name: "Transcriptions", description: "Audio transcription" },
       { name: "Audit Configs", description: "Audit configuration management" },
       { name: "Audits", description: "Audit execution and results" },
+      { name: "Products", description: "Insurance products management" },
     ],
   },
   apis: ["./src/app.ts", "./src/modules/**/*.routes.ts"],

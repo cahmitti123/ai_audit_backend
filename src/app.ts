@@ -19,10 +19,11 @@ import { fichesRouter } from "./modules/fiches/index.js";
 import { recordingsRouter } from "./modules/recordings/index.js";
 import { transcriptionsRouter } from "./modules/transcriptions/index.js";
 import { auditConfigsRouter } from "./modules/audit-configs/index.js";
-import { auditsRouter } from "./modules/audits/index.js";
+import { auditsRouter, auditRerunRouter } from "./modules/audits/index.js";
 import { webhooksRoutes } from "./modules/webhooks/index.js";
 import { automationRouter } from "./modules/automation/index.js";
 import { chatRouter } from "./modules/chat/index.js";
+import { productsRouter } from "./modules/products/index.js";
 
 // Middleware
 // import {
@@ -88,8 +89,10 @@ export function createApp() {
   app.use("/api/transcriptions", transcriptionsRouter);
   app.use("/api/audit-configs", auditConfigsRouter);
   app.use("/api/audits", auditsRouter);
+  app.use("/api/audits", auditRerunRouter); // Step re-run endpoints
   app.use("/api/webhooks", webhooksRoutes);
   app.use("/api/automation", automationRouter);
+  app.use("/api/products", productsRouter);
   app.use("/api", chatRouter);
 
   return app;

@@ -42,7 +42,11 @@ export const runAuditFunction = inngest.createFunction(
   {
     id: "run-audit",
     name: "Run AI Audit",
-    concurrency: CONCURRENCY.AUDIT_RUN,
+    concurrency: [
+      {
+        limit: CONCURRENCY.AUDIT_RUN.limit,
+      },
+    ],
     retries: 2,
     timeouts: {
       finish: TIMEOUTS.AUDIT_RUN,
@@ -209,6 +213,50 @@ export const runAuditFunction = inngest.createFunction(
       total_steps: auditConfig.auditSteps.length,
     });
 
+    // Step 3.5: Link to product database if needed
+    const productInfo = await step.run("link-to-product", async () => {
+      const needsProductInfo = auditConfig.auditSteps.some(
+        (step: any) => step.verifyProductInfo === true
+      );
+
+      if (!needsProductInfo) {
+        logger.info("Product verification not needed for this audit");
+        return null;
+      }
+
+      logger.info(
+        "Product verification required - linking fiche to product database"
+      );
+
+      try {
+        const { linkFicheToProduct } = await import(
+          "../products/products.service.js"
+        );
+
+        const linkResult = await linkFicheToProduct(fiche_id);
+
+        if (linkResult.matched && linkResult.formule) {
+          logger.info("Product matched successfully", {
+            groupe: linkResult.formule.gamme.groupe.libelle,
+            gamme: linkResult.formule.gamme.libelle,
+            formule: linkResult.formule.libelle,
+            guarantees: linkResult.formule._counts.garanties,
+          });
+          return linkResult;
+        } else {
+          logger.warn("No matching product found in database", {
+            searched: linkResult.searchCriteria,
+          });
+          return null;
+        }
+      } catch (error: any) {
+        logger.warn("Failed to link fiche to product", {
+          error: error.message,
+        });
+        return null;
+      }
+    });
+
     // Create audit record in database with "running" status
     const auditDbId = await step.run("create-audit-record", async () => {
       logger.info("Creating audit record in database", {
@@ -279,9 +327,20 @@ export const runAuditFunction = inngest.createFunction(
 
         // Load recordings from database with transcription data
         const dbRecordings = await getRecordingsByFiche(fiche_id);
+
+        // Check how many have transcription text in DB
+        const withDbText = dbRecordings.filter(
+          (r) => r.hasTranscription && r.transcriptionText
+        ).length;
+        const withoutDbText = dbRecordings.filter(
+          (r) => r.hasTranscription && !r.transcriptionText
+        ).length;
+
         logger.info("Loaded recordings from database", {
           count: dbRecordings.length,
           transcribed: dbRecordings.filter((r) => r.hasTranscription).length,
+          with_db_text: withDbText,
+          missing_db_text: withoutDbText,
         });
 
         // Get fiche data for enrichment
@@ -305,18 +364,21 @@ export const runAuditFunction = inngest.createFunction(
             : "No recordings",
         });
 
-        // Load transcription cache
+        // Load transcription cache (fallback only)
         const CACHE_FILE = "./data/transcription_cache.json";
         let transcriptionCache: any = {};
         if (existsSync(CACHE_FILE)) {
           try {
             transcriptionCache = JSON.parse(readFileSync(CACHE_FILE, "utf-8"));
+            logger.info("Loaded transcription file cache", {
+              entries: Object.keys(transcriptionCache).length,
+            });
           } catch (e) {
             logger.warn("Could not load transcription cache", { error: e });
           }
         }
 
-        // Build transcriptions from database + cache
+        // Build transcriptions from database (PRIMARY) + file cache (FALLBACK)
         const transcriptions = [];
         for (const dbRec of dbRecordings) {
           if (!dbRec.hasTranscription || !dbRec.transcriptionId) {
@@ -337,54 +399,71 @@ export const runAuditFunction = inngest.createFunction(
             continue;
           }
 
-          console.log(`📍 [Workflow] Processing recording for transcription:`, {
-            call_id: dbRec.callId,
-            raw_has_recording_url: Boolean(rawRec.recording_url),
-            raw_has_recordingUrl: Boolean(rawRec.recordingUrl),
-          });
-
           const enrichedRec = enrichRecording(rawRec);
           const url = enrichedRec.recording_url || enrichedRec.recordingUrl;
-
-          console.log(`📍 [Workflow] After enrichment:`, {
-            call_id: dbRec.callId,
-            enriched_has_recording_url: Boolean(enrichedRec.recording_url),
-            enriched_has_recordingUrl: Boolean(enrichedRec.recordingUrl),
-            final_url: url ? `${url.substring(0, 50)}...` : "MISSING",
-          });
 
           // Verify URL is present
           if (!url) {
             logger.error("Recording URL is missing!", {
               call_id: dbRec.callId,
-              raw_recording: rawRec,
-              enriched_recording: enrichedRec,
             });
             continue;
           }
 
-          // Load from cache
-          const cachedTranscription = transcriptionCache[url];
-          if (!cachedTranscription) {
-            logger.warn("Transcription not in cache", {
-              call_id: dbRec.callId,
-              url,
-            });
-            continue;
-          }
+          // PRIORITY 1: Load transcription from DATABASE (transcriptionText column)
+          let transcriptionData;
 
-          console.log(`✓ [Workflow] Adding to transcriptions array:`, {
-            call_id: dbRec.callId,
-            recording_url: url ? `${url.substring(0, 50)}...` : "MISSING",
-            has_transcription: Boolean(cachedTranscription),
-          });
+          if (dbRec.transcriptionText) {
+            // Use database transcription (PREFERRED)
+            // Create simple word array from text for chunking
+            const textWords = dbRec.transcriptionText
+              .split(/\s+/)
+              .filter(Boolean);
+            const words = textWords.map((word, idx) => ({
+              text: word,
+              start: idx * 0.5, // Fake timing (0.5s per word)
+              end: (idx + 1) * 0.5,
+              type: "word" as const,
+              speaker_id: idx % 20 < 10 ? 0 : 1, // Alternate speakers every 10 words
+            }));
+
+            transcriptionData = {
+              text: dbRec.transcriptionText,
+              language_code: "fr",
+              words: words,
+            };
+            logger.info(
+              "Using transcription from database (synthesized words)",
+              {
+                call_id: dbRec.callId,
+                text_length: dbRec.transcriptionText.length,
+                words_count: words.length,
+              }
+            );
+          } else {
+            // FALLBACK: Try file cache (has full word-level data)
+            const cachedTranscription = transcriptionCache[url];
+            if (cachedTranscription) {
+              transcriptionData = cachedTranscription.transcription;
+              logger.info("Using transcription from file cache", {
+                call_id: dbRec.callId,
+              });
+            } else {
+              logger.warn("Transcription not found in DB or file cache", {
+                call_id: dbRec.callId,
+                has_db_text: Boolean(dbRec.transcriptionText),
+                url,
+              });
+              continue;
+            }
+          }
 
           transcriptions.push({
             recording_url: url,
             transcription_id: dbRec.transcriptionId,
             call_id: dbRec.callId,
             recording: enrichedRec,
-            transcription: cachedTranscription.transcription,
+            transcription: transcriptionData,
           });
         }
 
@@ -491,7 +570,8 @@ export const runAuditFunction = inngest.createFunction(
           auditConfig,
           timelineText,
           auditId,
-          fiche_id
+          fiche_id,
+          productInfo // Pass product info for verification
         );
 
         logger.info(`Step ${auditStep.position} completed`, {

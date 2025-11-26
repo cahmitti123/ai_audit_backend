@@ -17,7 +17,7 @@ import * as fichesCache from "./fiches.cache.js";
 import * as fichesRepository from "./fiches.repository.js";
 import * as fichesWebhooks from "./fiches.webhooks.js";
 import { enrichRecording } from "../../utils/recording-parser.js";
-import { RATE_LIMITS, TIMEOUTS } from "../../shared/constants.js";
+import { RATE_LIMITS, TIMEOUTS, CONCURRENCY } from "../../shared/constants.js";
 import { prisma } from "../../shared/prisma.js";
 import type { FicheDetailsResponse, Recording } from "./fiches.schemas.js";
 
@@ -77,6 +77,11 @@ export interface FicheFetchResult {
 export const fetchFicheFunction = inngest.createFunction(
   {
     id: "fetch-fiche",
+    concurrency: [
+      {
+        limit: CONCURRENCY.FICHE_FETCH.limit,
+      },
+    ],
     name: "Fetch Fiche from API",
     retries: 3,
     rateLimit: {

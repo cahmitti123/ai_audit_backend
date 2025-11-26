@@ -16,7 +16,12 @@ import type {
   TranscriptionStatus,
 } from "./transcriptions.types.js";
 import { isFullyTranscribed } from "./transcriptions.types.js";
-import { RATE_LIMITS, TIMEOUTS, BATCH_CONFIG } from "../../shared/constants.js";
+import {
+  RATE_LIMITS,
+  TIMEOUTS,
+  BATCH_CONFIG,
+  CONCURRENCY,
+} from "../../shared/constants.js";
 import { transcriptionWebhooks } from "../../shared/webhook.js";
 
 /**
@@ -34,6 +39,11 @@ export const transcribeFicheFunction = inngest.createFunction(
     id: "transcribe-fiche",
     name: "Transcribe Fiche Recordings",
     retries: 3,
+    concurrency: [
+      {
+        limit: CONCURRENCY.TRANSCRIPTION.limit,
+      },
+    ],
     rateLimit: {
       ...RATE_LIMITS.TRANSCRIPTION,
       key: "event.data.fiche_id",
@@ -41,7 +51,8 @@ export const transcribeFicheFunction = inngest.createFunction(
     timeouts: {
       finish: TIMEOUTS.TRANSCRIPTION,
     },
-    idempotency: "event.data.fiche_id",
+    // REMOVED idempotency to allow parallel execution from automation workflows
+    // The transcription logic itself handles duplicate checks
     batchEvents: BATCH_CONFIG.TRANSCRIPTION,
   },
   { event: "fiche/transcribe" },
@@ -59,9 +70,12 @@ export const transcribeFicheFunction = inngest.createFunction(
       const { fiche_id, priority = "normal" } = evt.data;
 
       // Capture start time in a step to persist it across Inngest checkpoints
-      const startTime = await step.run(`capture-start-time-${fiche_id}`, async (): Promise<number> => {
-        return Date.now();
-      });
+      const startTime = await step.run(
+        `capture-start-time-${fiche_id}`,
+        async (): Promise<number> => {
+          return Date.now();
+        }
+      );
 
       // Validate API key at function level (non-retriable error)
       const apiKey = process.env.ELEVENLABS_API_KEY;

@@ -36,11 +36,16 @@ export const TIMEOUTS = {
   BATCH_AUDIT: "1h",
 } as const;
 
-// Inngest Concurrency (increased for efficiency)
+// Inngest Concurrency (maximum throughput)
 export const CONCURRENCY = {
   AUDIT_RUN: {
-    limit: 25, // Increased from 10
-    key: "event.data.audit_config_id" as const,
+    limit: 100, // Increased to 100 concurrent audits
+  },
+  TRANSCRIPTION: {
+    limit: 50, // Increased to 50 concurrent transcriptions
+  },
+  FICHE_FETCH: {
+    limit: 50, // 50 concurrent fiche fetches
   },
 } as const;
 

@@ -11,9 +11,12 @@
 
 // Routes (HTTP endpoints)
 export { auditsRouter } from "./audits.routes.js";
+export { auditRerunRouter } from "./audits.rerun.routes.js";
 
 // Workflows (Background jobs)
-export { functions as auditsFunctions } from "./audits.workflows.js";
+import { functions as workflowFunctions } from "./audits.workflows.js";
+import { functions as rerunFunctions } from "./audits.rerun.workflows.js";
+export const auditsFunctions = [...workflowFunctions, ...rerunFunctions];
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ORCHESTRATION LAYER

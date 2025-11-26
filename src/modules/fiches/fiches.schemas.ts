@@ -327,6 +327,111 @@ export const recordingSchema = z.object({
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// MAIL DEVIS SCHEMAS (Optional - include_mail_devis parameter)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const mailDevisMetadataSchema = z.object({
+  date_envoi: z.string(),
+  type_mail: z.string(),
+  utilisateur: z.string(),
+  visualisation_url: z.string().nullable(),
+});
+
+export const customerInfoSchema = z.object({
+  email: z.string().nullable().optional(),
+  phone: z.string().nullable().optional(),
+  name: z.string().nullable().optional(),
+});
+
+export const garantiesLinkSchema = z.object({
+  url: z.string(),
+  text: z.string().nullable().optional(),
+});
+
+export const agenceInfoSchema = z.object({
+  nom: z.string().nullable(),
+  adresse: z.string().nullable(),
+  telephone: z.string().nullable(),
+  email: z.string().nullable().optional(),
+  logo_url: z.string().nullable().optional(),
+});
+
+export const ficheInfoSchema = z.object({
+  fiche_id: z.string(),
+  cle: z.string().nullable(),
+  conseiller: z.string().nullable(),
+});
+
+export const subscriberInfoSchema = z.object({
+  civilite: z.string().nullable(),
+  nom: z.string().nullable(),
+  prenom: z.string().nullable(),
+});
+
+export const documentsSchema = z.object({
+  conditions_generales: z.string().nullable(),
+  tableau_garanties: z.string().nullable(),
+  document_information: z.string().nullable(),
+  exemples_remboursements: z.string().nullable(),
+});
+
+export const menuLinksSchema = z.object({
+  home: z.string().nullable().optional(),
+  garanties: z.string().nullable().optional(),
+  documents: z.string().nullable().optional(),
+  subscription: z.string().nullable().optional(),
+});
+
+export const garantieItemSchema = z.object({
+  name: z.string(),
+  value: z.string(),
+  note_ref: z.string().nullable().optional(),
+});
+
+export const garantieSubcategorySchema = z.object({
+  name: z.string(),
+  items: z.array(garantieItemSchema),
+});
+
+export const garantieCategorySchema = z.object({
+  category_name: z.string(),
+  note_references: z.array(z.string()),
+  subcategories: z.union([
+    z.record(z.string(), garantieSubcategorySchema),
+    z.record(z.string(), z.array(garantieItemSchema)), // Some subcategories are arrays directly
+  ]),
+  items: z.array(garantieItemSchema),
+});
+
+export const garantieNoteSchema = z.object({
+  number: z.string(),
+  text: z.string(),
+});
+
+export const garantiesDetailsSchema = z.object({
+  gamme: z.string(),
+  product_name: z.string(),
+  formule: z.string(),
+  price: z.string().nullable(),
+  age_range: z.string().nullable(),
+  subscription_link: z.string().nullable(),
+  agence_info: agenceInfoSchema,
+  fiche_info: ficheInfoSchema,
+  subscriber_info: subscriberInfoSchema,
+  documents: documentsSchema,
+  menu_links: menuLinksSchema,
+  garanties: z.record(z.string(), garantieCategorySchema),
+  notes: z.array(garantieNoteSchema),
+});
+
+export const mailDevisSchema = z.object({
+  mail_devis: mailDevisMetadataSchema,
+  customer_info: customerInfoSchema,
+  garanties_link: garantiesLinkSchema,
+  garanties_details: garantiesDetailsSchema,
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // SALES WITH CALLS SCHEMAS (GET /fiches/sales-with-calls)
 // Recordings array can be empty if includeRecordings=false
 // ═══════════════════════════════════════════════════════════════════════════
@@ -362,6 +467,7 @@ export const saleDetailsResponseSchema = z.object({
   alertes: z.array(alerteSchema),
   recordings: z.array(recordingSchema),
   raw_sections: z.record(z.string(), z.string()),
+  mail_devis: mailDevisSchema.nullable().optional(), // Optional field - only present when include_mail_devis=true
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -555,6 +661,22 @@ export type Transcription = z.infer<typeof transcriptionSchema>;
 export type Recording = z.infer<typeof recordingSchema>;
 export type SaleDetailsResponse = z.infer<typeof saleDetailsResponseSchema>;
 export type FicheDetailsResponse = SaleDetailsResponse;
+
+// Mail Devis Types (Optional - include_mail_devis parameter)
+export type MailDevisMetadata = z.infer<typeof mailDevisMetadataSchema>;
+export type CustomerInfo = z.infer<typeof customerInfoSchema>;
+export type GarantiesLink = z.infer<typeof garantiesLinkSchema>;
+export type AgenceInfo = z.infer<typeof agenceInfoSchema>;
+export type FicheInfo = z.infer<typeof ficheInfoSchema>;
+export type SubscriberInfo = z.infer<typeof subscriberInfoSchema>;
+export type Documents = z.infer<typeof documentsSchema>;
+export type MenuLinks = z.infer<typeof menuLinksSchema>;
+export type GarantieItem = z.infer<typeof garantieItemSchema>;
+export type GarantieSubcategory = z.infer<typeof garantieSubcategorySchema>;
+export type GarantieCategory = z.infer<typeof garantieCategorySchema>;
+export type GarantieNote = z.infer<typeof garantieNoteSchema>;
+export type GarantiesDetails = z.infer<typeof garantiesDetailsSchema>;
+export type MailDevis = z.infer<typeof mailDevisSchema>;
 
 // Database Record Types (for internal operations)
 export type RecordingStatus = z.infer<typeof recordingStatusSchema>;

@@ -159,20 +159,29 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
     console.log(`✓ Using cached fiche data`);
     ficheData = cached.rawData;
     ficheCache = cached;
-    
+
     // Check if cached data is only sales list (minimal data without recordings)
     if (ficheData._salesListOnly) {
-      console.log(`⚠️ Cached data is sales list only, fetching full details...`);
+      console.log(
+        `⚠️ Cached data is sales list only, fetching full details...`
+      );
       const cle = ficheData.cle;
       if (!cle) {
-        throw new Error(`Cannot fetch fiche ${options.ficheId}: missing cle parameter`);
+        throw new Error(
+          `Cannot fetch fiche ${options.ficheId}: missing cle parameter`
+        );
       }
+
+      // Note: Product verification check will happen after config is loaded
+      // For now, fetch without mail_devis (will refetch later if needed)
       ficheData = await fetchFicheDetails(options.ficheId, cle);
       ficheCache = await cacheFicheDetails(ficheData as FicheDetailsResponse);
       console.log(`✓ Fiche refreshed with full details (ID: ${ficheCache.id})`);
     }
   } else {
-    throw new Error(`Fiche ${options.ficheId} not found in cache. Fetch via date range endpoint first to get cle.`);
+    throw new Error(
+      `Fiche ${options.ficheId} not found in cache. Fetch via date range endpoint first to get cle.`
+    );
   }
 
   ficheData.recordings = ficheData.recordings.map(enrichRecording);
@@ -215,6 +224,55 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
   console.log(`✓ Config: ${auditConfig.name}`);
   console.log(`✓ Config ID: ${auditConfig.id}`);
   console.log(`✓ Steps: ${auditConfig.auditSteps.length}`);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 2.5. CHECK PRODUCT VERIFICATION REQUIREMENTS
+  // ═══════════════════════════════════════════════════════════════════════════
+  // If any audit step has verifyProductInfo=true, fetch product from database
+
+  const needsProductInfo = auditConfig.auditSteps.some(
+    (step: any) => step.verifyProductInfo === true
+  );
+
+  let productInfo: any = null;
+
+  if (needsProductInfo) {
+    console.log(
+      `\nℹ️  Audit requires product verification - linking fiche to product database`
+    );
+
+    try {
+      // Import product service dynamically
+      const { linkFicheToProduct } = await import(
+        "../products/products.service.js"
+      );
+
+      // Link fiche to product
+      const linkResult = await linkFicheToProduct(options.ficheId);
+
+      if (linkResult.matched && linkResult.formule) {
+        productInfo = linkResult;
+        console.log(`✓ Product matched successfully`);
+        console.log(`✓ Groupe: ${linkResult.formule.gamme.groupe.libelle}`);
+        console.log(`✓ Gamme: ${linkResult.formule.gamme.libelle}`);
+        console.log(`✓ Formule: ${linkResult.formule.libelle}`);
+        console.log(`✓ Garanties: ${linkResult.formule._counts.garanties}`);
+        console.log(`✓ Categories: ${linkResult.formule._counts.categories}`);
+        console.log(`✓ Items: ${linkResult.formule._counts.items}`);
+      } else {
+        console.warn(
+          `⚠️  No matching product found in database:` +
+            `\n   Searched: ${linkResult.searchCriteria.groupe_nom} > ${linkResult.searchCriteria.gamme_nom} > ${linkResult.searchCriteria.formule_nom}` +
+            `\n   Audit will proceed without product verification`
+        );
+      }
+    } catch (error: any) {
+      console.warn(
+        `⚠️  Failed to link fiche to product: ${error.message}` +
+          `\n   Audit will proceed without product verification`
+      );
+    }
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 3. TRANSCRIPTION
@@ -272,7 +330,8 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
     timeline,
     timelineText,
     auditId,
-    ficheData.information.fiche_id
+    ficheData.information.fiche_id,
+    productInfo // Pass product database info to analyzer
   );
 
   // Enrich citations with recording metadata (date/time)

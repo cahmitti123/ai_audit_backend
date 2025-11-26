@@ -422,6 +422,34 @@ export const auditWebhooks = {
         partial_results: partialResults,
       }),
     }),
+
+  stepRerunStarted: (rerunId: string, auditId: string, stepPosition: number) =>
+    sendWebhook("audit.step_started", {
+      rerun_id: rerunId,
+      audit_id: auditId,
+      step_position: stepPosition,
+      started_at: new Date().toISOString(),
+      status: "rerunning",
+    }),
+
+  stepRerunCompleted: (
+    rerunId: string,
+    auditId: string,
+    stepPosition: number,
+    originalStep: any,
+    rerunStep: any,
+    comparison: any
+  ) =>
+    sendWebhook("audit.step_completed", {
+      rerun_id: rerunId,
+      audit_id: auditId,
+      step_position: stepPosition,
+      original: originalStep,
+      rerun: rerunStep,
+      comparison,
+      completed_at: new Date().toISOString(),
+      status: "rerun_completed",
+    }),
 };
 
 /**

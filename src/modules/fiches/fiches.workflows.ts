@@ -910,134 +910,165 @@ export const progressiveFetchContinueFunction = inngest.createFunction(
       const ficheIds: string[] = [...job.resultFicheIds];
       const failedDates: string[] = [];
 
-      // Fetch each remaining day
-      for (let i = 0; i < remainingDates.length; i++) {
-        const date = remainingDates[i];
+      // Process dates in parallel batches for better performance
+      const BATCH_SIZE = 3; // Process 3 dates concurrently
+      const WEBHOOK_FREQUENCY = 5; // Send progress webhook every 5 dates
 
-        await step.run(`fetch-day-${date}`, async () => {
-          try {
-            logger.info("Fetching day in background", {
-              jobId,
-              date,
-              progress: `${i + 1}/${remainingDates.length}`,
-            });
+      for (
+        let batchStart = 0;
+        batchStart < remainingDates.length;
+        batchStart += BATCH_SIZE
+      ) {
+        const batchDates = remainingDates.slice(
+          batchStart,
+          batchStart + BATCH_SIZE
+        );
 
-            // Check if already cached (deduplication)
-            const alreadyCached = await fichesRepository.hasDataForDate(date);
-            if (alreadyCached) {
-              logger.info("Day already cached, skipping", { jobId, date });
-              completedDays++;
-              return;
-            }
+        logger.info("Processing batch of dates", {
+          jobId,
+          batchSize: batchDates.length,
+          dates: batchDates,
+          progress: `${batchStart}/${remainingDates.length}`,
+        });
 
-            // Fetch from API
-            const salesData = await fichesApi.fetchSalesWithCalls(date, date);
-
-            logger.info("Day fetched from API", {
-              jobId,
-              date,
-              count: salesData.fiches.length,
-            });
-
-            // Cache all fiches with the salesDate they belong to
-            for (const fiche of salesData.fiches) {
-              // Skip fiches without cle (can't fetch details later)
-              if (!fiche.cle) {
-                logger.warn("Fiche missing cle, skipping", {
-                  fiche_id: fiche.id,
+        // Process batch dates in parallel
+        const batchResults = await Promise.allSettled(
+          batchDates.map(async (date) => {
+            return await step.run(`fetch-day-${date}`, async () => {
+              try {
+                logger.info("Fetching day in background", {
+                  jobId,
                   date,
+                  batchProgress: `${batchStart + 1}-${
+                    batchStart + batchDates.length
+                  }/${remainingDates.length}`,
                 });
-                continue;
-              }
 
-              await fichesCache.cacheFicheSalesSummary(
-                {
-                  id: fiche.id,
-                  cle: fiche.cle, // Store cle for later detail fetching
-                  nom: fiche.nom,
-                  prenom: fiche.prenom,
-                  email: fiche.email,
-                  telephone: fiche.telephone,
-                  recordings: fiche.recordings,
-                },
-                {
-                  lastRevalidatedAt: new Date(),
-                  salesDate: date, // Track which CRM sales date this fiche belongs to
-                }
-              );
-            }
-
-            totalFiches += salesData.fiches.length;
-            ficheIds.push(...salesData.fiches.map((f) => f.id));
-            completedDays++;
-
-            const progress = Math.round(
-              (completedDays / allDates.length) * 100
-            );
-
-            // Update job progress in database
-            await prisma.progressiveFetchJob.update({
-              where: { id: jobId },
-              data: {
-                completedDays,
-                progress,
-                totalFiches,
-                resultFicheIds: ficheIds,
-                datesAlreadyFetched: { push: date },
-                datesRemaining: remainingDates.slice(i + 1),
-              },
-            });
-
-            // Send progress webhook with partial data every day (for real-time updates)
-            if (webhookUrl) {
-              // Get current cached fiches for the entire range
-              const startOfRange = new Date(startDate);
-              startOfRange.setHours(0, 0, 0, 0);
-              const endOfRange = new Date(endDate);
-              endOfRange.setHours(23, 59, 59, 999);
-
-              const currentCachedData =
-                await fichesRepository.getFichesByDateRange(
-                  startOfRange,
-                  endOfRange
+                // Check if already cached (deduplication)
+                const alreadyCached = await fichesRepository.hasDataForDate(
+                  date
                 );
+                if (alreadyCached) {
+                  logger.info("Day already cached, skipping", { jobId, date });
+                  return {
+                    success: true,
+                    date,
+                    cached: true,
+                    fichesCount: 0,
+                    ficheIds: [],
+                  };
+                }
 
-              await fichesWebhooks.sendProgressWebhookWithData(
-                webhookUrl,
-                jobId,
-                {
-                  completedDays,
-                  totalDays: allDates.length,
-                  totalFiches,
-                  progress,
-                  currentFichesCount: currentCachedData.length,
-                  latestDate: date,
-                  fiches: currentCachedData.map((fc) => ({
-                    ficheId: fc.ficheId,
-                    groupe: fc.groupe,
-                    prospectNom: fc.prospectNom,
-                    prospectPrenom: fc.prospectPrenom,
-                    recordingsCount: fc.recordings.length,
-                    createdAt: fc.createdAt,
-                  })),
-                },
-                webhookSecret
-              );
-            }
+                // Fetch from API with retry
+                let salesData;
+                let retries = 0;
+                const MAX_RETRIES = 2;
 
-            logger.info("Day cached successfully", {
-              jobId,
-              date,
-              totalFiches,
-              progress,
+                while (retries <= MAX_RETRIES) {
+                  try {
+                    salesData = await fichesApi.fetchSalesWithCalls(date, date);
+                    break; // Success
+                  } catch (fetchError) {
+                    retries++;
+                    if (retries > MAX_RETRIES) {
+                      throw fetchError; // Give up after retries
+                    }
+                    logger.warn("Fetch failed, retrying", {
+                      jobId,
+                      date,
+                      attempt: retries,
+                      maxRetries: MAX_RETRIES,
+                      error: (fetchError as Error).message,
+                    });
+                    // Wait before retry (exponential backoff)
+                    await new Promise((resolve) =>
+                      setTimeout(resolve, 5000 * retries)
+                    );
+                  }
+                }
+
+                if (!salesData) {
+                  throw new Error("Failed to fetch sales data after retries");
+                }
+
+                logger.info("Day fetched from API", {
+                  jobId,
+                  date,
+                  count: salesData.fiches.length,
+                });
+
+                // Cache all fiches with the salesDate they belong to
+                const cachedFicheIds: string[] = [];
+                for (const fiche of salesData.fiches) {
+                  // Skip fiches without cle (can't fetch details later)
+                  if (!fiche.cle) {
+                    logger.warn("Fiche missing cle, skipping", {
+                      fiche_id: fiche.id,
+                      date,
+                    });
+                    continue;
+                  }
+
+                  await fichesCache.cacheFicheSalesSummary(
+                    {
+                      id: fiche.id,
+                      cle: fiche.cle, // Store cle for later detail fetching
+                      nom: fiche.nom,
+                      prenom: fiche.prenom,
+                      email: fiche.email,
+                      telephone: fiche.telephone,
+                      recordings: fiche.recordings,
+                    },
+                    {
+                      lastRevalidatedAt: new Date(),
+                      salesDate: date, // Track which CRM sales date this fiche belongs to
+                    }
+                  );
+                  cachedFicheIds.push(fiche.id);
+                }
+
+                logger.info("Day cached successfully", {
+                  jobId,
+                  date,
+                  fichesCount: salesData.fiches.length,
+                });
+
+                return {
+                  success: true,
+                  date,
+                  cached: false,
+                  fichesCount: salesData.fiches.length,
+                  ficheIds: cachedFicheIds,
+                };
+              } catch (error) {
+                const err = error as Error;
+                logger.error("Failed to fetch day", {
+                  jobId,
+                  date,
+                  error: err.message,
+                });
+
+                return {
+                  success: false,
+                  date,
+                  error: err.message,
+                };
+              }
             });
-          } catch (error) {
-            const err = error as Error;
-            logger.error("Failed to fetch day", {
-              jobId,
-              date,
-              error: err.message,
-            });
+          })
+        );
+
+        // Process batch results
+        for (let i = 0; i < batchResults.length; i++) {
+          const result = batchResults[i];
+          const date = batchDates[i];
+
+          if (result.status === "fulfilled" && result.value.success) {
+            completedDays++;
+            totalFiches += (result.value as { fichesCount: number })
+              .fichesCount;
+            ficheIds.push(...(result.value as { ficheIds: string[] }).ficheIds);
+          } else {
             failedDates.push(date);
 
             // Update job with failed date
@@ -1047,9 +1078,82 @@ export const progressiveFetchContinueFunction = inngest.createFunction(
                 datesFailed: { push: date },
               },
             });
-
-            // Continue with other days
           }
+        }
+
+        // Update job progress after each batch
+        const progress = Math.round((completedDays / allDates.length) * 100);
+        const completedDatesArray = allDates.slice(0, completedDays);
+        const remainingDatesArray = remainingDates.slice(
+          batchStart + BATCH_SIZE
+        );
+
+        await prisma.progressiveFetchJob.update({
+          where: { id: jobId },
+          data: {
+            completedDays,
+            progress,
+            totalFiches,
+            resultFicheIds: ficheIds,
+            datesAlreadyFetched: completedDatesArray,
+            datesRemaining: remainingDatesArray,
+          },
+        });
+
+        // Send progress webhook periodically (not every date)
+        const shouldSendWebhook =
+          webhookUrl &&
+          (completedDays % WEBHOOK_FREQUENCY === 0 ||
+            completedDays === allDates.length);
+
+        if (shouldSendWebhook) {
+          logger.info("Sending progress webhook", {
+            jobId,
+            completedDays,
+            totalDays: allDates.length,
+            progress,
+          });
+
+          // Get current cached fiches for the entire range
+          const startOfRange = new Date(startDate);
+          startOfRange.setHours(0, 0, 0, 0);
+          const endOfRange = new Date(endDate);
+          endOfRange.setHours(23, 59, 59, 999);
+
+          const currentCachedData = await fichesRepository.getFichesByDateRange(
+            startOfRange,
+            endOfRange
+          );
+
+          await fichesWebhooks.sendProgressWebhookWithData(
+            webhookUrl,
+            jobId,
+            {
+              completedDays,
+              totalDays: allDates.length,
+              totalFiches,
+              progress,
+              currentFichesCount: currentCachedData.length,
+              latestDate: batchDates[batchDates.length - 1],
+              fiches: currentCachedData.map((fc) => ({
+                ficheId: fc.ficheId,
+                groupe: fc.groupe,
+                prospectNom: fc.prospectNom,
+                prospectPrenom: fc.prospectPrenom,
+                recordingsCount: fc.recordings.length,
+                createdAt: fc.createdAt,
+              })),
+            },
+            webhookSecret
+          );
+        }
+
+        logger.info("Batch completed", {
+          jobId,
+          batchDates,
+          completedDays,
+          totalDays: allDates.length,
+          progress,
         });
       }
 

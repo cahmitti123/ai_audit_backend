@@ -92,7 +92,7 @@ export async function fetchSalesWithCalls(
     const response = await axios.get<SalesWithCallsResponse>(
       `${apiBase}/fiches/search/by-date-with-calls?${params}`,
       {
-        timeout: 300000, // 5 minutes - CRM can be slow
+        timeout: 120000, // 2 minutes - fail faster, workflow will retry
       }
     );
 

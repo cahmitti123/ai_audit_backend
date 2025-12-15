@@ -20,9 +20,94 @@ import type {
   ListAuditsFilters,
   RunAuditInput,
   AuditFunctionResult,
+  ReviewAuditStepResultInput,
+} from "./audits.schemas.js";
+import {
+  auditNiveauEnum,
+  auditStatusEnum,
+  stepConformeEnum,
+  stepNiveauConformiteEnum,
+  type AuditNiveau,
+  type AuditStatus,
+  type StepConforme,
+  type StepNiveauConformite,
 } from "./audits.schemas.js";
 import * as auditsRepository from "./audits.repository.js";
 import { logger } from "../../shared/logger.js";
+import { NotFoundError } from "../../shared/errors.js";
+import { COMPLIANCE_THRESHOLDS } from "../../shared/constants.js";
+
+type DbAuditStepResult = {
+  id: bigint;
+  auditId: bigint;
+  stepPosition: number;
+  stepName: string;
+  severityLevel: string;
+  isCritical: boolean;
+  weight: number;
+  traite: boolean;
+  conforme: string;
+  score: number;
+  niveauConformite: string;
+  commentaireGlobal: string;
+  motsClesTrouves: string[];
+  minutages: string[];
+  erreursTranscriptionTolerees: number;
+  totalCitations: number;
+  totalTokens: number;
+  createdAt: Date;
+};
+
+function toAuditStepResult(step: DbAuditStepResult) {
+  return {
+    id: step.id.toString(),
+    auditId: step.auditId.toString(),
+    stepPosition: step.stepPosition,
+    stepName: step.stepName,
+    severityLevel: step.severityLevel,
+    isCritical: step.isCritical,
+    weight: step.weight,
+    traite: step.traite,
+    conforme: toStepConforme(step.conforme),
+    score: step.score,
+    niveauConformite: toStepNiveauConformite(step.niveauConformite),
+    commentaireGlobal: step.commentaireGlobal,
+    motsClesTrouves: step.motsClesTrouves,
+    minutages: step.minutages,
+    erreursTranscriptionTolerees: step.erreursTranscriptionTolerees,
+    totalCitations: step.totalCitations,
+    totalTokens: step.totalTokens,
+    createdAt: step.createdAt,
+  };
+}
+
+function toAuditNiveau(value: string): AuditNiveau {
+  const parsed = auditNiveauEnum.safeParse(value);
+  if (parsed.success) return parsed.data;
+  logger.warn("Unknown audit niveau value from DB", { value });
+  return "INSUFFISANT";
+}
+
+function toAuditStatus(value: string): AuditStatus {
+  const parsed = auditStatusEnum.safeParse(value);
+  if (parsed.success) return parsed.data;
+  logger.warn("Unknown audit status value from DB", { value });
+  return "failed";
+}
+
+function toStepConforme(value: string): StepConforme {
+  const parsed = stepConformeEnum.safeParse(value);
+  if (parsed.success) return parsed.data;
+  logger.warn("Unknown step conforme value from DB", { value });
+  return "NON_CONFORME";
+}
+
+function toStepNiveauConformite(value: string): StepNiveauConformite {
+  const parsed = stepNiveauConformiteEnum.safeParse(value);
+  if (parsed.success) return parsed.data;
+  logger.warn("Unknown step niveauConformite value from DB", { value });
+  return "INSUFFISANT";
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AUDIT RETRIEVAL OPERATIONS
@@ -49,11 +134,11 @@ export async function getAuditById(
     auditConfigId: audit.auditConfigId.toString(),
     overallScore: audit.overallScore.toString(),
     scorePercentage: audit.scorePercentage.toString(),
-    niveau: audit.niveau as any,
+    niveau: toAuditNiveau(audit.niveau),
     isCompliant: audit.isCompliant,
     criticalPassed: audit.criticalPassed,
     criticalTotal: audit.criticalTotal,
-    status: audit.status as any,
+    status: toAuditStatus(audit.status),
     startedAt: audit.startedAt,
     completedAt: audit.completedAt,
     durationMs: audit.durationMs,
@@ -82,26 +167,7 @@ export async function getAuditById(
       prospectEmail: audit.ficheCache.prospectEmail,
       prospectTel: audit.ficheCache.prospectTel,
     },
-    stepResults: audit.stepResults.map((step) => ({
-      id: step.id.toString(),
-      auditId: step.auditId.toString(),
-      stepPosition: step.stepPosition,
-      stepName: step.stepName,
-      severityLevel: step.severityLevel,
-      isCritical: step.isCritical,
-      weight: step.weight,
-      traite: step.traite,
-      conforme: step.conforme as any,
-      score: step.score,
-      niveauConformite: step.niveauConformite as any,
-      commentaireGlobal: step.commentaireGlobal,
-      motsClesTrouves: step.motsClesTrouves,
-      minutages: step.minutages,
-      erreursTranscriptionTolerees: step.erreursTranscriptionTolerees,
-      totalCitations: step.totalCitations,
-      totalTokens: step.totalTokens,
-      createdAt: step.createdAt,
-    })),
+    stepResults: audit.stepResults.map((step) => toAuditStepResult(step)),
   };
 }
 
@@ -120,11 +186,11 @@ export async function getAuditsByFiche(
     auditConfigId: audit.auditConfigId.toString(),
     overallScore: audit.overallScore.toString(),
     scorePercentage: audit.scorePercentage.toString(),
-    niveau: audit.niveau as any,
+    niveau: toAuditNiveau(audit.niveau),
     isCompliant: audit.isCompliant,
     criticalPassed: audit.criticalPassed,
     criticalTotal: audit.criticalTotal,
-    status: audit.status as any,
+    status: toAuditStatus(audit.status),
     startedAt: audit.startedAt,
     completedAt: audit.completedAt,
     durationMs: audit.durationMs,
@@ -158,13 +224,7 @@ export async function listAudits(filters: ListAuditsFilters): Promise<{
     offset: number;
   };
 }> {
-  // Convert string IDs to BigInt for repository
-  const repositoryFilters = {
-    ...filters,
-    auditConfigIds: filters.auditConfigIds?.map((id) => BigInt(id)),
-  };
-
-  const result = await auditsRepository.listAudits(repositoryFilters as any);
+  const result = await auditsRepository.listAudits(filters);
 
   // Transform to API-friendly format
   const audits: AuditWithFiche[] = result.audits.map((audit) => ({
@@ -173,11 +233,11 @@ export async function listAudits(filters: ListAuditsFilters): Promise<{
     auditConfigId: audit.auditConfigId.toString(),
     overallScore: audit.overallScore.toString(),
     scorePercentage: audit.scorePercentage.toString(),
-    niveau: audit.niveau as any,
+    niveau: toAuditNiveau(audit.niveau),
     isCompliant: audit.isCompliant,
     criticalPassed: audit.criticalPassed,
     criticalTotal: audit.criticalTotal,
-    status: audit.status as any,
+    status: toAuditStatus(audit.status),
     startedAt: audit.startedAt,
     completedAt: audit.completedAt,
     durationMs: audit.durationMs,
@@ -215,6 +275,92 @@ export async function listAudits(filters: ListAuditsFilters): Promise<{
   };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// HUMAN REVIEW / OVERRIDES
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Apply a human review override to a single step result within an audit.
+ *
+ * This updates the DB step summary fields (so existing APIs reflect the override),
+ * while keeping an audit trail inside `rawResult.human_review`.
+ */
+export async function reviewAuditStepResult(
+  auditId: string | bigint,
+  stepPosition: number,
+  input: ReviewAuditStepResultInput
+) {
+  const id = typeof auditId === "string" ? BigInt(auditId) : auditId;
+
+  const updated = await auditsRepository.applyHumanReviewToAuditStepResult(
+    id,
+    stepPosition,
+    input
+  );
+
+  if (!updated) {
+    throw new NotFoundError(
+      "Audit step result",
+      `${id.toString()}:${stepPosition}`
+    );
+  }
+
+  // Recompute audit-level compliance summary so the audit reflects the human override too.
+  // This keeps list/detail endpoints consistent with reviewed step results.
+  const complianceInputs = await auditsRepository.getAuditComplianceInputs(id);
+  if (complianceInputs) {
+    const totalWeight = complianceInputs.stepResults.reduce(
+      (sum, s) => sum + Math.max(0, Number(s.weight)),
+      0
+    );
+    const earnedWeight = complianceInputs.stepResults.reduce((sum, s) => {
+      const maxWeight = Math.max(0, Number(s.weight));
+      const rawScore = Number(s.score);
+      const capped = Math.min(Math.max(0, rawScore), maxWeight);
+      return sum + capped;
+    }, 0);
+    const score = totalWeight > 0 ? (earnedWeight / totalWeight) * 100 : 0;
+
+    const criticalTotal = complianceInputs.stepResults.filter(
+      (s) => Boolean(s.isCritical)
+    ).length;
+    const criticalPassed = complianceInputs.stepResults.filter(
+      (s) => Boolean(s.isCritical) && s.conforme === "CONFORME"
+    ).length;
+
+    let niveau = "INSUFFISANT";
+    if (criticalPassed < criticalTotal) {
+      niveau = "REJET";
+    } else if (score >= COMPLIANCE_THRESHOLDS.EXCELLENT) {
+      niveau = "EXCELLENT";
+    } else if (score >= COMPLIANCE_THRESHOLDS.BON) {
+      niveau = "BON";
+    } else if (score >= COMPLIANCE_THRESHOLDS.ACCEPTABLE) {
+      niveau = "ACCEPTABLE";
+    }
+
+    try {
+      await auditsRepository.updateAuditComplianceSummary(id, {
+        scorePercentage: Number(score.toFixed(2)),
+        niveau,
+        isCompliant: niveau !== "REJET",
+        criticalPassed,
+        criticalTotal,
+      });
+    } catch (err) {
+      // Best-effort: do not block the step review write.
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logger.warn("Failed to update audit compliance after human review", {
+        audit_id: id.toString(),
+        step_position: stepPosition,
+        error: errorMessage,
+      });
+    }
+  }
+
+  return toAuditStepResult(updated);
+}
+
 /**
  * Get audits grouped by fiches with summary statistics
  * This function adds business logic for calculating summaries and sorting
@@ -227,16 +373,8 @@ export async function getAuditsGroupedByFiches(filters: ListAuditsFilters): Prom
     offset: number;
   };
 }> {
-  // Convert string IDs to BigInt for repository
-  const repositoryFilters = {
-    ...filters,
-    auditConfigIds: filters.auditConfigIds?.map((id) => BigInt(id)),
-  };
-
   // Get raw data from repository
-  const rawResult = await auditsRepository.getAuditsGroupedByFichesRaw(
-    repositoryFilters as any
-  );
+  const rawResult = await auditsRepository.getAuditsGroupedByFichesRaw(filters);
 
   // BUSINESS LOGIC: Calculate summaries and enrich data
   const fichesWithAudits: FicheWithAudits[] = rawResult.fiches.map((ficheData) => {
@@ -246,11 +384,11 @@ export async function getAuditsGroupedByFiches(filters: ListAuditsFilters): Prom
       auditConfigId: audit.auditConfigId.toString(),
       overallScore: audit.overallScore.toString(),
       scorePercentage: audit.scorePercentage.toString(),
-      niveau: audit.niveau as any,
+      niveau: toAuditNiveau(audit.niveau),
       isCompliant: audit.isCompliant,
       criticalPassed: audit.criticalPassed,
       criticalTotal: audit.criticalTotal,
-      status: audit.status as any,
+      status: toAuditStatus(audit.status),
       startedAt: audit.startedAt,
       completedAt: audit.completedAt,
       durationMs: audit.durationMs,
@@ -501,7 +639,7 @@ export async function getGlobalAuditStatistics(filters?: {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Check if a fiche has any audits
+ * Check if a fiche has existing audits
  */
 export async function hasAudits(ficheId: string): Promise<boolean> {
   const audits = await auditsRepository.getAuditsByFiche(ficheId, false);

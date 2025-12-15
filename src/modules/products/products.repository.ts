@@ -434,6 +434,53 @@ export async function findFormuleByNames(params: {
   gammeName: string;
   formuleName: string;
 }) {
+  const normalize = (s: string) =>
+    String(s || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const levenshtein = (a: string, b: string) => {
+    const s = a;
+    const t = b;
+    const n = s.length;
+    const m = t.length;
+    if (n === 0) return m;
+    if (m === 0) return n;
+
+    const dp = new Array<number>(m + 1);
+    for (let j = 0; j <= m; j++) dp[j] = j;
+
+    for (let i = 1; i <= n; i++) {
+      let prev = dp[0];
+      dp[0] = i;
+      for (let j = 1; j <= m; j++) {
+        const temp = dp[j];
+        const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+        dp[j] = Math.min(
+          dp[j] + 1, // deletion
+          dp[j - 1] + 1, // insertion
+          prev + cost // substitution
+        );
+        prev = temp;
+      }
+    }
+    return dp[m];
+  };
+
+  const similarity = (aRaw: string, bRaw: string) => {
+    const a = normalize(aRaw);
+    const b = normalize(bRaw);
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    if (a.includes(b) || b.includes(a)) return 0.92;
+    const dist = levenshtein(a, b);
+    return 1 - dist / Math.max(a.length, b.length);
+  };
+
   // Try exact match first
   const formule = await prisma.formule.findFirst({
     where: {
@@ -470,26 +517,138 @@ export async function findFormuleByNames(params: {
     },
   });
 
-  if (!formule) return null;
+  // Exact match found
+  if (formule) {
+    // Calculate counts
+    const garantiesCount = formule.garantiesParsed.length;
+    const categoriesCount = formule.garantiesParsed.reduce(
+      (sum, g) => sum + g.categories.length,
+      0
+    );
+    const itemsCount = formule.garantiesParsed.reduce((sum, g) => {
+      return sum + g.categories.reduce((cSum, c) => cSum + c.items.length, 0);
+    }, 0);
+    const documentsCount = formule.documents.length;
+
+    return {
+      ...formule,
+      _counts: {
+        garanties: garantiesCount,
+        categories: categoriesCount,
+        items: itemsCount,
+        documents: documentsCount,
+      },
+      _match: {
+        strategy: "exact",
+      },
+    };
+  }
+
+  // Fuzzy fallback (accent/punctuation tolerant) — prefer correct mapping over vector-store guesses.
+  // Strategy: pick best groupe -> gamme -> formule using string similarity, then fetch full formule details.
+  const inputGroupe = params.groupeName;
+  const inputGamme = params.gammeName;
+  const inputFormule = params.formuleName;
+
+  const groupes = await prisma.groupe.findMany({
+    select: { id: true, libelle: true, code: true },
+  });
+  const bestGroupe = groupes
+    .map((g) => ({
+      g,
+      score: similarity(g.libelle, inputGroupe),
+    }))
+    .sort((a, b) => b.score - a.score)[0];
+
+  if (!bestGroupe || bestGroupe.score < 0.6) return null;
+
+  const gammes = await prisma.gamme.findMany({
+    where: { groupeId: bestGroupe.g.id },
+    select: { id: true, libelle: true, code: true },
+  });
+  const bestGamme = gammes
+    .map((gm) => ({
+      gm,
+      score: similarity(gm.libelle, inputGamme),
+    }))
+    .sort((a, b) => b.score - a.score)[0];
+
+  if (!bestGamme || bestGamme.score < 0.6) return null;
+
+  const formules = await prisma.formule.findMany({
+    where: { gammeId: bestGamme.gm.id },
+    select: { id: true, libelle: true, libelleAlternatif: true },
+  });
+
+  const bestFormule = formules
+    .map((f) => {
+      const score = Math.max(
+        similarity(f.libelle, inputFormule),
+        f.libelleAlternatif ? similarity(f.libelleAlternatif, inputFormule) : 0
+      );
+      return { f, score };
+    })
+    .sort((a, b) => b.score - a.score)[0];
+
+  if (!bestFormule || bestFormule.score < 0.65) return null;
+
+  const fuzzy = await prisma.formule.findUnique({
+    where: { id: bestFormule.f.id },
+    include: {
+      gamme: {
+        include: {
+          groupe: true,
+        },
+      },
+      garantiesParsed: {
+        include: {
+          categories: {
+            include: {
+              items: {
+                orderBy: { displayOrder: "asc" },
+              },
+            },
+            orderBy: { displayOrder: "asc" },
+          },
+        },
+      },
+      documents: true,
+    },
+  });
+
+  if (!fuzzy) return null;
 
   // Calculate counts
-  const garantiesCount = formule.garantiesParsed.length;
-  const categoriesCount = formule.garantiesParsed.reduce(
+  const garantiesCount = fuzzy.garantiesParsed.length;
+  const categoriesCount = fuzzy.garantiesParsed.reduce(
     (sum, g) => sum + g.categories.length,
     0
   );
-  const itemsCount = formule.garantiesParsed.reduce((sum, g) => {
+  const itemsCount = fuzzy.garantiesParsed.reduce((sum, g) => {
     return sum + g.categories.reduce((cSum, c) => cSum + c.items.length, 0);
   }, 0);
-  const documentsCount = formule.documents.length;
+  const documentsCount = fuzzy.documents.length;
 
   return {
-    ...formule,
+    ...fuzzy,
     _counts: {
       garanties: garantiesCount,
       categories: categoriesCount,
       items: itemsCount,
       documents: documentsCount,
+    },
+    _match: {
+      strategy: "fuzzy",
+      scores: {
+        groupe: bestGroupe.score,
+        gamme: bestGamme.score,
+        formule: bestFormule.score,
+      },
+      picked: {
+        groupe: bestGroupe.g.libelle,
+        gamme: bestGamme.gm.libelle,
+        formule: fuzzy.libelle,
+      },
     },
   };
 }

@@ -154,20 +154,20 @@ export interface FicheDetailsResponse {
   message: string;
   
   // Fiche information
-  information: any;
-  prospect: any;
-  conjoint: any;
-  enfants: any[];
-  mails: any[];
-  rendez_vous: any[];
-  commentaires: any[];
-  elements_souscription: any;
-  tarification: any[];
-  reclamations: any[];
-  autres_contrats: any[];
-  documents: any[];
-  alertes: any[];
-  recordings: any[];
+  information: unknown;
+  prospect: unknown;
+  conjoint: unknown;
+  enfants: unknown[];
+  mails: unknown[];
+  rendez_vous: unknown[];
+  commentaires: unknown[];
+  elements_souscription: unknown;
+  tarification: unknown[];
+  reclamations: unknown[];
+  autres_contrats: unknown[];
+  documents: unknown[];
+  alertes: unknown[];
+  recordings: unknown[];
   raw_sections: Record<string, string>;
   
   // ⭐ NEW - Optional Mail Devis field
@@ -235,7 +235,7 @@ export function getDocumentsList(documents: Documents): DocumentItem[] {
       url: documents.exemples_remboursements,
       icon: '💰',
     },
-  ].filter((doc) => doc.url !== null) as DocumentItem[];
+  ].filter((doc) => doc.url !== null);
 }
 
 /**

@@ -19,7 +19,9 @@ import {
 } from "./fiches.schemas.js";
 
 const baseUrl =
-  process.env.FICHE_API_BASE_URL || "https://api.devis-mutuelle-pas-cher.com";
+  process.env.FICHE_API_BASE_URL ||
+  process.env.FICHE_API_URL ||
+  "https://api.devis-mutuelle-pas-cher.com";
 const apiBase = `${baseUrl}/api`;
 
 /**
@@ -56,7 +58,7 @@ export async function fetchSalesWithCalls(
   }
 ): Promise<SalesWithCallsResponse> {
   // DEFAULT to FALSE - recordings fetched only on fiche details request
-  const includeRecordings = options?.includeRecordings ?? false;
+  const includeRecordings = options?.includeRecordings ?? true;
 
   // Convert startDate from YYYY-MM-DD to DD/MM/YYYY for CRM API
   // NOTE: CRM API only accepts single date, not ranges!

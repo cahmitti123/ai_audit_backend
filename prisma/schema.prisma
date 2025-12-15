@@ -116,6 +116,7 @@ model Recording {
     durationSeconds   Int?      @map("duration_seconds")
     transcriptionId   String?   @map("transcription_id")
     transcriptionText String?   @map("transcription_text") @db.Text
+    transcriptionData Json?     @map("transcription_data")
     hasTranscription  Boolean   @default(false) @map("has_transcription")
     transcribedAt     DateTime? @map("transcribed_at")
     createdAt         DateTime  @default(now()) @map("created_at")
@@ -193,10 +194,14 @@ model AuditStepResult {
     erreursTranscriptionTolerees Int      @default(0) @map("erreurs_transcription_tolerees")
     totalCitations               Int      @default(0) @map("total_citations")
     totalTokens                  Int      @default(0) @map("total_tokens")
+    // Full step JSON (LLM output) so we can aggregate/finalize audits across replicas.
+    // This is written by per-step workers and then overwritten with the final (enriched + gated) step at audit finalization.
+    rawResult Json? @map("raw_result")
     createdAt                    DateTime @default(now()) @map("created_at")
 
     @@index([auditId])
     @@index([stepPosition])
+    @@unique([auditId, stepPosition])
     @@index([conforme])
     @@map("audit_step_results")
 }

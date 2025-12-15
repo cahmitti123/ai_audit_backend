@@ -12,17 +12,41 @@
 
 import { logger } from "../../shared/logger.js";
 import { CACHE_EXPIRATION_HOURS } from "../../shared/constants.js";
-import { enrichRecording } from "../../utils/recording-parser.js";
+import { enrichRecording, type RecordingLike } from "../../utils/recording-parser.js";
 import type { FicheDetailsResponse } from "./fiches.schemas.js";
 import * as fichesRepository from "./fiches.repository.js";
 import * as fichesApi from "./fiches.api.js";
 import { prisma } from "../../shared/prisma.js";
+import type { Prisma } from "@prisma/client";
+import { ValidationError } from "../../shared/errors.js";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
+  const json: unknown = JSON.parse(JSON.stringify(value));
+  return json as Prisma.InputJsonValue;
+}
+
+function getCleFromRawData(rawData: Record<string, unknown>): string | null {
+  const cle = rawData.cle;
+  if (typeof cle === "string" && cle) return cle;
+  const info = rawData.information;
+  if (isRecord(info)) {
+    const cle2 = info.cle;
+    if (typeof cle2 === "string" && cle2) return cle2;
+  }
+  return null;
+}
 
 /**
  * Get fiche with auto-caching
  * Checks cache first, fetches from API if expired/missing
  */
-export async function getFicheWithCache(ficheId: string) {
+export async function getFicheWithCache(
+  ficheId: string
+): Promise<FicheDetailsResponse> {
   logger.info("Getting fiche with cache", {
     fiche_id: ficheId,
   });
@@ -30,32 +54,52 @@ export async function getFicheWithCache(ficheId: string) {
   // Check cache
   const cached = await fichesRepository.getCachedFiche(ficheId);
 
-  if (cached && cached.expiresAt > new Date()) {
-    const rawData = cached.rawData as any;
+  if (cached) {
+    const rawData = cached.rawData;
+    const isExpired = cached.expiresAt <= new Date();
 
-    // Check if we only have sales list data (minimal)
-    if (rawData._salesListOnly) {
-      logger.info("Cache has only sales list data, fetching full details", {
-        fiche_id: ficheId,
-      });
-
-      // Extract cle from cached data
-      const cle = rawData.cle;
-
-      if (!cle) {
-        logger.error("No cle found in cached data", {
+    // If cache is minimal (sales list only) OR expired, we can still refresh using `cle`
+    // from cached rawData. Expiration is a "freshness" hint, not a hard requirement.
+    if (rawData._salesListOnly === true || isExpired) {
+      logger.info(
+        rawData._salesListOnly === true
+          ? "Cache has only sales list data, fetching full details"
+          : "Cache expired, refreshing fiche details",
+        {
           fiche_id: ficheId,
-        });
-        throw new Error(
+          cache_id: cached.id.toString(),
+          expired: isExpired,
+          sales_list_only: rawData._salesListOnly === true,
+          expires_at: cached.expiresAt?.toISOString?.() || String(cached.expiresAt),
+        }
+      );
+
+      const cle = getCleFromRawData(rawData);
+      if (!cle) {
+        logger.error("No cle found in cached data", { fiche_id: ficheId });
+
+        // If we have full details but no cle, return stale cached data rather than failing.
+        if (rawData._salesListOnly !== true) {
+          return cached.rawData as unknown as FicheDetailsResponse;
+        }
+
+        throw new ValidationError(
           `Cannot fetch fiche ${ficheId}: missing cle parameter in cached data`
         );
       }
 
-      // Fetch and cache full details with cle
       const ficheData = await fichesApi.fetchFicheDetails(ficheId, cle);
-      await cacheFicheDetails(ficheData, {
-        salesDate: cached.salesDate || undefined,
-      });
+
+      // Best-effort cache write: even if DB is temporarily unavailable,
+      // return the fetched fiche details to the caller.
+      try {
+        await cacheFicheDetails(ficheData, { salesDate: cached.salesDate || undefined });
+      } catch (err) {
+        logger.error("Failed to persist refreshed fiche to cache; returning data anyway", {
+          fiche_id: ficheId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
 
       return ficheData;
     }
@@ -65,13 +109,13 @@ export async function getFicheWithCache(ficheId: string) {
       cache_id: cached.id.toString(),
       recordings_count: cached.recordingsCount,
     });
-    return cached.rawData;
+    return cached.rawData as unknown as FicheDetailsResponse;
   }
 
   logger.info("Cache miss, fetching from API", { fiche_id: ficheId });
 
   // Cannot fetch without cle - fiches should come from sales list first
-  throw new Error(
+  throw new ValidationError(
     `Fiche ${ficheId} not found in cache. Fetch via date range endpoint first to get cle.`
   );
 }
@@ -89,14 +133,16 @@ export async function refreshFicheFromApi(ficheId: string) {
   const cached = await fichesRepository.getCachedFiche(ficheId);
 
   if (!cached) {
-    throw new Error(`Cannot refresh fiche ${ficheId}: not in cache`);
+    throw new ValidationError(`Cannot refresh fiche ${ficheId}: not in cache`);
   }
 
-  const rawData = cached.rawData as any;
-  const cle = rawData.cle || rawData.information?.cle;
+  const rawData = cached.rawData;
+  const cle = getCleFromRawData(rawData);
 
   if (!cle) {
-    throw new Error(`Cannot refresh fiche ${ficheId}: missing cle parameter`);
+    throw new ValidationError(
+      `Cannot refresh fiche ${ficheId}: missing cle parameter`
+    );
   }
 
   // Always fetch from API with cle
@@ -185,7 +231,7 @@ export async function cacheFicheDetails(
     await prisma.ficheCache.update({
       where: { id: ficheCache.id },
       data: {
-        rawData: ficheData as any,
+        rawData: toPrismaJsonValue(ficheData),
       },
     });
   }
@@ -211,7 +257,11 @@ export async function cacheFicheSalesSummary(
     prenom: string;
     email: string;
     telephone: string;
-    recordings?: unknown[];
+    telephone_2?: string | null;
+    statut?: string | null;
+    date_insertion?: string | null;
+    date_modification?: string | null;
+    recordings?: RecordingLike[];
   },
   options?: {
     expirationHours?: number;
@@ -243,11 +293,11 @@ export async function cacheFicheSalesSummary(
       nom: ficheData.nom,
       prenom: ficheData.prenom,
       telephone: ficheData.telephone,
-      telephone_2: (ficheData as any).telephone_2 || null,
+      telephone_2: ficheData.telephone_2 ?? null,
       email: ficheData.email,
-      statut: (ficheData as any).statut || null,
-      date_insertion: (ficheData as any).date_insertion || null,
-      date_modification: (ficheData as any).date_modification || null,
+      statut: ficheData.statut ?? null,
+      date_insertion: ficheData.date_insertion ?? null,
+      date_modification: ficheData.date_modification ?? null,
       recordings: enrichedRecordings,
       _salesListOnly: true, // Flag to indicate this is minimal data (no full details yet)
     },

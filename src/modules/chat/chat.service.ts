@@ -7,10 +7,10 @@
 import { openai } from "@ai-sdk/openai";
 import { streamText } from "ai";
 import { prisma } from "../../shared/prisma.js";
+import { logger } from "../../shared/logger.js";
 import { getCachedFiche } from "../fiches/fiches.repository.js";
 import { getAuditById } from "../audits/audits.repository.js";
 import { getRecordingsByFiche } from "../recordings/recordings.repository.js";
-import { readFileSync, existsSync } from "fs";
 import { generateTimeline } from "../audits/audits.timeline.js";
 import { buildTimelineText } from "../audits/audits.prompts.js";
 import type {
@@ -19,20 +19,51 @@ import type {
   ChatCitation,
 } from "../../schemas.js";
 
-const TRANSCRIPTION_CACHE_FILE = "./data/transcription_cache.json";
+const DEFAULT_CHAT_MODEL =
+  process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || "gpt-5.2";
+const DEFAULT_CHAT_TEMPERATURE = Number(process.env.OPENAI_TEMPERATURE_CHAT || 0);
+const DEFAULT_CHAT_MAX_TOKENS = Number(process.env.OPENAI_MAX_TOKENS_CHAT || 3000);
+
+type DbRecording = Awaited<ReturnType<typeof getRecordingsByFiche>>[number];
+
+function normalizeForMatch(s: string): string {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 /**
- * Load transcription from file cache
+ * Build synthetic word-level timing when only plain text is available.
  */
-function loadTranscriptionCache(): Record<string, Transcription> {
-  if (!existsSync(TRANSCRIPTION_CACHE_FILE)) {
-    return {};
-  }
-  try {
-    return JSON.parse(readFileSync(TRANSCRIPTION_CACHE_FILE, "utf-8"));
-  } catch {
-    return {};
-  }
+function synthesizeWordsFromText(
+  text: string,
+  durationSeconds?: number
+): Transcription["transcription"]["words"] {
+  const words = text
+    .split(/\s+/)
+    .map((w) => w.trim())
+    .filter(Boolean);
+
+  const dur =
+    typeof durationSeconds === "number" && durationSeconds > 0
+      ? durationSeconds
+      : Math.max(1, Math.round(words.length * 0.5));
+  const wordDur = Math.max(0.05, dur / Math.max(1, words.length));
+
+  return words.map((word, idx) => ({
+    text: word,
+    start: idx * wordDur,
+    end: (idx + 1) * wordDur,
+    type: "word",
+    // Use the same shape ElevenLabs diarization commonly produces
+    speaker_id: idx % 20 < 10 ? "speaker_0" : "speaker_1",
+  }));
 }
 
 /**
@@ -67,6 +98,125 @@ function parseRecordingMetadata(filename: string): {
   }
 
   return null;
+}
+
+function toTranscriptionWord(
+  value: unknown
+): Transcription["transcription"]["words"][number] | null {
+  if (!isRecord(value)) return null;
+
+  const text = value.text;
+  const start = value.start;
+  const end = value.end;
+  const type = value.type;
+
+  if (
+    typeof text !== "string" ||
+    typeof start !== "number" ||
+    typeof end !== "number" ||
+    typeof type !== "string"
+  ) {
+    return null;
+  }
+
+  const speaker_id =
+    typeof value.speaker_id === "string" ? value.speaker_id : undefined;
+  const logprob = typeof value.logprob === "number" ? value.logprob : undefined;
+
+  return { text, start, end, type, speaker_id, logprob };
+}
+
+function toTranscriptionPayload(
+  payload: unknown
+): Transcription["transcription"] | null {
+  if (!isRecord(payload)) return null;
+
+  const wordsRaw = payload.words;
+  if (!Array.isArray(wordsRaw) || wordsRaw.length === 0) return null;
+
+  const words = wordsRaw
+    .map(toTranscriptionWord)
+    .filter(
+      (w): w is Transcription["transcription"]["words"][number] => w !== null
+    );
+  if (words.length === 0) return null;
+
+  const textFromPayload = payload.text;
+  const text =
+    typeof textFromPayload === "string" && textFromPayload.trim().length > 0
+      ? textFromPayload
+      : words.map((w) => w.text).join(" ");
+
+  const language_code =
+    typeof payload.language_code === "string" ? payload.language_code : undefined;
+  const language_probability =
+    typeof payload.language_probability === "number"
+      ? payload.language_probability
+      : undefined;
+
+  return { text, language_code, language_probability, words };
+}
+
+function buildParsedMetadata(rec: DbRecording): {
+  date?: string;
+  time?: string;
+  from_number?: string;
+  to_number?: string;
+} {
+  const url = rec.recordingUrl || "";
+  const filename = url.split("/").pop() || "";
+  const fallback = filename ? parseRecordingMetadata(filename) : null;
+
+  return {
+    date: rec.recordingDate ?? fallback?.date,
+    time: rec.recordingTime ?? fallback?.time,
+    from_number: rec.fromNumber ?? fallback?.from_number,
+    to_number: rec.toNumber ?? fallback?.to_number,
+  };
+}
+
+function buildTranscriptionsFromRecordings(
+  recordings: DbRecording[]
+): Transcription[] {
+  const transcriptions: Transcription[] = [];
+
+  for (const rec of recordings) {
+    if (!rec.hasTranscription || !rec.recordingUrl) continue;
+
+    const parsed = buildParsedMetadata(rec);
+
+    let transcriptionData: Transcription["transcription"] | null =
+      toTranscriptionPayload(rec.transcriptionData as unknown);
+
+    if (!transcriptionData) {
+      const text = rec.transcriptionText;
+      if (typeof text === "string" && text.trim().length > 0) {
+        transcriptionData = {
+          text,
+          language_code: "fr",
+          words: synthesizeWordsFromText(text, rec.durationSeconds ?? 0),
+        };
+      }
+    }
+
+    if (!transcriptionData) continue;
+
+    transcriptions.push({
+      recording_url: rec.recordingUrl,
+      transcription_id: rec.transcriptionId ?? undefined,
+      call_id: rec.callId,
+      recording: {
+        recording_url: rec.recordingUrl,
+        call_id: rec.callId,
+        start_time: rec.startTime?.toISOString(),
+        duration_seconds: rec.durationSeconds ?? 0,
+        parsed,
+      },
+      transcription: transcriptionData,
+    });
+  }
+
+  return transcriptions;
 }
 
 interface AuditContextResult {
@@ -112,34 +262,8 @@ export async function buildAuditContext(
     };
   };
 
-  // Load transcriptions from file cache
-  const transcriptionCache = loadTranscriptionCache();
-  const transcriptions: Transcription[] = [];
-
-  for (const rec of recordings) {
-    if (rec.hasTranscription && rec.recordingUrl) {
-      const cachedTranscription = transcriptionCache[rec.recordingUrl];
-      if (cachedTranscription) {
-        // Parse recording metadata from filename
-        const urlParts = rec.recordingUrl.split("/");
-        const filename = urlParts[urlParts.length - 1];
-        const parsed = parseRecordingMetadata(filename);
-
-        transcriptions.push({
-          recording_url: rec.recordingUrl,
-          transcription_id: rec.transcriptionId || undefined,
-          call_id: rec.callId,
-          recording: {
-            ...rec,
-            recording_url: rec.recordingUrl,
-            call_id: rec.callId,
-            parsed,
-          },
-          transcription: cachedTranscription.transcription,
-        });
-      }
-    }
-  }
+  // DB-only (multi-replica safe)
+  const transcriptions = buildTranscriptionsFromRecordings(recordings);
 
   // Generate timeline
   const timeline = generateTimeline(transcriptions);
@@ -203,7 +327,12 @@ Extract all metadata EXACTLY from the timeline above:
 
 Answer questions about this audit's findings, scores, compliance issues, and what was discussed in the calls.
 Use the transcription text to provide specific details about conversations.
-ALWAYS include citations when referencing specific moments.`,
+ALWAYS include citations when referencing specific moments.
+
+**ANTI-HALLUCINATION RULES (non-negotiable):**
+- Use ONLY the audit data + timeline above. If it's not present, say you can't find it.
+- Never guess names, numbers, products, dates, or outcomes.
+- Never invent a citation. If you can't quote exact text from the timeline, do not add a [CITATION:{...}].`,
     timeline,
   };
 }
@@ -236,34 +365,8 @@ export async function buildFicheContext(
     information?: { groupe?: string };
   };
 
-  // Load transcriptions from file cache
-  const transcriptionCache = loadTranscriptionCache();
-  const transcriptions: Transcription[] = [];
-
-  for (const rec of recordings) {
-    if (rec.hasTranscription && rec.recordingUrl) {
-      const cachedTranscription = transcriptionCache[rec.recordingUrl];
-      if (cachedTranscription) {
-        // Parse recording metadata from filename
-        const urlParts = rec.recordingUrl.split("/");
-        const filename = urlParts[urlParts.length - 1];
-        const parsed = parseRecordingMetadata(filename);
-
-        transcriptions.push({
-          recording_url: rec.recordingUrl,
-          transcription_id: rec.transcriptionId || undefined,
-          call_id: rec.callId,
-          recording: {
-            ...rec,
-            recording_url: rec.recordingUrl,
-            call_id: rec.callId,
-            parsed,
-          },
-          transcription: cachedTranscription.transcription,
-        });
-      }
-    }
-  }
+  // DB-only (multi-replica safe)
+  const transcriptions = buildTranscriptionsFromRecordings(recordings);
 
   // Generate timeline
   const timeline = generateTimeline(transcriptions);
@@ -335,7 +438,12 @@ Extract all metadata EXACTLY from the timeline above:
 
 Answer questions about this fiche, its audits, transcriptions, and what was discussed in the calls.
 Compare audits if multiple exist. Use transcription text to provide specific details about conversations.
-ALWAYS include citations when referencing specific moments.`,
+ALWAYS include citations when referencing specific moments.
+
+**ANTI-HALLUCINATION RULES (non-negotiable):**
+- Use ONLY the fiche/audit data + timeline above. If it's not present, say you can't find it.
+- Never guess names, numbers, products, dates, or outcomes.
+- Never invent a citation. If you can't quote exact text from the timeline, do not add a [CITATION:{...}].`,
     timeline,
   };
 }
@@ -349,7 +457,7 @@ export function extractCitations(
 ): ChatCitation[] {
   const citations: ChatCitation[] = [];
   const citationRegex = /\[CITATION:(\{[^}]+\})\]/g;
-  let match;
+  let match: RegExpExecArray | null;
 
   // Create lookup map for recordings
   const timelineMap = new Map(
@@ -362,19 +470,28 @@ export function extractCitations(
 
       // Enrich with recording URL from timeline
       const recordingMeta = timelineMap.get(citationData.recording_index);
-      if (recordingMeta) {
-        citationData.recording_url = recordingMeta.recording_url || "N/A";
-        citationData.recording_date = recordingMeta.recording_date || "N/A";
-        citationData.recording_time = recordingMeta.recording_time || "N/A";
-      } else {
-        citationData.recording_url = "N/A";
-        citationData.recording_date = "N/A";
-        citationData.recording_time = "N/A";
-      }
+      if (!recordingMeta) continue;
+
+      const chunkIndex = Number(citationData.chunk_index);
+      if (!Number.isInteger(chunkIndex)) continue;
+      if (chunkIndex < 0 || chunkIndex >= recordingMeta.chunks.length) continue;
+
+      // Verify quoted text appears in the referenced chunk to avoid hallucinated citations.
+      const quoted = normalizeForMatch(citationData.texte);
+      const chunkText = normalizeForMatch(recordingMeta.chunks[chunkIndex]?.full_text);
+      if (!quoted || !chunkText || !chunkText.includes(quoted)) continue;
+
+      citationData.recording_url = recordingMeta.recording_url || "N/A";
+      citationData.recording_date = recordingMeta.recording_date || "N/A";
+      citationData.recording_time = recordingMeta.recording_time || "N/A";
 
       citations.push(citationData as ChatCitation);
     } catch (error) {
-      console.error("Failed to parse citation:", match[1], error);
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn("Failed to parse citation", {
+        citation: match[1],
+        error: message,
+      });
     }
   }
 
@@ -404,7 +521,7 @@ export async function createChatStream(
   timeline: TimelineRecording[]
 ): Promise<ChatStreamResult> {
   const result = await streamText({
-    model: openai("gpt-4o"),
+    model: openai.responses(DEFAULT_CHAT_MODEL),
     system: systemPrompt,
     messages: [
       ...messages.map((m) => ({
@@ -413,8 +530,14 @@ export async function createChatStream(
       })),
       { role: "user" as const, content: userMessage },
     ],
-    temperature: 0.7,
-    maxTokens: 3000,
+    temperature: DEFAULT_CHAT_TEMPERATURE,
+    maxTokens: DEFAULT_CHAT_MAX_TOKENS,
+    providerOptions: {
+      openai: {
+        reasoningEffort: "medium",
+        textVerbosity: "low",
+      },
+    },
   });
 
   // Collect full response and extract citations

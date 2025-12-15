@@ -7,58 +7,53 @@
  * Solution: Recursively convert all BigInt values to strings
  */
 
+import type { Response } from "express";
+
 /**
- * Recursively serialize BigInt values to strings in any object/array
+ * Recursively serialize BigInt values to strings in arbitrary object/array values
  */
-export function serializeBigInt(obj: any): any {
-  if (obj === null || obj === undefined) {
-    return obj;
-  }
+export function serializeBigInt(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
 
   // Handle BigInt primitive
-  if (typeof obj === 'bigint') {
-    return String(obj);
-  }
+  if (typeof value === "bigint") return String(value);
 
-  // Handle Date objects
-  if (obj instanceof Date) {
-    return obj;
-  }
+  // Keep Date objects intact (Express will serialize via toJSON)
+  if (value instanceof Date) return value;
 
   // Handle Arrays
-  if (Array.isArray(obj)) {
-    return obj.map(item => serializeBigInt(item));
-  }
+  if (Array.isArray(value)) return value.map((item) => serializeBigInt(item));
 
-  // Handle Objects
-  if (typeof obj === 'object') {
-    const result: any = {};
-    for (const key in obj) {
-      if (obj.hasOwnProperty(key)) {
-        result[key] = serializeBigInt(obj[key]);
-      }
+  // Handle Objects (plain or otherwise; only enumerable own props are serialized)
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(obj)) {
+      result[key] = serializeBigInt(val);
     }
     return result;
   }
 
-  // Primitive types (string, number, boolean)
-  return obj;
+  // Primitive types (string, number, boolean, symbol, function)
+  return value;
 }
 
 /**
  * Safe JSON.stringify that handles BigInt
  */
-export function stringifyWithBigInt(obj: any, space?: number): string {
-  return JSON.stringify(obj, (key, value) => 
-    typeof value === 'bigint' ? String(value) : value
-  , space);
+export function stringifyWithBigInt(value: unknown, space?: number): string {
+  return JSON.stringify(
+    value,
+    (_key, v) => (typeof v === "bigint" ? String(v) : v),
+    space
+  );
 }
 
 /**
  * Safe res.json() that handles BigInt
  * Use this instead of res.json() in Express routes
  */
-export function jsonResponse(res: any, data: any, statusCode: number = 200) {
+export function jsonResponse(res: Response, data: unknown, statusCode = 200) {
   const serialized = serializeBigInt(data);
   return res.status(statusCode).json(serialized);
 }
@@ -67,16 +62,14 @@ export function jsonResponse(res: any, data: any, statusCode: number = 200) {
  * Serialize Prisma model with BigInt fields
  * Handles common patterns in our schemas
  */
-export function serializePrismaModel(model: any): any {
-  if (!model) return model;
-  
+export function serializePrismaModel(model: unknown): unknown {
   return serializeBigInt(model);
 }
 
 /**
  * Batch serialize multiple models
  */
-export function serializePrismaModels(models: any[]): any[] {
-  return models.map(model => serializePrismaModel(model));
+export function serializePrismaModels(models: readonly unknown[]): unknown[] {
+  return models.map((model) => serializePrismaModel(model));
 }
 

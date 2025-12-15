@@ -1,0 +1,37 @@
+# AI Audit (docker compose) - systemd unit (example)
+#
+# Copy to: /etc/systemd/system/ai-audit.service
+# Then edit:
+#   - WorkingDirectory
+#   - Env file path
+#   - Scale count (optional)
+#
+# Enable/start:
+#   systemctl daemon-reload
+#   systemctl enable --now ai-audit
+#
+# Logs:
+#   journalctl -u ai-audit -f
+#
+
+[Unit]
+Description=AI Audit (Docker Compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/ai-audit
+
+# Start/stop the stack (no --build on boot; build during your deploy step)
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.scale.yml --env-file .env.production up -d --remove-orphans --scale server=1
+ExecStop=/usr/bin/docker compose -f docker-compose.prod.scale.yml --env-file .env.production down
+
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+
+

@@ -9,7 +9,6 @@ import { NonRetriableError } from "inngest";
 import { getCachedFiche } from "../fiches/fiches.repository.js";
 import { getFicheTranscriptionStatus } from "../transcriptions/transcriptions.service.js";
 import { isFullyTranscribed } from "../transcriptions/transcriptions.types.js";
-import { runAudit } from "./audits.service.js";
 import { fetchFicheFunction } from "../fiches/fiches.workflows.js";
 import { transcribeFicheFunction } from "../transcriptions/transcriptions.workflows.js";
 import type {
@@ -21,19 +20,437 @@ import {
   TIMEOUTS,
   DEFAULT_AUDIT_CONFIG_ID,
 } from "../../shared/constants.js";
+import {
+  getInngestGlobalConcurrency,
+  getInngestParallelismPerServer,
+} from "../../shared/inngest-concurrency.js";
 import { auditWebhooks, batchWebhooks } from "../../shared/webhook.js";
+import { logger as appLogger } from "../../shared/logger.js";
 import {
   logPayloadSize,
   getPayloadSize,
   formatBytes,
   PAYLOAD_LIMITS,
 } from "../../utils/payload-size.js";
+import { getRedisClient } from "../../shared/redis.js";
+import type { Prisma } from "@prisma/client";
+import type { FicheDetailsResponse } from "../fiches/fiches.schemas.js";
+import type {
+  ControlPoint,
+  TimelineRecording,
+  Transcription,
+  TranscriptionWord,
+} from "../../schemas.js";
+import type {
+  AuditConfigForAnalysis,
+  AuditSeverityLevel,
+  AuditStepDefinition,
+  ProductLinkResult,
+} from "./audits.types.js";
+import type { analyzeStep as analyzeStepFn } from "./audits.analyzer.js";
+import type { AnalyzedAuditStepResult } from "./audits.evidence.js";
+
+type AnalyzeStepResult = Awaited<ReturnType<typeof analyzeStepFn>>;
+
+const DEFAULT_GLOBAL_CONCURRENCY = getInngestGlobalConcurrency();
+const DEFAULT_PER_ENTITY_CONCURRENCY = getInngestParallelismPerServer();
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function getAuditRunFailureMeta(event: unknown): {
+  fiche_id: string;
+  audit_config_id: number;
+} {
+  const data =
+    isRecord(event) && isRecord(event.data) ? (event.data as Record<string, unknown>) : null;
+
+  const ficheRaw = data?.fiche_id;
+  const auditConfigRaw = data?.audit_config_id;
+
+  const fiche_id = typeof ficheRaw === "string" && ficheRaw ? ficheRaw : "unknown";
+  const audit_config_id =
+    typeof auditConfigRaw === "number"
+      ? auditConfigRaw
+      : Number.parseInt(String(auditConfigRaw ?? 0), 10) || 0;
+
+  return { fiche_id, audit_config_id };
+}
+
+function hasWordsArray(value: unknown): value is { words: unknown[] } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as { words?: unknown }).words)
+  );
+}
+
+function getRawCallId(value: unknown): string | null {
+  if (!isRecord(value)) return null;
+  const call_id = value.call_id;
+  if (typeof call_id === "string" && call_id) return call_id;
+  const callId = value.callId;
+  if (typeof callId === "string" && callId) return callId;
+  return null;
+}
+
+function getAuditDbIdFromEvent(event: unknown): bigint | null {
+  const data =
+    isRecord(event) && isRecord(event.data) ? (event.data as Record<string, unknown>) : null;
+  const raw = data?.audit_db_id;
+
+  if (typeof raw === "bigint") return raw;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    try {
+      return BigInt(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw === "string" && raw) {
+    try {
+      return BigInt(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function safeJsonParse(value: string): unknown {
+  // JSON.parse returns `any` in lib.dom typings; immediately narrow to `unknown`.
+  return JSON.parse(value) as unknown;
+}
+
+function toNumberOr(value: unknown, fallback: number): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function toIntOr(value: unknown, fallback: number): number {
+  const n = toNumberOr(value, fallback);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+function getRawRecordingsFromFicheRawData(rawData: unknown): unknown[] {
+  if (!isRecord(rawData)) return [];
+  const recordings = rawData.recordings;
+  return Array.isArray(recordings) ? recordings : [];
+}
+
+function normalizeTimelineRecordings(value: unknown): TimelineRecording[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.map((rec, recIdx): TimelineRecording => {
+    const r = isRecord(rec) ? rec : {};
+    const chunksRaw = Array.isArray(r.chunks) ? r.chunks : [];
+
+    const chunks = chunksRaw.map((chunk, chunkIdx) => {
+      const c = isRecord(chunk) ? chunk : {};
+      const speakersRaw = c.speakers;
+      const speakers = Array.isArray(speakersRaw)
+        ? speakersRaw.filter((s): s is string => typeof s === "string")
+        : [];
+
+      return {
+        chunk_index: toIntOr(c.chunk_index, chunkIdx),
+        start_timestamp: toNumberOr(c.start_timestamp, 0),
+        end_timestamp: toNumberOr(c.end_timestamp, 0),
+        message_count: toIntOr(c.message_count, speakers.length),
+        speakers,
+        full_text: typeof c.full_text === "string" ? c.full_text : "",
+      };
+    });
+
+    const recording_url =
+      typeof r.recording_url === "string" ? r.recording_url : "";
+
+    return {
+      recording_index: toIntOr(r.recording_index, recIdx),
+      call_id: typeof r.call_id === "string" ? r.call_id : undefined,
+      start_time: typeof r.start_time === "string" ? r.start_time : undefined,
+      duration_seconds:
+        typeof r.duration_seconds === "number" ? r.duration_seconds : undefined,
+      recording_url,
+      recording_date:
+        typeof r.recording_date === "string" ? r.recording_date : undefined,
+      recording_time:
+        typeof r.recording_time === "string" ? r.recording_time : undefined,
+      from_number:
+        typeof r.from_number === "string" ? r.from_number : undefined,
+      to_number: typeof r.to_number === "string" ? r.to_number : undefined,
+      total_chunks: toIntOr(r.total_chunks, chunks.length),
+      chunks,
+    };
+  });
+}
+
+function isAuditStepDefinition(value: unknown): value is AuditStepDefinition {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.position === "number" &&
+    typeof value.name === "string" &&
+    typeof value.prompt === "string" &&
+    Array.isArray(value.controlPoints) &&
+    Array.isArray(value.keywords) &&
+    typeof value.severityLevel === "string" &&
+    typeof value.isCritical === "boolean" &&
+    typeof value.weight === "number"
+  );
+}
+
+function isAuditConfigForAnalysis(value: unknown): value is AuditConfigForAnalysis {
+  if (!isRecord(value)) return false;
+  if (typeof value.id !== "string") return false;
+  if (typeof value.name !== "string") return false;
+  if (
+    value.description !== null &&
+    value.description !== undefined &&
+    typeof value.description !== "string"
+  ) {
+    return false;
+  }
+  if (
+    value.systemPrompt !== null &&
+    value.systemPrompt !== undefined &&
+    typeof value.systemPrompt !== "string"
+  ) {
+    return false;
+  }
+  if (!Array.isArray(value.auditSteps)) return false;
+  return value.auditSteps.every(isAuditStepDefinition);
+}
+
+function isProductLinkResult(value: unknown): value is ProductLinkResult {
+  if (!isRecord(value)) return false;
+  return typeof value.matched === "boolean";
+}
+
+type DbRecordingForTimeline = {
+  callId: string;
+  hasTranscription: boolean;
+  transcriptionId: string | null;
+  transcriptionText: string | null;
+  transcriptionData: unknown;
+  durationSeconds: number | null;
+};
+
+function toTranscriptionWords(value: unknown): TranscriptionWord[] | null {
+  if (!isRecord(value)) return null;
+  const wordsRaw = value.words;
+  if (!Array.isArray(wordsRaw) || wordsRaw.length === 0) return null;
+
+  const words: TranscriptionWord[] = [];
+  for (const w of wordsRaw) {
+    if (!isRecord(w)) continue;
+    const text = typeof w.text === "string" ? w.text : null;
+    const start = typeof w.start === "number" ? w.start : null;
+    const end = typeof w.end === "number" ? w.end : null;
+    const type = typeof w.type === "string" ? w.type : "word";
+    const speaker_id =
+      typeof w.speaker_id === "string" ? (w.speaker_id as string) : undefined;
+    const logprob = typeof w.logprob === "number" ? w.logprob : undefined;
+
+    if (text === null || start === null || end === null) continue;
+
+    words.push({
+      text,
+      start,
+      end,
+      type,
+      ...(speaker_id ? { speaker_id } : {}),
+      ...(logprob !== undefined ? { logprob } : {}),
+    });
+  }
+
+  return words.length > 0 ? words : null;
+}
+
+function buildSyntheticWordsFromText(
+  text: string,
+  durationSeconds: number | null
+): TranscriptionWord[] {
+  const textWords = text.split(/\s+/).filter(Boolean);
+  if (textWords.length === 0) return [];
+
+  const duration =
+    typeof durationSeconds === "number" && durationSeconds > 0
+      ? durationSeconds
+      : Math.max(1, Math.round(textWords.length * 0.5));
+
+  const wordDur = Math.max(0.05, duration / Math.max(1, textWords.length));
+  return textWords.map((word, idx) => ({
+    text: word,
+    start: idx * wordDur,
+    end: (idx + 1) * wordDur,
+    type: "word",
+    // Speaker unknown without diarization; keep expected shape.
+    speaker_id: idx % 20 < 10 ? "speaker_0" : "speaker_1",
+  }));
+}
+
+function buildTranscriptionPayload(
+  dbRec: DbRecordingForTimeline
+): { text: string; language_code?: string; words: TranscriptionWord[] } | null {
+  const payload = dbRec.transcriptionData;
+  const words = toTranscriptionWords(payload);
+
+  if (words) {
+    const payloadObj = isRecord(payload) ? payload : null;
+    const text =
+      payloadObj && typeof payloadObj.text === "string"
+        ? payloadObj.text
+        : words.map((w) => w.text).join(" ");
+    const language_code =
+      payloadObj && typeof payloadObj.language_code === "string"
+        ? payloadObj.language_code
+        : undefined;
+    return { text, language_code, words };
+  }
+
+  if (typeof dbRec.transcriptionText === "string" && dbRec.transcriptionText.trim()) {
+    const text = dbRec.transcriptionText;
+    return {
+      text,
+      language_code: "fr",
+      words: buildSyntheticWordsFromText(text, dbRec.durationSeconds),
+    };
+  }
+
+  return null;
+}
+
+async function rebuildTimelineFromDatabase(ficheId: string): Promise<TimelineRecording[]> {
+  const { getRecordingsByFiche } = await import(
+    "../recordings/recordings.repository.js"
+  );
+  const { generateTimeline } = await import("./audits.timeline.js");
+  const { enrichRecording } = await import("../../utils/recording-parser.js");
+
+  const cached = await getCachedFiche(ficheId);
+  if (!cached) throw new Error("Fiche not cached");
+
+  const dbRecordings = await getRecordingsByFiche(ficheId);
+  const rawRecordings = getRawRecordingsFromFicheRawData(cached.rawData);
+
+  const transcriptions: Transcription[] = [];
+  for (const dbRec of dbRecordings) {
+    const rec: DbRecordingForTimeline = {
+      callId: dbRec.callId,
+      hasTranscription: dbRec.hasTranscription,
+      transcriptionId: dbRec.transcriptionId,
+      transcriptionText: dbRec.transcriptionText,
+      transcriptionData: dbRec.transcriptionData,
+      durationSeconds: dbRec.durationSeconds,
+    };
+
+    if (!rec.hasTranscription || !rec.transcriptionId) continue;
+
+    const rawRec = rawRecordings.find((r) => getRawCallId(r) === rec.callId);
+    if (!rawRec || !isRecord(rawRec)) continue;
+
+    const enrichedRec = enrichRecording(rawRec);
+    const url = enrichedRec.recording_url;
+    if (!url) continue;
+
+    const transcription = buildTranscriptionPayload(rec);
+    if (!transcription) continue;
+
+    transcriptions.push({
+      recording_url: url,
+      transcription_id: rec.transcriptionId,
+      call_id: rec.callId,
+      recording: enrichedRec,
+      transcription,
+    });
+  }
+
+  return generateTimeline(transcriptions);
+}
+
+function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
+  const json: unknown = JSON.parse(JSON.stringify(value));
+  return json as Prisma.InputJsonValue;
+}
+
+function countCitations(points: ReadonlyArray<ControlPoint>): number {
+  return points.reduce((sum, pc) => sum + pc.citations.length, 0);
+}
+
+function toAuditSeverityLevel(value: unknown): AuditSeverityLevel {
+  return value === "LOW" ||
+    value === "MEDIUM" ||
+    value === "HIGH" ||
+    value === "CRITICAL"
+    ? value
+    : "MEDIUM";
+}
+
+function isAnalyzeStepResult(value: unknown): value is AnalyzeStepResult {
+  if (!isRecord(value)) return false;
+  if (typeof value.traite !== "boolean") return false;
+  if (typeof value.conforme !== "string") return false;
+  if (typeof value.score !== "number") return false;
+  if (!Array.isArray(value.points_controle)) return false;
+  if (!isRecord(value.step_metadata)) return false;
+  if (!isRecord(value.usage)) return false;
+  return true;
+}
+
+function fallbackAnalyzeStepResult(params: {
+  stepPosition: number;
+  stepName: string;
+  severity: AuditSeverityLevel;
+  isCritical: boolean;
+  weight: number;
+  controlPoints: string[];
+  message: string;
+}): AnalyzeStepResult {
+  return {
+    traite: false,
+    conforme: "NON_CONFORME",
+    minutages: [],
+    score: 0,
+    points_controle: params.controlPoints.map((cp) => ({
+      point: cp,
+      statut: "ABSENT",
+      commentaire: params.message,
+      citations: [],
+      minutages: [],
+      erreur_transcription_notee: false,
+      variation_phonetique_utilisee: null,
+    })),
+    mots_cles_trouves: [],
+    commentaire_global: params.message,
+    niveau_conformite: "INSUFFISANT",
+    erreurs_transcription_tolerees: 0,
+    step_metadata: {
+      position: params.stepPosition,
+      name: params.stepName,
+      severity: params.severity,
+      is_critical: params.isCritical,
+      weight: params.weight,
+    },
+    usage: {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+    },
+  };
+}
 
 /**
  * Run Audit Function
  * ==================
  * Orchestrates fiche fetch -> transcription -> audit execution
- * - Concurrency: max 3, keyed by audit_config_id
+ * - Concurrency: globally limited + single-flight per fiche_id
  * - Retries: 2 times (expensive operations)
  * - Timeout: 30 minutes
  * - Uses step.invoke() for proper function composition
@@ -46,6 +463,14 @@ export const runAuditFunction = inngest.createFunction(
       {
         limit: CONCURRENCY.AUDIT_RUN.limit,
       },
+      // Prevent overlapping audits for the same fiche across replicas
+      {
+        key: "event.data.fiche_id",
+        limit: Math.max(
+          1,
+          Number(process.env.AUDIT_RUN_PER_FICHE_CONCURRENCY || 1)
+        ),
+      },
     ],
     retries: 2,
     timeouts: {
@@ -54,8 +479,7 @@ export const runAuditFunction = inngest.createFunction(
     // Remove idempotency to allow same fiche+config to run multiple times
     // The event ID in the route already provides deduplication
     onFailure: async ({ error, step, event }) => {
-      const fiche_id = (event as any)?.data?.fiche_id || "unknown";
-      const audit_config_id = (event as any)?.data?.audit_config_id || 0;
+      const { fiche_id, audit_config_id } = getAuditRunFailureMeta(event);
 
       // Try to mark audit as failed in database
       try {
@@ -74,17 +498,27 @@ export const runAuditFunction = inngest.createFunction(
         if (runningAudit) {
           const { markAuditAsFailed } = await import("./audits.repository.js");
           await markAuditAsFailed(runningAudit.id, error.message);
-          console.log("Marked audit as failed in database:", runningAudit.id);
+          appLogger.info("Marked audit as failed in database", {
+            audit_id: String(runningAudit.id),
+            fiche_id,
+            audit_config_id,
+          });
         }
       } catch (dbError) {
-        console.error("Failed to mark audit as failed in database:", dbError);
+        appLogger.error(
+          "Failed to mark audit as failed in database",
+          dbError instanceof Error ? dbError : { error: String(dbError) }
+        );
       }
 
       // Send webhook notification (don't use step.run in onFailure - causes serialization errors)
       try {
         await auditWebhooks.failed("audit-failed", fiche_id, error.message);
       } catch (webhookError) {
-        console.error("Failed to send failure webhook:", webhookError);
+        appLogger.error(
+          "Failed to send failure webhook",
+          webhookError instanceof Error ? webhookError : { error: String(webhookError) }
+        );
       }
 
       // Send internal event
@@ -186,7 +620,9 @@ export const runAuditFunction = inngest.createFunction(
     }
 
     // Step 3: Load audit configuration
-    const auditConfig = await step.run("load-audit-config", async () => {
+    const auditConfigRaw = await step.run(
+      "load-audit-config",
+      async (): Promise<AuditConfigForAnalysis> => {
       logger.info("Loading audit configuration", { audit_config_id });
       const { getAuditConfigById } = await import(
         "../audit-configs/audit-configs.repository.js"
@@ -208,57 +644,68 @@ export const runAuditFunction = inngest.createFunction(
       };
     });
 
+    const auditConfigValue: unknown = auditConfigRaw;
+    if (!isAuditConfigForAnalysis(auditConfigValue)) {
+      throw new Error(`Invalid audit config payload for ${audit_config_id}`);
+    }
+    const auditConfig = auditConfigValue;
+
     logger.info("Audit config loaded", {
       config_name: auditConfig.name,
       total_steps: auditConfig.auditSteps.length,
     });
 
-    // Step 3.5: Link to product database if needed
-    const productInfo = await step.run("link-to-product", async () => {
-      const needsProductInfo = auditConfig.auditSteps.some(
-        (step: any) => step.verifyProductInfo === true
-      );
-
-      if (!needsProductInfo) {
-        logger.info("Product verification not needed for this audit");
-        return null;
-      }
-
-      logger.info(
-        "Product verification required - linking fiche to product database"
-      );
-
-      try {
-        const { linkFicheToProduct } = await import(
-          "../products/products.service.js"
+    // Step 3.5 + 4 can run in parallel:
+    // - link product (optional)
+    // - create audit record
+    // - generate timeline from DB transcriptions
+    const productInfoPromise = step.run(
+      "link-to-product",
+      async (): Promise<ProductLinkResult | null> => {
+        const needsProductInfo = auditConfig.auditSteps.some(
+          (s) => s.verifyProductInfo === true
         );
 
-        const linkResult = await linkFicheToProduct(fiche_id);
+        if (!needsProductInfo) {
+          logger.info("Product verification not needed for this audit");
+          return null;
+        }
 
-        if (linkResult.matched && linkResult.formule) {
-          logger.info("Product matched successfully", {
-            groupe: linkResult.formule.gamme.groupe.libelle,
-            gamme: linkResult.formule.gamme.libelle,
-            formule: linkResult.formule.libelle,
-            guarantees: linkResult.formule._counts.garanties,
-          });
-          return linkResult;
-        } else {
+        logger.info(
+          "Product verification required - linking fiche to product database"
+        );
+
+        try {
+          const { linkFicheToProduct } = await import(
+            "../products/products.service.js"
+          );
+
+          const linkResult: ProductLinkResult = await linkFicheToProduct(fiche_id);
+
+          if (linkResult.matched && linkResult.formule) {
+            logger.info("Product matched successfully", {
+              groupe: linkResult.formule.gamme.groupe.libelle,
+              gamme: linkResult.formule.gamme.libelle,
+              formule: linkResult.formule.libelle,
+              guarantees: linkResult.formule._counts?.garanties,
+            });
+            return linkResult;
+          }
+
           logger.warn("No matching product found in database", {
             searched: linkResult.searchCriteria,
           });
           return null;
+        } catch (error: unknown) {
+          logger.warn("Failed to link fiche to product", {
+            error: errorMessage(error),
+          });
+          return null;
         }
-      } catch (error: any) {
-        logger.warn("Failed to link fiche to product", {
-          error: error.message,
-        });
-        return null;
       }
-    });
+    );
 
-    // Create audit record in database with "running" status
-    const auditDbId = await step.run("create-audit-record", async () => {
+    const auditDbIdPromise = step.run("create-audit-record", async () => {
       logger.info("Creating audit record in database", {
         fiche_id,
         audit_config_id,
@@ -289,227 +736,20 @@ export const runAuditFunction = inngest.createFunction(
       return String(createdAudit.id);
     });
 
-    // Send audit started webhook
-    await step.run("send-started-webhook", async () => {
-      await auditWebhooks.started(
-        auditId,
-        fiche_id,
-        String(audit_config_id),
-        auditConfig.name,
-        auditConfig.auditSteps.length
-      );
-      return { notified: true };
-    });
-
-    // Step 4: Generate timeline from database transcriptions
-    const { timeline, timelineText } = await step.run(
+    const timelinePromise = step.run(
       "generate-timeline",
-      async () => {
+      async (): Promise<{ timeline: TimelineRecording[]; timelineText: string }> => {
         logger.info("Building timeline from database", { fiche_id });
-        const { getCachedFiche } = await import(
-          "../fiches/fiches.repository.js"
-        );
-        const { getRecordingsByFiche } = await import(
-          "../recordings/recordings.repository.js"
-        );
-        const { generateTimeline } = await import("./audits.timeline.js");
         const { buildTimelineText } = await import("./audits.prompts.js");
-        const { enrichRecording } = await import(
-          "../../utils/recording-parser.js"
-        );
-        const { readFileSync, existsSync } = await import("fs");
-
-        // Load fiche data
-        const cached = await getCachedFiche(fiche_id);
-        if (!cached) {
-          throw new Error("Fiche not cached");
-        }
-
-        // Load recordings from database with transcription data
-        const dbRecordings = await getRecordingsByFiche(fiche_id);
-
-        // Check how many have transcription text in DB
-        const withDbText = dbRecordings.filter(
-          (r) => r.hasTranscription && r.transcriptionText
-        ).length;
-        const withoutDbText = dbRecordings.filter(
-          (r) => r.hasTranscription && !r.transcriptionText
-        ).length;
-
-        logger.info("Loaded recordings from database", {
-          count: dbRecordings.length,
-          transcribed: dbRecordings.filter((r) => r.hasTranscription).length,
-          with_db_text: withDbText,
-          missing_db_text: withoutDbText,
-        });
-
-        // Get fiche data for enrichment
-        const ficheData = cached.rawData as any;
-        const rawRecordings = ficheData.recordings || [];
-
-        console.log(`\n📍 [Workflow] Raw fiche data:`, {
-          fiche_id,
-          total_raw_recordings: rawRecordings.length,
-          sample_recording: rawRecordings[0]
-            ? {
-                call_id: rawRecordings[0].call_id || rawRecordings[0].callId,
-                has_recording_url: Boolean(rawRecordings[0].recording_url),
-                has_recordingUrl: Boolean(rawRecordings[0].recordingUrl),
-                url_preview: (
-                  rawRecordings[0].recording_url ||
-                  rawRecordings[0].recordingUrl ||
-                  ""
-                ).substring(0, 50),
-              }
-            : "No recordings",
-        });
-
-        // Load transcription cache (fallback only)
-        const CACHE_FILE = "./data/transcription_cache.json";
-        let transcriptionCache: any = {};
-        if (existsSync(CACHE_FILE)) {
-          try {
-            transcriptionCache = JSON.parse(readFileSync(CACHE_FILE, "utf-8"));
-            logger.info("Loaded transcription file cache", {
-              entries: Object.keys(transcriptionCache).length,
-            });
-          } catch (e) {
-            logger.warn("Could not load transcription cache", { error: e });
-          }
-        }
-
-        // Build transcriptions from database (PRIMARY) + file cache (FALLBACK)
-        const transcriptions = [];
-        for (const dbRec of dbRecordings) {
-          if (!dbRec.hasTranscription || !dbRec.transcriptionId) {
-            logger.warn("Recording missing transcription", {
-              call_id: dbRec.callId,
-            });
-            continue;
-          }
-
-          // Find matching raw recording for enrichment
-          const rawRec = rawRecordings.find(
-            (r: any) => (r.call_id || r.callId) === dbRec.callId
-          );
-          if (!rawRec) {
-            logger.warn("Could not find raw recording", {
-              call_id: dbRec.callId,
-            });
-            continue;
-          }
-
-          const enrichedRec = enrichRecording(rawRec);
-          const url = enrichedRec.recording_url || enrichedRec.recordingUrl;
-
-          // Verify URL is present
-          if (!url) {
-            logger.error("Recording URL is missing!", {
-              call_id: dbRec.callId,
-            });
-            continue;
-          }
-
-          // PRIORITY 1: Load transcription from DATABASE (transcriptionText column)
-          let transcriptionData;
-
-          if (dbRec.transcriptionText) {
-            // Use database transcription (PREFERRED)
-            // Create simple word array from text for chunking
-            const textWords = dbRec.transcriptionText
-              .split(/\s+/)
-              .filter(Boolean);
-            const words = textWords.map((word, idx) => ({
-              text: word,
-              start: idx * 0.5, // Fake timing (0.5s per word)
-              end: (idx + 1) * 0.5,
-              type: "word" as const,
-              speaker_id: idx % 20 < 10 ? 0 : 1, // Alternate speakers every 10 words
-            }));
-
-            transcriptionData = {
-              text: dbRec.transcriptionText,
-              language_code: "fr",
-              words: words,
-            };
-            logger.info(
-              "Using transcription from database (synthesized words)",
-              {
-                call_id: dbRec.callId,
-                text_length: dbRec.transcriptionText.length,
-                words_count: words.length,
-              }
-            );
-          } else {
-            // FALLBACK: Try file cache (has full word-level data)
-            const cachedTranscription = transcriptionCache[url];
-            if (cachedTranscription) {
-              transcriptionData = cachedTranscription.transcription;
-              logger.info("Using transcription from file cache", {
-                call_id: dbRec.callId,
-              });
-            } else {
-              logger.warn("Transcription not found in DB or file cache", {
-                call_id: dbRec.callId,
-                has_db_text: Boolean(dbRec.transcriptionText),
-                url,
-              });
-              continue;
-            }
-          }
-
-          transcriptions.push({
-            recording_url: url,
-            transcription_id: dbRec.transcriptionId,
-            call_id: dbRec.callId,
-            recording: enrichedRec,
-            transcription: transcriptionData,
-          });
-        }
-
-        logger.info("Timeline data prepared", {
-          count: transcriptions.length,
-        });
-
-        console.log(
-          `📍 [Workflow] Transcriptions array sample (first recording):`,
-          {
-            recording_url: transcriptions[0]?.recording_url
-              ? `${transcriptions[0].recording_url.substring(0, 50)}...`
-              : "MISSING",
-            call_id: transcriptions[0]?.call_id,
-            has_recording_object: Boolean(transcriptions[0]?.recording),
-            recording_object_has_url: Boolean(
-              transcriptions[0]?.recording?.recording_url
-            ),
-          }
-        );
-
-        const timeline = generateTimeline(transcriptions);
-
-        console.log(
-          `📍 [Workflow] Timeline generated, sample (first recording):`,
-          {
-            recording_index: timeline[0]?.recording_index,
-            call_id: timeline[0]?.call_id,
-            recording_url: timeline[0]?.recording_url
-              ? `${timeline[0].recording_url.substring(0, 50)}...`
-              : "MISSING",
-            recording_date: timeline[0]?.recording_date,
-            recording_time: timeline[0]?.recording_time,
-          }
-        );
-
+        const timeline = await rebuildTimelineFromDatabase(fiche_id);
         const timelineText = buildTimelineText(timeline);
 
         // Log payload sizes for monitoring (Inngest step data limit is 4MB)
-        const transcriptionsSize = getPayloadSize(transcriptions);
         const timelineSize = getPayloadSize(timeline);
         const timelineTextSize = getPayloadSize(timelineText);
         const returnSize = getPayloadSize({ timeline, timelineText });
 
         logger.info("Timeline data sizes", {
-          transcriptions: formatBytes(transcriptionsSize),
           timeline: formatBytes(timelineSize),
           timelineText: formatBytes(timelineTextSize),
           total_return: formatBytes(returnSize),
@@ -534,9 +774,28 @@ export const runAuditFunction = inngest.createFunction(
       }
     );
 
+    const auditDbId = await auditDbIdPromise;
+
+    // Send audit started webhook
+    await step.run("send-started-webhook", async () => {
+      await auditWebhooks.started(
+        auditId,
+        fiche_id,
+        String(audit_config_id),
+        auditConfig.name,
+        auditConfig.auditSteps.length
+      );
+      return { notified: true };
+    });
+
+    const productInfo = await productInfoPromise;
+    const { timeline: timelineRaw, timelineText } = await timelinePromise;
+
+    const timeline = normalizeTimelineRecordings(timelineRaw);
+
     logger.info("Timeline generated", {
       recordings: timeline.length,
-      chunks: timeline.reduce((sum: number, r: any) => sum + r.total_chunks, 0),
+      chunks: timeline.reduce((sum, r) => sum + (r.total_chunks || 0), 0),
     });
 
     // Send progress: Timeline ready
@@ -552,495 +811,816 @@ export const runAuditFunction = inngest.createFunction(
       return { notified: true };
     });
 
-    // Step 5: Analyze ALL audit steps in parallel (each as a separate Inngest step)
-    logger.info("Starting parallel audit step analysis", {
-      total_steps: auditConfig.auditSteps.length,
-    });
-
-    const stepAnalysisPromises = auditConfig.auditSteps.map((auditStep: any) =>
-      step.run(`analyze-step-${auditStep.position}`, async () => {
-        logger.info(`Analyzing step ${auditStep.position}`, {
-          step_name: auditStep.name,
-          weight: auditStep.weight,
-        });
-
-        const { analyzeStep } = await import("./audits.analyzer.js");
-        const result = await analyzeStep(
-          auditStep,
-          auditConfig,
-          timelineText,
-          auditId,
+    // Step 5: Cache context (timeline + config) for distributed workers
+    await step.run("cache-audit-context", async () => {
+      const redis = await getRedisClient();
+      if (!redis) {
+        logger.warn("Redis not configured; step fan-out will fall back to DB rebuilds", {
           fiche_id,
-          productInfo // Pass product info for verification
+          audit_db_id: auditDbId,
+        });
+        return { cached: false };
+      }
+
+      const ttlSeconds = Math.max(
+        60,
+        Number(process.env.AUDIT_CONTEXT_TTL_SECONDS || 6 * 60 * 60)
+      );
+      const base = `audit:${auditDbId}`;
+
+      const multi = redis.multi();
+      multi.setEx(`${base}:config`, ttlSeconds, JSON.stringify(auditConfig));
+      multi.setEx(`${base}:timeline`, ttlSeconds, JSON.stringify(timeline));
+      multi.setEx(`${base}:timelineText`, ttlSeconds, timelineText);
+      if (productInfo) {
+        multi.setEx(`${base}:productInfo`, ttlSeconds, JSON.stringify(productInfo));
+      }
+
+      // Optionally precompute per-step timeline excerpts (token/cost optimization)
+      const { buildTimelineExcerptText } = await import("./audits.prompts.js");
+      const excerptEnabled = process.env.AUDIT_STEP_TIMELINE_EXCERPT !== "0";
+      const maxChunks = Math.max(
+        10,
+        Number(process.env.AUDIT_STEP_TIMELINE_MAX_CHUNKS || 40)
+      );
+
+      for (const auditStep of auditConfig.auditSteps || []) {
+        if (!excerptEnabled || auditStep.verifyProductInfo !== true) continue;
+        const perStepTimelineText = buildTimelineExcerptText(timeline, {
+          queryTerms: [
+            auditStep.name,
+            ...(auditStep.keywords || []),
+            ...(auditStep.controlPoints || []),
+          ],
+          maxChunks,
+          neighborChunks: 1,
+        });
+        multi.setEx(
+          `${base}:step:${auditStep.position}:timelineText`,
+          ttlSeconds,
+          perStepTimelineText
         );
-
-        logger.info(`Step ${auditStep.position} completed`, {
-          step_name: auditStep.name,
-          score: result.score,
-          conforme: result.conforme,
-          tokens: result.usage.total_tokens,
-        });
-
-        return result;
-      })
-    );
-
-    // Execute all step analyses in parallel
-    const stepResults = await Promise.all(stepAnalysisPromises);
-
-    logger.info("All audit steps completed", {
-      successful: stepResults.length,
-      total_tokens: stepResults.reduce(
-        (sum, r) => sum + (r.usage?.total_tokens || 0),
-        0
-      ),
-    });
-
-    // Send progress: Analysis complete
-    await step.run("send-progress-analysis", async () => {
-      await auditWebhooks.progress(
-        auditId,
-        fiche_id,
-        auditConfig.auditSteps.length,
-        auditConfig.auditSteps.length,
-        0, // Failed steps count (will be calculated if any)
-        "analysis"
-      );
-      return { notified: true };
-    });
-
-    // Enrich citations with recording metadata (date/time/url)
-    // IMPORTANT: Must RETURN enriched stepResults because Inngest serializes between steps
-    const enrichedStepResults = await step.run("enrich-citations", async () => {
-      logger.info("Enriching citations with recording metadata");
-
-      // Create a lookup map for quick access
-      const timelineMap = new Map(
-        timeline.map((rec: any) => {
-          const metadata = {
-            recording_date: rec.recording_date || "N/A",
-            recording_time: rec.recording_time || "N/A",
-            recording_url: rec.recording_url || "N/A",
-          };
-
-          console.log(
-            `📍 [Citation Enrichment] Timeline Map Entry ${rec.recording_index}:`,
-            {
-              recording_index: rec.recording_index,
-              call_id: rec.call_id,
-              url:
-                metadata.recording_url !== "N/A"
-                  ? `${metadata.recording_url.substring(0, 50)}...`
-                  : "N/A",
-              date: metadata.recording_date,
-              time: metadata.recording_time,
-            }
-          );
-
-          return [rec.recording_index, metadata];
-        })
-      );
-
-      console.log(
-        `📍 [Citation Enrichment] Timeline map created with ${timelineMap.size} entries`
-      );
-
-      let enrichedCount = 0;
-      let missingUrlCount = 0;
-
-      // Iterate through all steps and their control points
-      for (const stepResult of stepResults) {
-        if (!stepResult.points_controle) continue;
-
-        for (const controlPoint of stepResult.points_controle) {
-          if (!controlPoint.citations) continue;
-
-          for (const citation of controlPoint.citations) {
-            // Look up recording metadata using recording_index
-            const metadata = timelineMap.get(citation.recording_index);
-
-            if (enrichedCount < 3) {
-              // Log first 3 citations for debugging
-              console.log(
-                `📍 [Citation Enrichment] Citation ${enrichedCount}:`,
-                {
-                  recording_index: citation.recording_index,
-                  found_in_map: Boolean(metadata),
-                  url_from_map: metadata?.recording_url
-                    ? `${metadata.recording_url.substring(0, 50)}...`
-                    : "N/A",
-                }
-              );
-            }
-
-            if (metadata) {
-              citation.recording_date = metadata.recording_date;
-              citation.recording_time = metadata.recording_time;
-              citation.recording_url = metadata.recording_url;
-              enrichedCount++;
-
-              if (!metadata.recording_url || metadata.recording_url === "N/A") {
-                console.warn(
-                  `⚠️  [Citation Enrichment] Citation ${enrichedCount} has N/A URL:`,
-                  {
-                    recording_index: citation.recording_index,
-                    citation_text: citation.texte?.substring(0, 50),
-                  }
-                );
-                missingUrlCount++;
-              }
-            } else {
-              console.warn(
-                `⚠️  [Citation Enrichment] No timeline metadata for recording_index: ${citation.recording_index}`
-              );
-              // If no metadata found, set to N/A to make it explicit
-              citation.recording_date = "N/A";
-              citation.recording_time = "N/A";
-              citation.recording_url = "N/A";
-            }
-          }
-        }
       }
 
-      console.log(`\n📊 [Citation Enrichment] Summary:`, {
-        total_citations: enrichedCount,
-        missing_urls: missingUrlCount,
-        success_rate:
-          enrichedCount > 0
-            ? `${(
-                ((enrichedCount - missingUrlCount) / enrichedCount) *
-                100
-              ).toFixed(1)}%`
-            : "N/A",
-      });
-
-      // Verify mutation persisted - check first citation after enrichment
-      const firstCitation =
-        stepResults[0]?.points_controle?.[0]?.citations?.[0];
-      console.log(
-        `\n📍 [Citation Enrichment] Mutation check (first citation after enrichment):`,
-        {
-          has_citation: Boolean(firstCitation),
-          recording_url:
-            firstCitation?.recording_url?.substring(0, 50) || "MISSING",
-          recording_date: firstCitation?.recording_date,
-          recording_time: firstCitation?.recording_time,
-          is_NA: firstCitation?.recording_url === "N/A",
-        }
-      );
-
-      logger.info("Citations enriched", {
-        total_steps: stepResults.length,
-        total_citations: enrichedCount,
-        missing_urls: missingUrlCount,
-      });
-
-      // CRITICAL: Return the enriched stepResults so mutations persist across Inngest steps
-      return stepResults;
+      await multi.exec();
+      return { cached: true, ttlSeconds };
     });
 
-    // Step 6: Calculate compliance (use enrichedStepResults with recording URLs)
-    const compliance = await step.run("calculate-compliance", async () => {
-      const { COMPLIANCE_THRESHOLDS } = await import(
-        "../../shared/constants.js"
-      );
-
-      const totalWeight = auditConfig.auditSteps.reduce(
-        (sum: number, s: any) => sum + s.weight,
-        0
-      );
-
-      const earnedWeight = enrichedStepResults
-        .filter((s: any) => s.score !== undefined)
-        .reduce((sum: number, s: any) => {
-          const maxWeight = s.step_metadata?.weight || s.score;
-          const cappedScore = Math.min(s.score, maxWeight);
-          return sum + cappedScore;
-        }, 0);
-
-      const score = (earnedWeight / totalWeight) * 100;
-
-      const criticalTotal = auditConfig.auditSteps.filter(
-        (s: any) => s.isCritical
-      ).length;
-      const criticalPassed = enrichedStepResults.filter(
-        (s: any) => s.step_metadata?.is_critical && s.conforme === "CONFORME"
-      ).length;
-
-      let niveau = "INSUFFISANT";
-      if (criticalPassed < criticalTotal) {
-        niveau = "REJET";
-      } else if (score >= COMPLIANCE_THRESHOLDS.EXCELLENT) {
-        niveau = "EXCELLENT";
-      } else if (score >= COMPLIANCE_THRESHOLDS.BON) {
-        niveau = "BON";
-      } else if (score >= COMPLIANCE_THRESHOLDS.ACCEPTABLE) {
-        niveau = "ACCEPTABLE";
-      }
-
-      return {
-        score: Number(score.toFixed(2)),
-        niveau,
-        points_critiques: `${criticalPassed}/${criticalTotal}`,
-        poids_obtenu: earnedWeight,
-        poids_total: totalWeight,
-      };
-    });
-
-    logger.info("Compliance calculated", compliance);
-
-    // Send compliance calculated webhook
-    await step.run("send-compliance-calculated", async () => {
-      const score = compliance.score ?? 0;
-      await auditWebhooks.complianceCalculated(
-        auditId,
-        fiche_id,
-        `${compliance.poids_obtenu}/${compliance.poids_total}`,
-        `${score.toFixed(2)}%`,
-        compliance.niveau,
-        compliance.niveau !== "REJET",
-        compliance.points_critiques
-      );
-      return { notified: true };
-    });
-
-    // Step 7: Update audit with results
-    const savedAudit = await step.run("update-audit-with-results", async () => {
-      logger.info("Updating audit with results in database", { fiche_id });
-
-      // Verify citations are enriched before saving
-      console.log(`\n📍 [Save] Checking enrichedStepResults before save:`, {
-        total_steps: enrichedStepResults.length,
-        sample_citation: enrichedStepResults[0]?.points_controle?.[0]
-          ?.citations?.[0]
-          ? {
-              recording_index:
-                enrichedStepResults[0].points_controle[0].citations[0]
-                  .recording_index,
-              recording_url:
-                enrichedStepResults[0].points_controle[0].citations[0].recording_url?.substring(
-                  0,
-                  50
-                ) || "MISSING",
-              recording_date:
-                enrichedStepResults[0].points_controle[0].citations[0]
-                  .recording_date,
-              recording_time:
-                enrichedStepResults[0].points_controle[0].citations[0]
-                  .recording_time,
-            }
-          : "No citations",
-      });
-
-      const { updateAuditWithResults } = await import("./audits.repository.js");
-      const { getCachedFiche } = await import("../fiches/fiches.repository.js");
-
-      const cached = await getCachedFiche(fiche_id);
-      if (!cached) {
-        throw new Error("Fiche not cached - cannot save audit");
-      }
-
-      const auditData = {
-        audit: {
-          config: {
-            id: auditConfig.id,
-            name: auditConfig.name,
-            description: auditConfig.description,
-          },
-          fiche: {
-            fiche_id,
-            prospect_name: (() => {
-              const data = cached.rawData as {
-                prospect?: { prenom?: string; nom?: string };
-              };
-              return `${data.prospect?.prenom || ""} ${
-                data.prospect?.nom || ""
-              }`.trim();
-            })(),
-            groupe: (() => {
-              const data = cached.rawData as {
-                information?: { groupe?: string };
-              };
-              return data.information?.groupe || "";
-            })(),
-          },
-          results: {
-            steps: enrichedStepResults, // ✅ Use enriched version
-            compliance,
-          },
-          compliance,
-        },
-        statistics: {
-          recordings_count: timeline.length,
-          transcriptions_count: timeline.length,
-          timeline_chunks: timeline.reduce(
-            (sum: number, r: any) => sum + r.total_chunks,
-            0
-          ),
-          successful_steps: enrichedStepResults.length, // ✅ Use enriched version
-          failed_steps: 0,
-          total_time_seconds: 0,
-          total_tokens: enrichedStepResults.reduce(
-            // ✅ Use enriched version
-            (sum, r) => sum + (r.usage?.total_tokens || 0),
-            0
-          ),
-        },
-        metadata: {
-          started_at: new Date(startTime!).toISOString(),
-          completed_at: new Date().toISOString(),
-          duration_ms: Date.now() - startTime!,
-        },
-      };
-
-      // Log audit result payload size before saving
-      const auditDataSize = getPayloadSize(auditData);
-      const stepsSize = getPayloadSize(enrichedStepResults);
-
-      logger.info("Audit result payload sizes", {
-        total_audit_data: formatBytes(auditDataSize),
-        steps_only: formatBytes(stepsSize),
-        recordings: timeline.length,
-        chunks: auditData.statistics.timeline_chunks,
-        tokens: auditData.statistics.total_tokens,
-      });
-
-      // Warn if audit result is very large (could cause DB issues)
-      if (auditDataSize > 10 * 1024 * 1024) {
-        // 10MB warning threshold
-        logger.warn("⚠️  Large audit result detected!", {
-          size: formatBytes(auditDataSize),
+    // Step 6: Fan-out one event per step so work can be spread across replicas
+    await step.sendEvent(
+      "fan-out-audit-steps",
+      auditConfig.auditSteps.map((s) => ({
+        name: "audit/step.analyze",
+        data: {
+          audit_db_id: String(auditDbId),
+          audit_id: auditId,
           fiche_id,
-          recordings: timeline.length,
-          chunks: auditData.statistics.timeline_chunks,
-        });
-      }
+          audit_config_id,
+          step_position: s.position,
+        },
+        // Idempotent per audit+step
+        id: `audit-step-${auditDbId}-${s.position}`,
+      }))
+    );
 
-      // Convert string back to BigInt for database operation
-      const saved = await updateAuditWithResults(BigInt(auditDbId), auditData);
-
-      logger.info("Audit updated in database", {
-        audit_id: String(saved.id),
-        fiche_id,
-      });
-
-      return saved;
-    });
-
-    const duration = Date.now() - startTime!;
-    const durationSeconds = Math.round(duration / 1000);
-    const savedAuditId = savedAudit?.id ? String(savedAudit.id) : "unknown";
-
-    // Step 8: Send completion webhook and event
-    await step.run("send-completion-webhook", async () => {
-      const score = compliance.score ?? 0;
-      const totalTokens = enrichedStepResults.reduce(
-        (sum, r) => sum + (r.usage?.total_tokens || 0),
-        0
-      );
-
-      await auditWebhooks.completed(
-        auditId, // Use tracking audit ID, not database ID
-        fiche_id,
-        `${compliance.poids_obtenu}/${compliance.poids_total}`,
-        `${score.toFixed(2)}%`,
-        compliance.niveau,
-        compliance.niveau !== "REJET",
-        enrichedStepResults.length, // Successful steps
-        0, // Failed steps
-        totalTokens,
-        durationSeconds
-      );
-      return { notified: true };
-    });
-
-    await step.sendEvent("emit-completion", {
-      name: "audit/completed",
-      data: {
-        fiche_id,
-        audit_id: savedAuditId, // Use database ID for events
-        audit_config_id,
-        score: compliance.score || 0,
-        niveau: compliance.niveau,
-        duration_ms: duration,
-      },
-    });
-
-    logger.info("Audit completed successfully", {
+    logger.info("Audit step fan-out dispatched", {
       fiche_id,
-      audit_id: savedAuditId, // Database ID
-      tracking_id: auditId, // Tracking ID for webhooks
-      audit_config_id,
-      score: compliance.score,
-      niveau: compliance.niveau,
-      duration_ms: duration,
-      total_steps: enrichedStepResults.length,
+      audit_db_id: auditDbId,
+      steps: auditConfig.auditSteps.length,
     });
 
-    // Log comprehensive payload size summary
-    console.log("\n" + "=".repeat(80));
-    console.log("📊 AUDIT WORKFLOW - PAYLOAD SIZE SUMMARY");
-    console.log("=".repeat(80));
-    console.log(`Fiche ID: ${fiche_id}`);
-    console.log(`Audit Config: ${auditConfig.name}`);
-    console.log(`Duration: ${durationSeconds}s`);
-    console.log("-".repeat(80));
-    console.log("Timeline Data:");
-    console.log(`  - Recordings: ${timeline.length}`);
-    console.log(
-      `  - Total Chunks: ${timeline.reduce(
-        (sum: number, r: any) => sum + r.total_chunks,
-        0
-      )}`
-    );
-    console.log(`  - Timeline Size: ${formatBytes(getPayloadSize(timeline))}`);
-    console.log(
-      `  - Timeline Text Size: ${formatBytes(getPayloadSize(timelineText))}`
-    );
-    console.log("-".repeat(80));
-    console.log("Audit Results:");
-    console.log(`  - Steps Analyzed: ${enrichedStepResults.length}`);
-    console.log(
-      `  - Total Tokens: ${enrichedStepResults
-        .reduce((sum, r) => sum + (r.usage?.total_tokens || 0), 0)
-        .toLocaleString()}`
-    );
-    console.log(
-      `  - Steps Size: ${formatBytes(getPayloadSize(enrichedStepResults))}`
-    );
-    console.log(
-      `  - Complete Audit Data: ${formatBytes(getPayloadSize(savedAudit))}`
-    );
-    console.log("-".repeat(80));
-    console.log("Limits Check:");
-    const timelineSize = getPayloadSize(timeline);
-    const auditResultSize = getPayloadSize(savedAudit);
-    console.log(
-      `  - Timeline vs Express Limit (50MB): ${Math.round(
-        (timelineSize / PAYLOAD_LIMITS.EXPRESS_DEFAULT) * 100
-      )}%`
-    );
-    console.log(
-      `  - Timeline vs Inngest Step (4MB): ${Math.round(
-        (timelineSize / PAYLOAD_LIMITS.INNGEST_STEP) * 100
-      )}%`
-    );
-    console.log(
-      `  - Audit Result vs Express Limit: ${Math.round(
-        (auditResultSize / PAYLOAD_LIMITS.EXPRESS_DEFAULT) * 100
-      )}%`
-    );
-    console.log("=".repeat(80) + "\n");
-
+    // The audit is finalized asynchronously by the `audit/step.analyzed` aggregator.
     return {
       success: true,
       fiche_id,
-      audit_id: savedAuditId, // Return database ID
+      audit_id: String(auditDbId), // DB id (available immediately)
       audit_config_id,
-      score: compliance.score ?? 0,
-      niveau: compliance.niveau,
-      duration_ms: duration,
+      score: 0,
+      niveau: "PENDING",
+      duration_ms: 0,
     };
+  }
+);
+
+/**
+ * Audit Step Worker (Distributed)
+ * ===============================
+ * Runs a SINGLE audit step so it can be executed on any replica.
+ *
+ * Key idea: split "one heavy audit request" into N independent step jobs.
+ */
+export const auditStepAnalyzeFunction = inngest.createFunction(
+  {
+    id: "audit-step-analyze",
+    name: "Analyze Audit Step (Distributed)",
+    retries: 2,
+    timeouts: {
+      finish: "20m",
+    },
+    concurrency: [
+      // Global cap (protects OpenAI spend + rate limits)
+      {
+        limit: Math.max(
+          1,
+          Number(process.env.AUDIT_STEP_WORKER_CONCURRENCY || DEFAULT_GLOBAL_CONCURRENCY)
+        ),
+      },
+      // Per-audit cap (keeps within your previous AUDIT_STEP_CONCURRENCY behavior)
+      {
+        key: "event.data.audit_db_id",
+        limit: Math.max(
+          1,
+          Number(
+            process.env.AUDIT_STEP_PER_AUDIT_CONCURRENCY ||
+              DEFAULT_PER_ENTITY_CONCURRENCY
+          )
+        ),
+      },
+    ],
+  },
+  { event: "audit/step.analyze" },
+  async ({ event, step, logger }) => {
+    const { audit_db_id, audit_id, fiche_id, audit_config_id, step_position } =
+      event.data;
+
+    const auditDbId = BigInt(audit_db_id);
+    const stepPosition = Number(step_position);
+
+    // Idempotency: skip if already analyzed (prevents duplicate webhooks + spend)
+    const { prisma } = await import("../../shared/prisma.js");
+    const existing = await prisma.auditStepResult.findUnique({
+      where: {
+        auditId_stepPosition: {
+          auditId: auditDbId,
+          stepPosition,
+        },
+      },
+      select: {
+        rawResult: true,
+      },
+    });
+
+    if (existing?.rawResult) {
+      logger.info("Step already analyzed - skipping", {
+        audit_db_id,
+        step_position: stepPosition,
+      });
+
+      await step.sendEvent("emit-step-analyzed", {
+        name: "audit/step.analyzed",
+        data: {
+          audit_db_id,
+          audit_id,
+          fiche_id,
+          audit_config_id,
+          step_position: stepPosition,
+          ok: true,
+        },
+      });
+
+      return { skipped: true, audit_db_id, step_position: stepPosition };
+    }
+
+    // Load cached context (Redis) if available
+    const redis = await getRedisClient();
+    const base = `audit:${audit_db_id}`;
+
+    let auditConfig: AuditConfigForAnalysis | null = null;
+    let productInfo: ProductLinkResult | null = null;
+    let timelineText: string | null = null;
+    let auditStep: AuditStepDefinition | null = null;
+
+    if (redis) {
+      try {
+        const [cfg, prod, perStepText, fullText] = await redis.mGet([
+          `${base}:config`,
+          `${base}:productInfo`,
+          `${base}:step:${stepPosition}:timelineText`,
+          `${base}:timelineText`,
+        ]);
+
+        if (cfg) {
+          const parsed = safeJsonParse(cfg);
+          if (isAuditConfigForAnalysis(parsed)) auditConfig = parsed;
+        }
+        if (prod) {
+          const parsed = safeJsonParse(prod);
+          productInfo = isProductLinkResult(parsed) ? parsed : null;
+        }
+        timelineText = perStepText || fullText || null;
+
+        if (auditConfig?.auditSteps?.length) {
+          auditStep =
+            auditConfig.auditSteps.find((s) => s.position === stepPosition) || null;
+        }
+      } catch (err) {
+        logger.warn("Failed to load audit context from Redis; falling back to DB", {
+          audit_db_id,
+          step_position: stepPosition,
+          error: (err as Error).message,
+        });
+      }
+    }
+
+    // Fallback: load audit config/step from DB if needed
+    if (!auditConfig || !auditStep) {
+      const { getAuditConfigById } = await import(
+        "../audit-configs/audit-configs.repository.js"
+      );
+      const config = await getAuditConfigById(BigInt(audit_config_id));
+      if (!config) {
+        throw new NonRetriableError(
+          `Audit config ${audit_config_id} not found`
+        );
+      }
+      auditConfig = {
+        id: config.id.toString(),
+        name: config.name,
+        description: config.description,
+        systemPrompt: config.systemPrompt,
+        auditSteps: config.steps,
+      };
+      auditStep =
+        auditConfig.auditSteps.find((s) => s.position === stepPosition) || null;
+    }
+
+    if (!auditStep) {
+      throw new NonRetriableError(
+        `Audit step ${stepPosition} not found for config ${audit_config_id}`
+      );
+    }
+    if (!auditConfig) {
+      throw new NonRetriableError(
+        `Audit config ${audit_config_id} missing for step ${stepPosition}`
+      );
+    }
+    const stepDef = auditStep;
+
+    // Fallback timeline text (expensive): rebuild from DB only if Redis is missing.
+    if (!timelineText) {
+      logger.warn("Timeline text missing from Redis; rebuilding from DB", {
+        audit_db_id,
+        fiche_id,
+      });
+
+      const { buildTimelineText } = await import("./audits.prompts.js");
+      const timeline = await rebuildTimelineFromDatabase(fiche_id);
+      timelineText = buildTimelineText(timeline);
+    }
+
+    // Freeze narrowed values for use inside the async `step.run` callback.
+    // TS can't guarantee captured variables won't change before the callback runs.
+    const auditConfigForStep = auditConfig;
+    const timelineTextForStep = timelineText;
+    if (!timelineTextForStep) {
+      throw new NonRetriableError(`Timeline text missing for fiche ${fiche_id}`);
+    }
+
+    // Analyze step (LLM) with graceful failure fallback.
+    // IMPORTANT: keep the expensive LLM call inside `step.run` so retries don't re-call OpenAI.
+    const analysis = await step.run(`analyze-step-${stepPosition}`, async () => {
+      try {
+        const { analyzeStep } = await import("./audits.analyzer.js");
+        const analyzed = await analyzeStep(
+          stepDef,
+          auditConfigForStep,
+          timelineTextForStep,
+          audit_id,
+          fiche_id,
+          productInfo
+        );
+        return { ok: true, analyzed, errorMessage: undefined as string | undefined };
+      } catch (err) {
+        const errorMessage = (err as Error).message || String(err);
+
+        // Best-effort webhook; never fail the step due to webhook delivery issues.
+        try {
+          await auditWebhooks.stepFailed(
+            audit_id,
+            fiche_id,
+            stepPosition,
+            stepDef.name || `Step ${stepPosition}`,
+            errorMessage
+          );
+        } catch (webhookErr) {
+          logger.warn("Failed to send audit.step_failed webhook (non-fatal)", {
+            audit_id,
+            fiche_id,
+            step_position: stepPosition,
+            error: (webhookErr as Error).message,
+          });
+        }
+
+        // Build a schema-compatible failure result so the audit can still finalize deterministically.
+        const analyzed = fallbackAnalyzeStepResult({
+          stepPosition,
+          stepName: stepDef.name || "",
+          severity: stepDef.severityLevel || "MEDIUM",
+          isCritical: Boolean(stepDef.isCritical),
+          weight: Number(stepDef.weight || 5),
+          controlPoints: Array.isArray(stepDef.controlPoints)
+            ? stepDef.controlPoints
+            : [],
+          message: `Step failed: ${errorMessage}`,
+        });
+
+        return { ok: false, analyzed, errorMessage };
+      }
+    });
+
+    let ok = analysis.ok;
+    let errorMessage = analysis.errorMessage;
+
+    // `step.run` returns a JSON-serializable value; validate + normalize to our schema type.
+    const analyzedUnknown: unknown = analysis.analyzed;
+    const analyzed: AnalyzeStepResult = isAnalyzeStepResult(analyzedUnknown)
+      ? analyzedUnknown
+      : (() => {
+          ok = false;
+          errorMessage =
+            errorMessage || "Analyze step returned invalid result payload";
+          return fallbackAnalyzeStepResult({
+            stepPosition,
+            stepName: stepDef.name || "",
+            severity: stepDef.severityLevel || "MEDIUM",
+            isCritical: Boolean(stepDef.isCritical),
+            weight: Number(stepDef.weight || 5),
+            controlPoints: Array.isArray(stepDef.controlPoints)
+              ? stepDef.controlPoints
+              : [],
+            message: `Step failed: ${errorMessage}`,
+          });
+        })();
+
+    const totalCitations = countCitations(analyzed.points_controle);
+
+    // Persist step output for finalization
+    await step.run("upsert-step-result", async () => {
+      const { prisma } = await import("../../shared/prisma.js");
+
+      await prisma.auditStepResult.upsert({
+        where: {
+          auditId_stepPosition: {
+            auditId: auditDbId,
+            stepPosition,
+          },
+        },
+        create: {
+          auditId: auditDbId,
+          stepPosition,
+          stepName: stepDef.name || "",
+          severityLevel: stepDef.severityLevel || "MEDIUM",
+          isCritical: Boolean(stepDef.isCritical),
+          weight: Number(stepDef.weight || 5),
+          traite: Boolean(analyzed.traite),
+          conforme: analyzed.conforme,
+          score: Number(analyzed.score || 0),
+          niveauConformite: analyzed.niveau_conformite,
+          commentaireGlobal: analyzed.commentaire_global || "",
+          motsClesTrouves: analyzed.mots_cles_trouves || [],
+          minutages: analyzed.minutages || [],
+          erreursTranscriptionTolerees: analyzed.erreurs_transcription_tolerees || 0,
+          totalCitations,
+          totalTokens: analyzed.usage?.total_tokens || 0,
+          rawResult: toPrismaJsonValue(analyzed),
+        },
+        update: {
+          traite: Boolean(analyzed.traite),
+          conforme: analyzed.conforme,
+          score: Number(analyzed.score || 0),
+          niveauConformite: analyzed.niveau_conformite,
+          commentaireGlobal: analyzed.commentaire_global || "",
+          motsClesTrouves: analyzed.mots_cles_trouves || [],
+          minutages: analyzed.minutages || [],
+          erreursTranscriptionTolerees: analyzed.erreurs_transcription_tolerees || 0,
+          totalCitations,
+          totalTokens: analyzed.usage?.total_tokens || 0,
+          rawResult: toPrismaJsonValue(analyzed),
+        },
+      });
+
+      return { saved: true };
+    });
+
+    // Notify the finalizer/progress aggregator
+    await step.sendEvent("emit-step-analyzed", {
+      name: "audit/step.analyzed",
+      data: {
+        audit_db_id,
+        audit_id,
+        fiche_id,
+        audit_config_id,
+        step_position: stepPosition,
+        ok,
+        ...(ok ? {} : { error: errorMessage }),
+      },
+    });
+
+    return { ok, audit_db_id, step_position: stepPosition };
+  }
+);
+
+/**
+ * Audit Finalizer (Distributed)
+ * =============================
+ * Runs after each step completes; when all steps are present, it finalizes:
+ * - citation enrichment
+ * - evidence gating
+ * - compliance calculation
+ * - DB write + completion webhooks/events
+ */
+export const finalizeAuditFromStepsFunction = inngest.createFunction(
+  {
+    id: "audit-finalize-from-steps",
+    name: "Finalize Audit from Step Results",
+    retries: 2,
+    timeouts: {
+      finish: "30m",
+    },
+    concurrency: {
+      // Prevent multiple finalizers racing for the same audit
+      key: "event.data.audit_db_id",
+      limit: 1,
+    },
+    onFailure: async ({ error, event }) => {
+      // Best-effort: mark audit failed to avoid it being stuck in "running".
+      try {
+        const { prisma } = await import("../../shared/prisma.js");
+        const auditDbId = getAuditDbIdFromEvent(event);
+        if (auditDbId === null) return;
+        await prisma.audit.update({
+          where: { id: auditDbId },
+          data: { status: "failed", errorMessage: error.message, completedAt: new Date() },
+        });
+      } catch {
+        // ignore
+      }
+    },
+  },
+  { event: "audit/step.analyzed" },
+  async ({ event, step, logger }) => {
+    const { audit_db_id, audit_id, fiche_id, audit_config_id } = event.data;
+    const auditDbId = BigInt(audit_db_id);
+
+    // Load audit meta (JSON safe)
+    const auditMeta = await step.run("load-audit-meta", async () => {
+      const { prisma } = await import("../../shared/prisma.js");
+      const a = await prisma.audit.findUnique({
+        where: { id: auditDbId },
+        select: {
+          status: true,
+          startedAt: true,
+          completedAt: true,
+        },
+      });
+      return a
+        ? {
+            status: a.status,
+            startedAt: a.startedAt?.toISOString() || null,
+            completedAt: a.completedAt?.toISOString() || null,
+          }
+        : null;
+    });
+
+    if (!auditMeta || auditMeta.status !== "running") {
+      return { skipped: true, reason: "not-running" };
+    }
+
+    // Resolve audit config (prefer Redis cache)
+    const redis = await getRedisClient();
+    const base = `audit:${audit_db_id}`;
+    let auditConfig: AuditConfigForAnalysis | null = null;
+    let timeline: TimelineRecording[] | null = null;
+
+    if (redis) {
+      try {
+        const [cfg, tl] = await redis.mGet([`${base}:config`, `${base}:timeline`]);
+        if (cfg) {
+          const parsed = safeJsonParse(cfg);
+          if (isAuditConfigForAnalysis(parsed)) auditConfig = parsed;
+        }
+        if (tl) {
+          const parsed = safeJsonParse(tl);
+          if (Array.isArray(parsed)) {
+            timeline = parsed as TimelineRecording[];
+          }
+        }
+      } catch (err) {
+        logger.warn("Failed to load finalizer context from Redis; will fall back to DB", {
+          audit_db_id,
+          error: (err as Error).message,
+        });
+      }
+    }
+
+    if (!auditConfig) {
+      const { getAuditConfigById } = await import(
+        "../audit-configs/audit-configs.repository.js"
+      );
+      const config = await getAuditConfigById(BigInt(audit_config_id));
+      if (!config) {
+        throw new NonRetriableError(`Audit config ${audit_config_id} not found`);
+      }
+      auditConfig = {
+        id: config.id.toString(),
+        name: config.name,
+        description: config.description,
+        systemPrompt: config.systemPrompt,
+        auditSteps: config.steps,
+      };
+    }
+
+    const totalSteps = auditConfig.auditSteps.length;
+
+    // Count step results stored so far
+    const counts = await step.run("count-step-results", async () => {
+      const { prisma } = await import("../../shared/prisma.js");
+      const completed = await prisma.auditStepResult.count({
+        where: { auditId: auditDbId },
+      });
+      const failed = await prisma.auditStepResult.count({
+        where: { auditId: auditDbId, traite: false },
+      });
+      return { completed, failed };
+    });
+
+    // Inngest JSONifies step outputs; be defensive (some runtimes widen to number|null).
+    const completedSteps =
+      isRecord(counts) && typeof counts.completed === "number" ? counts.completed : 0;
+    const failedStepsSoFar =
+      isRecord(counts) && typeof counts.failed === "number" ? counts.failed : 0;
+
+    // Progress webhook (best-effort)
+    await step.run("send-progress-update", async () => {
+      try {
+        await auditWebhooks.progress(
+          audit_id,
+          fiche_id,
+          Math.min(completedSteps, totalSteps),
+          totalSteps,
+          failedStepsSoFar,
+          "analysis"
+        );
+      } catch {
+        // ignore
+      }
+      return { notified: true };
+    });
+
+    if (completedSteps < totalSteps) {
+      return { waiting: true, completed: completedSteps, totalSteps };
+    }
+
+    // Load step raw results (do NOT return BigInt ids)
+    const stepRows = await step.run("load-step-rows", async () => {
+      const { prisma } = await import("../../shared/prisma.js");
+      const rows = await prisma.auditStepResult.findMany({
+        where: { auditId: auditDbId },
+        orderBy: { stepPosition: "asc" },
+        select: {
+          stepPosition: true,
+          stepName: true,
+          severityLevel: true,
+          isCritical: true,
+          weight: true,
+          rawResult: true,
+        },
+      });
+      return rows;
+    });
+
+    const stepResults: AnalyzeStepResult[] = stepRows.map((r) => {
+      const raw = r.rawResult as unknown;
+      if (raw && isAnalyzeStepResult(raw)) return raw;
+      const stepPosition = toIntOr(r.stepPosition, 0);
+      const weight = toIntOr(r.weight, 5);
+      return fallbackAnalyzeStepResult({
+        stepPosition: stepPosition > 0 ? stepPosition : 1,
+        stepName: typeof r.stepName === "string" ? r.stepName : "",
+        severity: toAuditSeverityLevel(r.severityLevel),
+        isCritical: Boolean(r.isCritical),
+        weight,
+        controlPoints: [],
+        message: "Missing step rawResult",
+      });
+    });
+
+    // Ensure we have a timeline for evidence gating + citation enrichment
+    if (!timeline) {
+      timeline = await rebuildTimelineFromDatabase(fiche_id);
+    }
+
+    // Enrich citations with recording metadata (date/time/url)
+    const timelineMap = new Map<
+      number,
+      { recording_date: string; recording_time: string; recording_url: string }
+    >(
+      timeline.map((rec) => [
+        rec.recording_index,
+        {
+          recording_date: rec.recording_date || "N/A",
+          recording_time: rec.recording_time || "N/A",
+          recording_url: rec.recording_url || "N/A",
+        },
+      ])
+    );
+
+    for (const stepResult of stepResults) {
+      for (const controlPoint of stepResult.points_controle) {
+        for (const citation of controlPoint.citations) {
+          const meta = timelineMap.get(citation.recording_index);
+          if (meta) {
+            citation.recording_date = meta.recording_date;
+            citation.recording_time = meta.recording_time;
+            citation.recording_url = meta.recording_url;
+          } else {
+            citation.recording_date = "N/A";
+            citation.recording_time = "N/A";
+            citation.recording_url = "N/A";
+          }
+        }
+      }
+    }
+
+    // Evidence gating (deterministic)
+    const enabled = process.env.AUDIT_EVIDENCE_GATING !== "0";
+    let gatedStepResults: AnalyzedAuditStepResult[] = stepResults;
+    if (enabled) {
+      const { validateAndGateAuditStepResults } = await import("./audits.evidence.js");
+      const { stepResults: gated } = validateAndGateAuditStepResults({
+        stepResults,
+        timeline,
+        enabled: true,
+      });
+      gatedStepResults = gated;
+    }
+
+    // Compliance calculation
+    const { COMPLIANCE_THRESHOLDS } = await import("../../shared/constants.js");
+    const totalWeight = auditConfig.auditSteps.reduce((sum, s) => sum + s.weight, 0);
+    const earnedWeight = gatedStepResults.reduce((sum, s) => {
+      const maxWeight = Math.max(0, Number(s.step_metadata?.weight ?? s.score ?? 0));
+      const cappedScore = Math.min(Number(s.score ?? 0), maxWeight);
+      return sum + cappedScore;
+    }, 0);
+    const score = totalWeight > 0 ? (earnedWeight / totalWeight) * 100 : 0;
+    const criticalTotal = auditConfig.auditSteps.filter((s) => s.isCritical).length;
+    const criticalPassed = gatedStepResults.filter(
+      (s) => Boolean(s.step_metadata?.is_critical) && s.conforme === "CONFORME"
+    ).length;
+    let niveau = "INSUFFISANT";
+    if (criticalPassed < criticalTotal) {
+      niveau = "REJET";
+    } else if (score >= COMPLIANCE_THRESHOLDS.EXCELLENT) {
+      niveau = "EXCELLENT";
+    } else if (score >= COMPLIANCE_THRESHOLDS.BON) {
+      niveau = "BON";
+    } else if (score >= COMPLIANCE_THRESHOLDS.ACCEPTABLE) {
+      niveau = "ACCEPTABLE";
+    }
+    const compliance = {
+      score: Number(score.toFixed(2)),
+      niveau,
+      points_critiques: `${criticalPassed}/${criticalTotal}`,
+      poids_obtenu: earnedWeight,
+      poids_total: totalWeight,
+    };
+
+    // Save audit result (DB) — idempotent because it updates same audit row
+    const startedAtIso = auditMeta.startedAt || new Date().toISOString();
+    const startedAtMs = auditMeta.startedAt ? Date.parse(auditMeta.startedAt) : Date.now();
+    const durationMs = Math.max(0, Date.now() - startedAtMs);
+
+    const { getCachedFiche } = await import("../fiches/fiches.repository.js");
+    const cached = await getCachedFiche(fiche_id);
+    if (!cached) {
+      throw new Error("Fiche not cached - cannot finalize audit");
+    }
+
+    const timelineChunks = timeline.reduce((sum, r) => sum + (r.total_chunks || 0), 0);
+
+    const totalTokens = gatedStepResults.reduce(
+      (sum, r) => sum + Number(r.usage?.total_tokens || 0),
+      0
+    );
+
+    const failedStepsFinal = gatedStepResults.filter((s) => s.traite === false).length;
+
+    const auditData = {
+      audit: {
+        config: {
+          id: auditConfig.id,
+          name: auditConfig.name,
+          description: auditConfig.description,
+        },
+        fiche: {
+          fiche_id,
+          prospect_name: (() => {
+            const data = cached.rawData as { prospect?: { prenom?: string; nom?: string } };
+            return `${data.prospect?.prenom || ""} ${data.prospect?.nom || ""}`.trim();
+          })(),
+          groupe: (() => {
+            const data = cached.rawData as { information?: { groupe?: string } };
+            return data.information?.groupe || "";
+          })(),
+        },
+        results: {
+          steps: gatedStepResults,
+          compliance,
+        },
+        compliance,
+      },
+      statistics: {
+        recordings_count: timeline.length,
+        transcriptions_count: timeline.length,
+        timeline_chunks: timelineChunks,
+        successful_steps: gatedStepResults.length - failedStepsFinal,
+        failed_steps: failedStepsFinal,
+        total_time_seconds: 0,
+        total_tokens: totalTokens,
+      },
+      metadata: {
+        started_at: startedAtIso,
+        completed_at: new Date().toISOString(),
+        duration_ms: durationMs,
+      },
+    };
+
+    // Persist audit + step summaries (rawResult is overwritten with final gated step)
+    const { updateAuditWithResults } = await import("./audits.repository.js");
+    await updateAuditWithResults(auditDbId, auditData);
+
+    // Completion webhooks + event (best-effort; do not fail the finalizer)
+    await step.run("notify-completion", async () => {
+      try {
+        await auditWebhooks.complianceCalculated(
+          audit_id,
+          fiche_id,
+          `${compliance.poids_obtenu}/${compliance.poids_total}`,
+          `${(compliance.score ?? 0).toFixed(2)}%`,
+          compliance.niveau,
+          compliance.niveau !== "REJET",
+          compliance.points_critiques
+        );
+
+        await auditWebhooks.completed(
+          audit_id,
+          fiche_id,
+          `${compliance.poids_obtenu}/${compliance.poids_total}`,
+          `${(compliance.score ?? 0).toFixed(2)}%`,
+          compliance.niveau,
+          compliance.niveau !== "REJET",
+          auditData.statistics.successful_steps,
+          auditData.statistics.failed_steps,
+          totalTokens,
+          Math.round(durationMs / 1000)
+        );
+      } catch {
+        // ignore
+      }
+      return { notified: true };
+    });
+
+    await step.sendEvent("emit-audit-completed", {
+      name: "audit/completed",
+      data: {
+        fiche_id,
+        audit_id: audit_db_id,
+        audit_config_id,
+        score: compliance.score || 0,
+        niveau: compliance.niveau,
+        duration_ms: durationMs,
+      },
+    });
+
+    // Cleanup Redis context (best-effort)
+    if (redis) {
+      try {
+        const keys: string[] = [
+          `${base}:config`,
+          `${base}:timeline`,
+          `${base}:timelineText`,
+          `${base}:productInfo`,
+        ];
+        for (const s of auditConfig.auditSteps || []) {
+          keys.push(`${base}:step:${s.position}:timelineText`);
+        }
+        await redis.del(keys);
+      } catch {
+        // ignore
+      }
+    }
+
+    logger.info("Audit finalized from step results", {
+      fiche_id,
+      audit_db_id,
+      totalSteps,
+      score: compliance.score,
+      niveau: compliance.niveau,
+      durationMs,
+    });
+
+    return { finalized: true, audit_db_id };
   }
 );
 
@@ -1088,6 +1668,60 @@ export const batchAuditFunction = inngest.createFunction(
     });
 
     // Fan-out: Send events in parallel
+    // Setup Redis-backed batch tracking (optional but recommended for correct progress/completion).
+    // The per-audit finalizer emits `audit/completed`; we use that to advance the batch.
+    let redis = null as Awaited<ReturnType<typeof getRedisClient>>;
+    try {
+      redis = await getRedisClient();
+    } catch {
+      redis = null;
+    }
+
+    if (redis) {
+      const ttlSeconds = Math.max(
+        60,
+        Number(process.env.AUDIT_BATCH_STATE_TTL_SECONDS || 6 * 60 * 60)
+      );
+      const metaKey = `audit:batch:${batchId}:meta`;
+      const pendingKey = `audit:batch:${batchId}:pending`;
+
+      await step.run("init-batch-state", async () => {
+        const multi = redis!.multi();
+        multi.hSet(metaKey, {
+          batch_id: batchId,
+          operation_type: "audit",
+          total: String(fiche_ids.length),
+          succeeded: "0",
+          failed: "0",
+          audit_config_id: String(defaultAuditConfigId),
+          started_at_ms: String(startTime),
+        });
+
+        if (fiche_ids.length > 0) {
+          multi.sAdd(pendingKey, fiche_ids);
+        }
+
+        multi.expire(metaKey, ttlSeconds);
+        multi.expire(pendingKey, ttlSeconds);
+
+        // Index: (config, fiche) -> batchId (helps lookup on audit/completed|failed)
+        for (const ficheId of fiche_ids) {
+          multi.setEx(
+            `audit:batch:index:${defaultAuditConfigId}:${ficheId}`,
+            ttlSeconds,
+            batchId
+          );
+        }
+
+        await multi.exec();
+        return { ok: true };
+      });
+    } else {
+      logger.warn("Redis not configured; batch audit completion webhooks may be unavailable", {
+        batchId,
+      });
+    }
+
     await step.sendEvent(
       "fan-out-audits",
       fiche_ids.map((fiche_id) => ({
@@ -1097,7 +1731,7 @@ export const batchAuditFunction = inngest.createFunction(
           audit_config_id: defaultAuditConfigId,
           user_id,
         },
-        id: `audit-${fiche_id}-${defaultAuditConfigId}-${Date.now()}`,
+        id: `batch-${batchId}-audit-${fiche_id}-${defaultAuditConfigId}`,
       }))
     );
 
@@ -1106,59 +1740,247 @@ export const batchAuditFunction = inngest.createFunction(
     });
 
     // Wait for all audits to complete
-    const completionEvents = await step.waitForEvent("wait-for-completions", {
-      event: "audit/completed",
-      timeout: "45m",
-      match: "data.audit_config_id",
-    });
-
-    // Calculate batch duration
-    const batchDuration = Date.now() - startTime!;
-
-    // Count results
-    const results = (await step.run("count-results", async () => {
-      return {
-        total: fiche_ids.length,
-        succeeded: completionEvents ? 1 : 0,
-        failed: 0,
-      };
-    })) as unknown as { total: number; succeeded: number; failed: number };
-
-    const duration = batchDuration; // Use pre-calculated duration
-
-    // Send batch completion webhook
-    await step.run("send-batch-completion-webhook", async () => {
-      await batchWebhooks.completed(
-        batchId,
-        "audit",
-        results.total,
-        results.succeeded,
-        results.failed,
-        duration
-      );
-      return { notified: true };
-    });
-
-    // Send batch completion event
-    await step.sendEvent("emit-batch-completion", {
-      name: "audit/batch.completed",
-      data: {
-        total: fiche_ids.length,
-        succeeded: results.succeeded,
-        failed: results.failed,
-        audit_config_id: defaultAuditConfigId,
-      },
-    });
-
-    logger.info("Batch audit completed", results);
-
     return {
       success: true,
       total_fiches: fiche_ids.length,
       audit_config_id: defaultAuditConfigId,
-      ...results,
+      total: fiche_ids.length,
+      succeeded: 0,
+      failed: 0,
     };
   }
 );
 
-export const functions = [runAuditFunction, batchAuditFunction];
+/**
+ * Batch Audit Progress Updater (on audit/completed)
+ * ================================================
+ * Updates Redis-backed batch counters and emits batch webhooks/events when done.
+ */
+export const batchAuditProgressOnCompletedFunction = inngest.createFunction(
+  {
+    id: "batch-audit-progress-completed",
+    name: "Batch Audit Progress (Completed)",
+    retries: 2,
+    timeouts: {
+      finish: "30m",
+    },
+    concurrency: [
+      {
+        limit: Math.max(
+          1,
+          Number(
+            process.env.BATCH_AUDIT_PROGRESS_CONCURRENCY || DEFAULT_GLOBAL_CONCURRENCY
+          )
+        ),
+      },
+      { key: "event.data.fiche_id", limit: 1 },
+    ],
+  },
+  { event: "audit/completed" },
+  async ({ event, step, logger }) => {
+    const { fiche_id, audit_config_id } = event.data;
+
+    const redis = await getRedisClient();
+    if (!redis) return { skipped: true, reason: "redis_not_configured" };
+
+    const indexKey = `audit:batch:index:${audit_config_id}:${fiche_id}`;
+    const batchId = await step.run(`lookup-batch-${fiche_id}`, async () => {
+      return await redis.get(indexKey);
+    });
+    if (!batchId) return { skipped: true, reason: "not_in_batch" };
+
+    const metaKey = `audit:batch:${batchId}:meta`;
+    const pendingKey = `audit:batch:${batchId}:pending`;
+    const finalizedKey = `audit:batch:${batchId}:finalized`;
+
+    const removed = await step.run(`pending-remove-${batchId}-${fiche_id}`, async () => {
+      return await redis.sRem(pendingKey, fiche_id);
+    });
+    if (!removed) return { duplicate: true, batchId, fiche_id };
+
+    const snapshot = await step.run(`update-and-snapshot-${batchId}-${fiche_id}`, async () => {
+      const multi = redis.multi();
+      multi.hIncrBy(metaKey, "succeeded", 1);
+      multi.sCard(pendingKey);
+      await multi.exec();
+
+      const [meta, remaining] = await Promise.all([
+        redis.hGetAll(metaKey),
+        redis.sCard(pendingKey),
+      ]);
+      return { meta: meta as Record<string, string>, remaining };
+    });
+
+    const total = Number(snapshot.meta.total || 0);
+    const succeeded = Number(snapshot.meta.succeeded || 0);
+    const failed = Number(snapshot.meta.failed || 0);
+    const remaining = typeof snapshot.remaining === "number" ? snapshot.remaining : Number(snapshot.remaining || 0);
+
+    await step.run(`send-batch-progress-${batchId}-${succeeded + failed}`, async () => {
+      try {
+        await batchWebhooks.progress(batchId, "audit", total, succeeded + failed, failed);
+      } catch {
+        // ignore
+      }
+      return { notified: true };
+    });
+
+    if (remaining > 0) {
+      return { ok: true, batchId, total, succeeded, failed, remaining };
+    }
+
+    const finalized = await step.run(`finalize-once-${batchId}`, async () => {
+      const r = await redis.set(finalizedKey, "1", { NX: true, EX: 6 * 60 * 60 });
+      return r === "OK";
+    });
+    if (!finalized) return { already_finalized: true, batchId };
+
+    const startedAtMs = Number(snapshot.meta.started_at_ms || Date.now());
+    const durationMs = Math.max(0, Date.now() - startedAtMs);
+
+    await step.run(`send-batch-completed-${batchId}`, async () => {
+      try {
+        await batchWebhooks.completed(batchId, "audit", total, succeeded + failed, failed, durationMs);
+      } catch {
+        // ignore
+      }
+      return { notified: true };
+    });
+    await step.sendEvent(`emit-batch-completed-${batchId}`, {
+      name: "audit/batch.completed",
+      data: {
+        batch_id: batchId,
+        total,
+        succeeded,
+        failed,
+        audit_config_id,
+      },
+      id: `audit-batch-completed-${batchId}`,
+    });
+    // Send batch completion webhook
+    logger.info("Batch audit finalized", { batchId, total, succeeded, failed, durationMs });
+    return { finalized: true, batchId };
+  }
+);
+
+/**
+ * Batch Audit Progress Updater (on audit/failed)
+ * ================================================
+ */
+export const batchAuditProgressOnFailedFunction = inngest.createFunction(
+  {
+    id: "batch-audit-progress-failed",
+    name: "Batch Audit Progress (Failed)",
+    retries: 2,
+    timeouts: {
+      finish: "30m",
+    },
+    concurrency: [
+      {
+        limit: Math.max(
+          1,
+          Number(
+            process.env.BATCH_AUDIT_PROGRESS_CONCURRENCY || DEFAULT_GLOBAL_CONCURRENCY
+          )
+        ),
+      },
+      { key: "event.data.fiche_id", limit: 1 },
+    ],
+  },
+  { event: "audit/failed" },
+  async ({ event, step, logger }) => {
+    const { fiche_id, audit_config_id } = event.data;
+
+    const redis = await getRedisClient();
+    if (!redis) return { skipped: true, reason: "redis_not_configured" };
+
+    const indexKey = `audit:batch:index:${audit_config_id}:${fiche_id}`;
+    const batchId = await step.run(`lookup-batch-failed-${fiche_id}`, async () => {
+      return await redis.get(indexKey);
+    });
+    if (!batchId) return { skipped: true, reason: "not_in_batch" };
+
+    const metaKey = `audit:batch:${batchId}:meta`;
+    const pendingKey = `audit:batch:${batchId}:pending`;
+    const finalizedKey = `audit:batch:${batchId}:finalized`;
+
+    const removed = await step.run(`pending-remove-failed-${batchId}-${fiche_id}`, async () => {
+      return await redis.sRem(pendingKey, fiche_id);
+    });
+    if (!removed) return { duplicate: true, batchId, fiche_id };
+
+    const snapshot = await step.run(`update-and-snapshot-failed-${batchId}-${fiche_id}`, async () => {
+      const multi = redis.multi();
+      multi.hIncrBy(metaKey, "failed", 1);
+      multi.sCard(pendingKey);
+      await multi.exec();
+
+      const [meta, remaining] = await Promise.all([
+        redis.hGetAll(metaKey),
+        redis.sCard(pendingKey),
+      ]);
+      return { meta: meta as Record<string, string>, remaining };
+    });
+
+    const total = Number(snapshot.meta.total || 0);
+    const succeeded = Number(snapshot.meta.succeeded || 0);
+    const failed = Number(snapshot.meta.failed || 0);
+    const remaining = typeof snapshot.remaining === "number" ? snapshot.remaining : Number(snapshot.remaining || 0);
+
+    await step.run(`send-batch-progress-failed-${batchId}-${succeeded + failed}`, async () => {
+      try {
+        await batchWebhooks.progress(batchId, "audit", total, succeeded + failed, failed);
+      } catch {
+        // ignore
+      }
+      return { notified: true };
+    });
+
+    if (remaining > 0) {
+      return { ok: false, batchId, total, succeeded, failed, remaining };
+    }
+
+    const finalized = await step.run(`finalize-once-failed-${batchId}`, async () => {
+      const r = await redis.set(finalizedKey, "1", { NX: true, EX: 6 * 60 * 60 });
+      return r === "OK";
+    });
+    if (!finalized) return { already_finalized: true, batchId };
+
+    const startedAtMs = Number(snapshot.meta.started_at_ms || Date.now());
+    const durationMs = Math.max(0, Date.now() - startedAtMs);
+
+    await step.run(`send-batch-completed-failed-${batchId}`, async () => {
+      try {
+        await batchWebhooks.completed(batchId, "audit", total, succeeded + failed, failed, durationMs);
+      } catch {
+        // ignore
+      }
+      return { notified: true };
+    });
+
+    // Send batch completion event
+    await step.sendEvent(`emit-batch-completed-failed-${batchId}`, {
+      name: "audit/batch.completed",
+      data: {
+        batch_id: batchId,
+        total,
+        succeeded,
+        failed,
+        audit_config_id,
+      },
+      id: `audit-batch-completed-${batchId}`,
+    });
+
+    logger.info("Batch audit finalized (with failures)", { batchId, total, succeeded, failed, durationMs });
+    return { finalized: true, batchId };
+  }
+);
+
+export const functions = [
+  runAuditFunction,
+  auditStepAnalyzeFunction,
+  finalizeAuditFromStepsFunction,
+  batchAuditFunction,
+  batchAuditProgressOnCompletedFunction,
+  batchAuditProgressOnFailedFunction,
+];

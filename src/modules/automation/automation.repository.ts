@@ -13,7 +13,19 @@
  */
 
 import { prisma } from "../../shared/prisma.js";
-import type { CreateAutomationScheduleInput, UpdateAutomationScheduleInput } from "./automation.schemas.js";
+import { serializeBigInt } from "../../shared/bigint-serializer.js";
+import type { Prisma } from "@prisma/client";
+import type {
+  CreateAutomationScheduleInput,
+  UpdateAutomationScheduleInput,
+} from "./automation.schemas.js";
+
+function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
+  const sanitized = serializeBigInt(value);
+  // JSON.parse returns `any` in lib types; narrow to `unknown` then assert Prisma JSON type.
+  const json: unknown = JSON.parse(JSON.stringify(sanitized));
+  return json as Prisma.InputJsonValue;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTOMATION SCHEDULE CRUD
@@ -37,7 +49,7 @@ export async function createAutomationSchedule(
       timeOfDay: data.timeOfDay,
       dayOfWeek: data.dayOfWeek,
       dayOfMonth: data.dayOfMonth,
-      ficheSelection: data.ficheSelection as any,
+      ficheSelection: toPrismaJsonValue(data.ficheSelection),
       runTranscription: data.runTranscription,
       skipIfTranscribed: data.skipIfTranscribed,
       transcriptionPriority: data.transcriptionPriority,
@@ -144,7 +156,7 @@ export async function updateAutomationSchedule(
       ...(data.dayOfWeek !== undefined && { dayOfWeek: data.dayOfWeek }),
       ...(data.dayOfMonth !== undefined && { dayOfMonth: data.dayOfMonth }),
       ...(data.ficheSelection && {
-        ficheSelection: data.ficheSelection as any,
+        ficheSelection: toPrismaJsonValue(data.ficheSelection),
       }),
       ...(data.runTranscription !== undefined && {
         runTranscription: data.runTranscription,
@@ -201,6 +213,23 @@ export async function getActiveAutomationSchedules() {
   });
 }
 
+/**
+ * Mark schedule as triggered (used by scheduler to avoid duplicate dispatches).
+ * Does NOT increment counters (those are updated on completion).
+ */
+export async function markAutomationScheduleTriggered(
+  scheduleId: bigint,
+  triggeredAt: Date = new Date()
+) {
+  return await prisma.automationSchedule.update({
+    where: { id: scheduleId },
+    data: {
+      lastRunAt: triggeredAt,
+      lastRunStatus: "running",
+    },
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTOMATION RUN CRUD
 // ═══════════════════════════════════════════════════════════════════════════
@@ -210,13 +239,13 @@ export async function getActiveAutomationSchedules() {
  */
 export async function createAutomationRun(
   scheduleId: bigint,
-  configSnapshot: any
+  configSnapshot: unknown
 ) {
   return await prisma.automationRun.create({
     data: {
       scheduleId,
       status: "running",
-      configSnapshot,
+      configSnapshot: toPrismaJsonValue(configSnapshot),
     },
   });
 }
@@ -236,13 +265,35 @@ export async function updateAutomationRun(
     transcriptionsRun?: number;
     auditsRun?: number;
     errorMessage?: string;
-    errorDetails?: any;
-    resultSummary?: any;
+    errorDetails?: unknown;
+    resultSummary?: unknown;
   }
 ) {
+  const updateData: Prisma.AutomationRunUpdateInput = {
+    ...(data.status !== undefined ? { status: data.status } : {}),
+    ...(data.completedAt !== undefined ? { completedAt: data.completedAt } : {}),
+    ...(data.durationMs !== undefined ? { durationMs: data.durationMs } : {}),
+    ...(data.totalFiches !== undefined ? { totalFiches: data.totalFiches } : {}),
+    ...(data.successfulFiches !== undefined
+      ? { successfulFiches: data.successfulFiches }
+      : {}),
+    ...(data.failedFiches !== undefined ? { failedFiches: data.failedFiches } : {}),
+    ...(data.transcriptionsRun !== undefined
+      ? { transcriptionsRun: data.transcriptionsRun }
+      : {}),
+    ...(data.auditsRun !== undefined ? { auditsRun: data.auditsRun } : {}),
+    ...(data.errorMessage !== undefined ? { errorMessage: data.errorMessage } : {}),
+    ...(data.errorDetails !== undefined
+      ? { errorDetails: toPrismaJsonValue(data.errorDetails) }
+      : {}),
+    ...(data.resultSummary !== undefined
+      ? { resultSummary: toPrismaJsonValue(data.resultSummary) }
+      : {}),
+  };
+
   return await prisma.automationRun.update({
     where: { id },
-    data,
+    data: updateData,
   });
 }
 
@@ -316,14 +367,14 @@ export async function addAutomationLog(
   runId: bigint,
   level: string,
   message: string,
-  metadata?: any
+  metadata?: unknown
 ) {
   return await prisma.automationLog.create({
     data: {
       runId,
       level,
       message,
-      metadata: metadata || {},
+      metadata: toPrismaJsonValue(metadata ?? {}),
     },
   });
 }

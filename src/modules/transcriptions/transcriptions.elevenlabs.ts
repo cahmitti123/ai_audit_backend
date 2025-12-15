@@ -5,10 +5,17 @@
  */
 
 import axios from "axios";
-import { readFileSync, writeFileSync, existsSync } from "fs";
 import { Transcription } from "../../schemas.js";
+import { mapWithConcurrency } from "../../utils/concurrency.js";
+import { logger } from "../../shared/logger.js";
 
-const CACHE_FILE = "./data/transcription_cache.json";
+type RecordingInput = {
+  recording_url?: string | null;
+  recordingUrl?: string | null;
+  call_id?: string;
+  callId?: string;
+  [key: string]: unknown;
+};
 
 export class TranscriptionService {
   private elevenLabsApiKey: string;
@@ -16,43 +23,23 @@ export class TranscriptionService {
 
   constructor(apiKey: string) {
     this.elevenLabsApiKey = apiKey;
-    this.cache = this.loadCache();
-  }
-
-  private loadCache(): Map<string, Transcription> {
-    if (existsSync(CACHE_FILE)) {
-      try {
-        const data = JSON.parse(readFileSync(CACHE_FILE, "utf-8"));
-        console.log(
-          `✓ Cache transcriptions: ${Object.keys(data).length} entrées`
-        );
-        return new Map(Object.entries(data));
-      } catch (e) {
-        console.warn("⚠️  Erreur chargement cache:", e);
-      }
-    }
-    return new Map();
-  }
-
-  private saveCache() {
-    const obj = Object.fromEntries(this.cache);
-    writeFileSync(CACHE_FILE, JSON.stringify(obj, null, 2));
-    console.log(`✓ Cache sauvegardé: ${this.cache.size} entrées`);
+    // In-memory cache only. Persistent caching is handled by the database layer.
+    this.cache = new Map();
   }
 
   async transcribe(url: string): Promise<Transcription> {
     // Vérifier cache
     if (this.cache.has(url)) {
-      console.log(
-        `  ✓ Depuis cache (ID: ${this.cache.get(url)?.transcription_id})`
-      );
+      logger.debug("Using in-memory transcription cache", {
+        transcription_id: this.cache.get(url)?.transcription_id,
+      });
       return this.cache.get(url)!;
     }
 
-    console.log(`  📥 Téléchargement audio...`);
+    logger.debug("Downloading audio for transcription");
     const audioResponse = await axios.get(url, { responseType: "arraybuffer" });
 
-    console.log(`  🎤 Transcription ElevenLabs...`);
+    logger.info("Calling ElevenLabs speech-to-text");
 
     const formData = new FormData();
     const blob = new Blob([audioResponse.data], { type: "audio/mpeg" });
@@ -76,7 +63,7 @@ export class TranscriptionService {
       recording_url: url,
       transcription_id: response.data.transcription_id,
       call_id: "",
-      recording: null as any,
+      recording: null,
       transcription: {
         text: response.data.text,
         language_code: response.data.language_code,
@@ -87,31 +74,42 @@ export class TranscriptionService {
 
     // Cache
     this.cache.set(url, transcription);
-    this.saveCache();
 
-    console.log(`  ✓ ${response.data.words?.length || 0} mots transcrits`);
+    logger.info("ElevenLabs transcription complete", {
+      words: response.data.words?.length || 0,
+      transcription_id: response.data.transcription_id,
+    });
 
     return transcription;
   }
 
-  async transcribeAll(recordings: any[]): Promise<Transcription[]> {
-    console.log(
-      `\n🎤 Transcription parallèle de ${recordings.length} enregistrements...\n`
+  async transcribeAll(recordings: RecordingInput[]): Promise<Transcription[]> {
+    logger.info("Parallel transcription of recordings", {
+      recordings: recordings.length,
+    });
+
+    const concurrency = Math.max(
+      1,
+      Number(process.env.TRANSCRIPTION_RECORDING_CONCURRENCY || 2)
     );
 
-    const transcriptionPromises = recordings.map(async (recording, i) => {
+    const results = await mapWithConcurrency(recordings, concurrency, async (recording, i) => {
       const recordingName = recording.recording_url
         ? recording.recording_url.split("/").pop()
         : recording.call_id || "unknown";
 
-      console.log(`[${i + 1}/${recordings.length}] ${recordingName} - Démarrage...`);
+      logger.debug("Recording transcription started", {
+        index: i + 1,
+        total: recordings.length,
+        recording: recordingName,
+      });
 
       try {
         // Handle both recordingUrl (DB) and recording_url (API) formats
         const url = recording.recording_url || recording.recordingUrl;
 
         if (!url) {
-          console.log(`  ⚠️  No recording URL, skipping`);
+          logger.warn("No recording URL; skipping", { recording: recordingName });
           return null;
         }
 
@@ -121,18 +119,28 @@ export class TranscriptionService {
         transcription.recording = recording;
         transcription.call_id = recording.call_id || recording.callId;
 
-        console.log(`[${i + 1}/${recordings.length}] ${recordingName} - ✓ Terminé`);
+        logger.debug("Recording transcription completed", {
+          index: i + 1,
+          total: recordings.length,
+          recording: recordingName,
+        });
         return transcription;
       } catch (error) {
-        console.error(`[${i + 1}/${recordings.length}] ${recordingName} - ❌ Erreur:`, error);
+        logger.error("Recording transcription failed", {
+          index: i + 1,
+          total: recordings.length,
+          recording: recordingName,
+          error: error instanceof Error ? error.message : String(error),
+        });
         return null;
       }
     });
-
-    const results = await Promise.all(transcriptionPromises);
     const transcriptions = results.filter((t): t is Transcription => t !== null);
 
-    console.log(`\n✓ ${transcriptions.length}/${recordings.length} transcriptions réussies\n`);
+    logger.info("Transcription batch complete", {
+      successful: transcriptions.length,
+      total: recordings.length,
+    });
 
     return transcriptions;
   }

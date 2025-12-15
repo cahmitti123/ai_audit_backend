@@ -12,7 +12,7 @@
 /**
  * Base API Response Structure
  */
-export interface BaseApiResponse<T = any> {
+export interface BaseApiResponse<T = unknown> {
   success: boolean;
   data?: T;
   error?: string;
@@ -22,7 +22,7 @@ export interface BaseApiResponse<T = any> {
 /**
  * Paginated Response Structure
  */
-export interface PaginatedResponse<T = any> {
+export interface PaginatedResponse<T = unknown> {
   success: boolean;
   data: T[];
   pagination: {
@@ -52,28 +52,28 @@ export type FicheSearchResponse = {
  * Response from getting fiche details with recordings
  * (Generic type - no test data available)
  */
-export type FicheDetailsResponse = BaseApiResponse<any>;
+export type FicheDetailsResponse = BaseApiResponse<unknown>;
 
 
 /**
  * Response from refreshing fiche details from API
  * (Generic type - no test data available)
  */
-export type FicheDetailsRefreshResponse = BaseApiResponse<any>;
+export type FicheDetailsRefreshResponse = BaseApiResponse<unknown>;
 
 
 /**
  * Response from getting cached fiche data
  * (Generic type - no test data available)
  */
-export type FicheCacheResponse = BaseApiResponse<any>;
+export type FicheCacheResponse = BaseApiResponse<unknown>;
 
 
 /**
  * Response from getting fiche transcription and audit status
  * (Generic type - no test data available)
  */
-export type FicheStatusResponse = BaseApiResponse<any>;
+export type FicheStatusResponse = BaseApiResponse<unknown>;
 
 
 /**
@@ -138,7 +138,7 @@ export type FichesByDateResponse = {
   data: {
   date: string;
   total: number;
-  fiches: any[];
+  fiches: unknown[];
 };
 };
 
@@ -152,7 +152,7 @@ export type FichesByDateRangeResponse = {
   startDate: string;
   endDate: string;
   total: number;
-  fiches: any[];
+  fiches: unknown[];
 };
 };
 
@@ -161,7 +161,7 @@ export type FichesByDateRangeResponse = {
  * Response from getting all recordings for a fiche
  * (Generic type - no test data available)
  */
-export type RecordingsListResponse = BaseApiResponse<any>;
+export type RecordingsListResponse = BaseApiResponse<unknown>;
 
 
 /**
@@ -179,14 +179,14 @@ export type TranscriptionQueueResponse = {
  * Response from getting transcription status for a fiche
  * (Generic type - no test data available)
  */
-export type TranscriptionStatusResponse = BaseApiResponse<any>;
+export type TranscriptionStatusResponse = BaseApiResponse<unknown>;
 
 
 /**
  * Response from getting transcription for a specific recording
  * (Generic type - no test data available)
  */
-export type RecordingTranscriptionResponse = BaseApiResponse<any>;
+export type RecordingTranscriptionResponse = BaseApiResponse<unknown>;
 
 
 /**
@@ -228,25 +228,25 @@ export type AuditsListResponse = {
   resultData: {
   audit: {
   fiche: {
-  groupe: any;
-  fiche_id: any;
-  prospect_name: any;
+  groupe: unknown;
+  fiche_id: unknown;
+  prospect_name: unknown;
 };
   config: {
-  id: any;
-  name: any;
-  description: any;
+  id: unknown;
+  name: unknown;
+  description: unknown;
 };
   results: {
-  steps: any;
-  compliance: any;
+  steps: unknown;
+  compliance: unknown;
 };
   compliance: {
-  score: any;
-  niveau: any;
-  poids_total: any;
-  poids_obtenu: any;
-  points_critiques: any;
+  score: unknown;
+  niveau: unknown;
+  poids_total: unknown;
+  poids_obtenu: unknown;
+  points_critiques: unknown;
 };
 };
   metadata: {
@@ -297,7 +297,7 @@ export type AuditsListResponse = {
  */
 export type AuditsListFilteredResponse = {
   success: boolean;
-  data: any[];
+  data: unknown[];
   pagination: {
   total: number;
   limit: number;
@@ -352,20 +352,20 @@ export type AuditsGroupedByFichesResponse = {
   recordingsCount: number;
   timelineChunks: number;
   resultData: {
-  audit: any;
-  metadata: any;
-  statistics: any;
+  audit: unknown;
+  metadata: unknown;
+  statistics: unknown;
 };
   version: number;
   isLatest: boolean;
   createdAt: string;
   updatedAt: string;
   auditConfig: {
-  id: any;
-  name: any;
-  description: any;
+  id: unknown;
+  name: unknown;
+  description: unknown;
 };
-  stepResults: any[];
+  stepResults: unknown[];
 }[];
   summary: {
   totalAudits: number;
@@ -390,7 +390,7 @@ export type AuditsGroupedByFichesResponse = {
  * Response from getting detailed audit results
  * (Generic type - no test data available)
  */
-export type AuditDetailsResponse = BaseApiResponse<any>;
+export type AuditDetailsResponse = BaseApiResponse<unknown>;
 
 
 /**
@@ -398,7 +398,7 @@ export type AuditDetailsResponse = BaseApiResponse<any>;
  */
 export type AuditsByFicheResponse = {
   success: boolean;
-  data: any[];
+  data: unknown[];
   count: number;
 };
 
@@ -472,8 +472,8 @@ export type AuditConfigsListResponse = {
   weight: number;
   chronologicalImportant: boolean;
   verifyProductInfo: boolean;
-  controlPoints: any[];
-  keywords: any[];
+  controlPoints: unknown[];
+  keywords: unknown[];
 }[];
 }[];
   count: number;
@@ -484,7 +484,7 @@ export type AuditConfigsListResponse = {
  * Response from getting audit configuration details
  * (Generic type - no test data available)
  */
-export type AuditConfigDetailsResponse = BaseApiResponse<any>;
+export type AuditConfigDetailsResponse = BaseApiResponse<unknown>;
 
 
 /**
@@ -503,7 +503,7 @@ export type AuditConfigCreateResponse = {
  * Response from updating audit configuration
  * (Generic type - no test data available)
  */
-export type AuditConfigUpdateResponse = BaseApiResponse<any>;
+export type AuditConfigUpdateResponse = BaseApiResponse<unknown>;
 
 
 /**
@@ -513,7 +513,7 @@ export type AutomationSchedulesListResponse = {
   success: boolean;
   data: {
   id: string;
-  specificAuditConfigs: any[];
+  specificAuditConfigs: unknown[];
   name: string;
   description: string;
   isActive: boolean;
@@ -543,7 +543,7 @@ export type AutomationSchedulesListResponse = {
   notifyOnComplete: boolean;
   notifyOnError: boolean;
   webhookUrl?: null;
-  notifyEmails: any[];
+  notifyEmails: unknown[];
   externalApiKey?: null;
   lastRunAt: string;
   lastRunStatus: string;
@@ -559,7 +559,7 @@ export type AutomationSchedulesListResponse = {
  * Response from getting automation schedule details
  * (Generic type - no test data available)
  */
-export type AutomationScheduleDetailsResponse = BaseApiResponse<any>;
+export type AutomationScheduleDetailsResponse = BaseApiResponse<unknown>;
 
 
 /**
@@ -577,7 +577,7 @@ export type AutomationScheduleCreateResponse = {
  * Response from updating automation schedule
  * (Generic type - no test data available)
  */
-export type AutomationScheduleUpdateResponse = BaseApiResponse<any>;
+export type AutomationScheduleUpdateResponse = BaseApiResponse<unknown>;
 
 
 /**
@@ -595,7 +595,7 @@ export type AutomationTriggerResponse = {
  */
 export type AutomationRunsListResponse = {
   success: boolean;
-  data: any[];
+  data: unknown[];
   count: number;
   limit: number;
   offset: number;
@@ -629,7 +629,7 @@ export type AutomationRunDetailsResponse = {
   overrides?: null;
 };
   resultSummary?: null;
-  logs: any[];
+  logs: unknown[];
 };
 };
 
@@ -639,7 +639,7 @@ export type AutomationRunDetailsResponse = {
  */
 export type AutomationRunLogsResponse = {
   success: boolean;
-  data: any[];
+  data: unknown[];
   count: number;
 };
 
@@ -648,7 +648,7 @@ export type AutomationRunLogsResponse = {
  * Response from getting audit chat history
  * (Generic type - no test data available)
  */
-export type AuditChatHistoryResponse = BaseApiResponse<any>;
+export type AuditChatHistoryResponse = BaseApiResponse<unknown>;
 
 
 /**
@@ -659,7 +659,7 @@ export type FicheChatHistoryResponse = {
   data: {
   conversationId: string;
   ficheId: string;
-  messages: any[];
+  messages: unknown[];
   messageCount: number;
 };
 };

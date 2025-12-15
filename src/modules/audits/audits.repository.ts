@@ -11,16 +11,22 @@
  */
 
 import { prisma } from "../../shared/prisma.js";
+import type { Prisma } from "@prisma/client";
+import type { ListAuditsFilters } from "./audits.schemas.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * Sanitize data by removing null bytes (\u0000) which PostgreSQL cannot store in text fields
  * This is common with LLM outputs that may contain null characters
  */
-function sanitizeNullBytes(data: any): any {
+function sanitizeNullBytes(data: unknown): unknown {
   if (data === null || data === undefined) {
     return data;
   }
@@ -37,8 +43,8 @@ function sanitizeNullBytes(data: any): any {
 
   if (typeof data === "object") {
     // Recursively sanitize object properties
-    const sanitized: any = {};
-    for (const [key, value] of Object.entries(data)) {
+    const sanitized: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
       sanitized[key] = sanitizeNullBytes(value);
     }
     return sanitized;
@@ -48,22 +54,51 @@ function sanitizeNullBytes(data: any): any {
   return data;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// TYPES (moved from export to internal use)
-// ═══════════════════════════════════════════════════════════════════════════
-
-export interface ListAuditsFilters {
-  ficheIds?: string[];
-  status?: string[];
-  isCompliant?: boolean;
-  dateFrom?: Date;
-  dateTo?: Date;
-  auditConfigIds?: bigint[];
-  sortBy?: "created_at" | "completed_at" | "score_percentage" | "duration_ms";
-  sortOrder?: "asc" | "desc";
-  limit?: number;
-  offset?: number;
+function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
+  // Ensure we only write JSON-safe values to Prisma Json columns.
+  const json: unknown = JSON.parse(JSON.stringify(value));
+  return json as Prisma.InputJsonValue;
 }
+
+type AuditWorkflowControlPoint = {
+  citations?: unknown[] | null;
+} & Record<string, unknown>;
+
+type AuditWorkflowStep = {
+  step_metadata?: {
+    position?: number;
+    name?: string;
+    severity?: string;
+    is_critical?: boolean;
+    weight?: number;
+  } | null;
+  traite: boolean;
+  conforme: string;
+  score: number;
+  niveau_conformite: string;
+  commentaire_global: string;
+  mots_cles_trouves?: string[] | null;
+  minutages?: string[] | null;
+  erreurs_transcription_tolerees?: number | null;
+  points_controle?: AuditWorkflowControlPoint[] | null;
+  usage?: { total_tokens?: number | null } | null;
+} & Record<string, unknown>;
+
+type AuditWorkflowResult = {
+  audit: {
+    config: { id: string | number };
+    compliance: { score: number; niveau: string; points_critiques: string };
+    results: { steps: AuditWorkflowStep[] };
+  };
+  metadata: { started_at?: string; completed_at: string; duration_ms: number };
+  statistics: {
+    total_tokens: number;
+    successful_steps: number;
+    failed_steps: number;
+    recordings_count: number;
+    timeline_chunks: number;
+  };
+} & Record<string, unknown>;
 
 /**
  * Create audit record when workflow starts
@@ -99,64 +134,129 @@ export async function createPendingAudit(
  */
 export async function updateAuditWithResults(
   auditDbId: bigint,
-  auditResult: any
+  auditResult: unknown
 ) {
   // Sanitize the audit result to remove null bytes that PostgreSQL cannot handle
-  const sanitizedResult = sanitizeNullBytes(auditResult);
+  const sanitizedResult = sanitizeNullBytes(auditResult) as AuditWorkflowResult;
 
-  return await prisma.audit.update({
-    where: { id: auditDbId },
-    data: {
-      overallScore: sanitizedResult.audit.compliance.score,
-      scorePercentage: sanitizedResult.audit.compliance.score,
-      niveau: sanitizedResult.audit.compliance.niveau,
-      isCompliant: sanitizedResult.audit.compliance.niveau !== "REJET",
-      criticalPassed: parseInt(
-        sanitizedResult.audit.compliance.points_critiques.split("/")[0]
-      ),
-      criticalTotal: parseInt(
-        sanitizedResult.audit.compliance.points_critiques.split("/")[1]
-      ),
-      status: "completed",
-      completedAt: new Date(sanitizedResult.metadata.completed_at),
-      durationMs: sanitizedResult.metadata.duration_ms,
-      totalTokens: sanitizedResult.statistics.total_tokens,
-      successfulSteps: sanitizedResult.statistics.successful_steps,
-      failedSteps: sanitizedResult.statistics.failed_steps,
-      recordingsCount: sanitizedResult.statistics.recordings_count,
-      timelineChunks: sanitizedResult.statistics.timeline_chunks,
-      resultData: sanitizedResult,
-      stepResults: {
-        create: sanitizedResult.audit.results.steps.map(
-          (step: any, index: number) => ({
-            stepPosition: step.step_metadata?.position || index + 1,
-            stepName: step.step_metadata?.name || "",
-            severityLevel: step.step_metadata?.severity || "MEDIUM",
-            isCritical: step.step_metadata?.is_critical || false,
-            weight: step.step_metadata?.weight || 5,
-            traite: step.traite,
-            conforme: step.conforme,
-            score: step.score,
-            niveauConformite: step.niveau_conformite,
-            commentaireGlobal: step.commentaire_global,
-            motsClesTrouves: step.mots_cles_trouves || [],
-            minutages: step.minutages || [],
-            erreursTranscriptionTolerees:
-              step.erreurs_transcription_tolerees || 0,
-            totalCitations:
-              step.points_controle?.reduce(
-                (sum: number, pc: any) => sum + (pc.citations?.length || 0),
-                0
-              ) || 0,
-            totalTokens: step.usage?.total_tokens || 0,
-          })
+  const steps: AuditWorkflowStep[] = sanitizedResult.audit.results.steps || [];
+
+  /**
+   * IMPORTANT:
+   * Avoid interactive transactions here.
+   *
+   * We run behind Supabase/pgbouncer pooler in some envs, and under load we've observed
+   * Prisma P2028 ("Transaction not found") which cascades into replica crashes and nginx 502s.
+   * Batch transactions are more robust for this "many quick queries" pattern.
+   */
+  const ops: Prisma.PrismaPromise<unknown>[] = [];
+
+  ops.push(
+    prisma.audit.update({
+      where: { id: auditDbId },
+      data: {
+        overallScore: sanitizedResult.audit.compliance.score,
+        scorePercentage: sanitizedResult.audit.compliance.score,
+        niveau: sanitizedResult.audit.compliance.niveau,
+        isCompliant: sanitizedResult.audit.compliance.niveau !== "REJET",
+        criticalPassed: parseInt(
+          sanitizedResult.audit.compliance.points_critiques.split("/")[0]
         ),
+        criticalTotal: parseInt(
+          sanitizedResult.audit.compliance.points_critiques.split("/")[1]
+        ),
+        status: "completed",
+        completedAt: new Date(sanitizedResult.metadata.completed_at),
+        durationMs: sanitizedResult.metadata.duration_ms,
+        totalTokens: sanitizedResult.statistics.total_tokens,
+        successfulSteps: sanitizedResult.statistics.successful_steps,
+        failedSteps: sanitizedResult.statistics.failed_steps,
+        recordingsCount: sanitizedResult.statistics.recordings_count,
+        timelineChunks: sanitizedResult.statistics.timeline_chunks,
+        resultData: toPrismaJsonValue(sanitizedResult),
       },
-    },
-    include: {
-      stepResults: true,
-    },
-  });
+    })
+  );
+
+  // Upsert step results (idempotent and safe for distributed workers).
+  for (const [index, step] of steps.entries()) {
+    const stepPosition = step?.step_metadata?.position || index + 1;
+
+    ops.push(
+      prisma.auditStepResult.upsert({
+        where: {
+          auditId_stepPosition: {
+            auditId: auditDbId,
+            stepPosition,
+          },
+        },
+        create: {
+          auditId: auditDbId,
+          stepPosition,
+          stepName: step.step_metadata?.name || "",
+          severityLevel: step.step_metadata?.severity || "MEDIUM",
+          isCritical: step.step_metadata?.is_critical || false,
+          weight: step.step_metadata?.weight || 5,
+          traite: step.traite,
+          conforme: step.conforme,
+          score: step.score,
+          niveauConformite: step.niveau_conformite,
+          commentaireGlobal: step.commentaire_global,
+          motsClesTrouves: step.mots_cles_trouves || [],
+          minutages: step.minutages || [],
+          erreursTranscriptionTolerees: step.erreurs_transcription_tolerees || 0,
+          totalCitations:
+            step.points_controle?.reduce((sum, pc) => {
+              const count = Array.isArray(pc.citations) ? pc.citations.length : 0;
+              return sum + count;
+            }, 0) || 0,
+          totalTokens: step.usage?.total_tokens || 0,
+          rawResult: toPrismaJsonValue(step),
+        },
+        update: {
+          stepName: step.step_metadata?.name || "",
+          severityLevel: step.step_metadata?.severity || "MEDIUM",
+          isCritical: step.step_metadata?.is_critical || false,
+          weight: step.step_metadata?.weight || 5,
+          traite: step.traite,
+          conforme: step.conforme,
+          score: step.score,
+          niveauConformite: step.niveau_conformite,
+          commentaireGlobal: step.commentaire_global,
+          motsClesTrouves: step.mots_cles_trouves || [],
+          minutages: step.minutages || [],
+          erreursTranscriptionTolerees: step.erreurs_transcription_tolerees || 0,
+          totalCitations:
+            step.points_controle?.reduce((sum, pc) => {
+              const count = Array.isArray(pc.citations) ? pc.citations.length : 0;
+              return sum + count;
+            }, 0) || 0,
+          totalTokens: step.usage?.total_tokens || 0,
+          rawResult: toPrismaJsonValue(step),
+        },
+      })
+    );
+  }
+
+  ops.push(
+    prisma.audit.findUnique({
+      where: { id: auditDbId },
+      include: { stepResults: true },
+    })
+  );
+
+  const results = await prisma.$transaction(ops);
+  const saved = results[results.length - 1] as unknown as
+    | (Awaited<ReturnType<typeof prisma.audit.findUnique>> & {
+        stepResults: unknown[];
+      })
+    | null;
+
+  if (!saved) {
+    throw new Error(`Audit ${auditDbId.toString()} not found after update`);
+  }
+
+  return saved;
 }
 
 /**
@@ -180,61 +280,111 @@ export async function markAuditAsFailed(
  * Save audit result to database (LEGACY - for backwards compatibility)
  * This creates a completed audit directly. New code should use createPendingAudit + updateAuditWithResults
  */
-export async function saveAuditResult(auditResult: any, ficheCacheId: bigint) {
-  return await prisma.audit.create({
-    data: {
-      ficheCacheId,
-      auditConfigId: BigInt(auditResult.audit.config.id),
-      overallScore: auditResult.audit.compliance.score, // PERCENTAGE (0-100)
-      scorePercentage: auditResult.audit.compliance.score, // PERCENTAGE (0-100) - same value for compatibility
-      niveau: auditResult.audit.compliance.niveau,
-      isCompliant: auditResult.audit.compliance.niveau !== "REJET",
-      criticalPassed: parseInt(
-        auditResult.audit.compliance.points_critiques.split("/")[0]
-      ),
-      criticalTotal: parseInt(
-        auditResult.audit.compliance.points_critiques.split("/")[1]
-      ),
-      status: "completed",
-      startedAt: new Date(auditResult.metadata.started_at),
-      completedAt: new Date(auditResult.metadata.completed_at),
-      durationMs: auditResult.metadata.duration_ms,
-      totalTokens: auditResult.statistics.total_tokens,
-      successfulSteps: auditResult.statistics.successful_steps,
-      failedSteps: auditResult.statistics.failed_steps,
-      recordingsCount: auditResult.statistics.recordings_count,
-      timelineChunks: auditResult.statistics.timeline_chunks,
-      resultData: auditResult,
-      stepResults: {
-        create: auditResult.audit.results.steps.map(
-          (step: any, index: number) => ({
-            stepPosition: step.step_metadata?.position || index + 1,
-            stepName: step.step_metadata?.name || "",
-            severityLevel: step.step_metadata?.severity || "MEDIUM",
-            isCritical: step.step_metadata?.is_critical || false,
-            weight: step.step_metadata?.weight || 5,
-            traite: step.traite,
-            conforme: step.conforme,
-            score: step.score,
-            niveauConformite: step.niveau_conformite,
-            commentaireGlobal: step.commentaire_global,
-            motsClesTrouves: step.mots_cles_trouves || [],
-            minutages: step.minutages || [],
-            erreursTranscriptionTolerees:
-              step.erreurs_transcription_tolerees || 0,
-            totalCitations:
-              step.points_controle?.reduce(
-                (sum: number, pc: any) => sum + (pc.citations?.length || 0),
-                0
-              ) || 0,
-            totalTokens: step.usage?.total_tokens || 0,
-          })
+export async function saveAuditResult(auditResult: unknown, ficheCacheId: bigint) {
+  const sanitizedResult = sanitizeNullBytes(auditResult) as AuditWorkflowResult;
+  const steps: AuditWorkflowStep[] = sanitizedResult.audit.results.steps || [];
+
+  return await prisma.$transaction(async (tx) => {
+    const completedAt = new Date(sanitizedResult.metadata.completed_at);
+    const startedAt = sanitizedResult.metadata.started_at
+      ? new Date(sanitizedResult.metadata.started_at)
+      : new Date(completedAt.getTime() - sanitizedResult.metadata.duration_ms);
+
+    const created = await tx.audit.create({
+      data: {
+        ficheCacheId,
+        auditConfigId: BigInt(sanitizedResult.audit.config.id),
+        overallScore: sanitizedResult.audit.compliance.score, // PERCENTAGE (0-100)
+        scorePercentage: sanitizedResult.audit.compliance.score, // PERCENTAGE (0-100) - same value for compatibility
+        niveau: sanitizedResult.audit.compliance.niveau,
+        isCompliant: sanitizedResult.audit.compliance.niveau !== "REJET",
+        criticalPassed: parseInt(
+          sanitizedResult.audit.compliance.points_critiques.split("/")[0]
         ),
+        criticalTotal: parseInt(
+          sanitizedResult.audit.compliance.points_critiques.split("/")[1]
+        ),
+        status: "completed",
+        startedAt,
+        completedAt,
+        durationMs: sanitizedResult.metadata.duration_ms,
+        totalTokens: sanitizedResult.statistics.total_tokens,
+        successfulSteps: sanitizedResult.statistics.successful_steps,
+        failedSteps: sanitizedResult.statistics.failed_steps,
+        recordingsCount: sanitizedResult.statistics.recordings_count,
+        timelineChunks: sanitizedResult.statistics.timeline_chunks,
+        resultData: toPrismaJsonValue(sanitizedResult),
       },
-    },
-    include: {
-      stepResults: true,
-    },
+    });
+
+    for (const [index, step] of steps.entries()) {
+      const stepPosition = step?.step_metadata?.position || index + 1;
+
+      await tx.auditStepResult.upsert({
+        where: {
+          auditId_stepPosition: {
+            auditId: created.id,
+            stepPosition,
+          },
+        },
+        create: {
+          auditId: created.id,
+          stepPosition,
+          stepName: step.step_metadata?.name || "",
+          severityLevel: step.step_metadata?.severity || "MEDIUM",
+          isCritical: step.step_metadata?.is_critical || false,
+          weight: step.step_metadata?.weight || 5,
+          traite: step.traite,
+          conforme: step.conforme,
+          score: step.score,
+          niveauConformite: step.niveau_conformite,
+          commentaireGlobal: step.commentaire_global,
+          motsClesTrouves: step.mots_cles_trouves || [],
+          minutages: step.minutages || [],
+          erreursTranscriptionTolerees: step.erreurs_transcription_tolerees || 0,
+          totalCitations:
+            step.points_controle?.reduce((sum, pc) => {
+              const count = Array.isArray(pc.citations) ? pc.citations.length : 0;
+              return sum + count;
+            }, 0) || 0,
+          totalTokens: step.usage?.total_tokens || 0,
+          rawResult: step as unknown as Prisma.InputJsonValue,
+        },
+        update: {
+          // Should never happen for a freshly created audit, but keep it safe.
+          stepName: step.step_metadata?.name || "",
+          severityLevel: step.step_metadata?.severity || "MEDIUM",
+          isCritical: step.step_metadata?.is_critical || false,
+          weight: step.step_metadata?.weight || 5,
+          traite: step.traite,
+          conforme: step.conforme,
+          score: step.score,
+          niveauConformite: step.niveau_conformite,
+          commentaireGlobal: step.commentaire_global,
+          motsClesTrouves: step.mots_cles_trouves || [],
+          minutages: step.minutages || [],
+          erreursTranscriptionTolerees: step.erreurs_transcription_tolerees || 0,
+          totalCitations:
+            step.points_controle?.reduce((sum, pc) => {
+              const count = Array.isArray(pc.citations) ? pc.citations.length : 0;
+              return sum + count;
+            }, 0) || 0,
+          totalTokens: step.usage?.total_tokens || 0,
+          rawResult: step as unknown as Prisma.InputJsonValue,
+        },
+      });
+    }
+
+    const saved = await tx.audit.findUnique({
+      where: { id: created.id },
+      include: { stepResults: true },
+    });
+
+    if (!saved) {
+      throw new Error(`Audit ${created.id.toString()} not found after create`);
+    }
+
+    return saved;
   });
 }
 
@@ -293,7 +443,7 @@ export async function getAuditById(auditId: bigint) {
 /**
  * List audits with advanced filtering and sorting
  */
-export async function listAudits(filters: ListAuditsFilters = {}) {
+export async function listAudits(filters: Partial<ListAuditsFilters> = {}) {
   const {
     ficheIds,
     status,
@@ -308,7 +458,7 @@ export async function listAudits(filters: ListAuditsFilters = {}) {
   } = filters;
 
   // Build where clause
-  const where: any = {
+  const where: Prisma.AuditWhereInput = {
     isLatest: true,
   };
 
@@ -331,13 +481,10 @@ export async function listAudits(filters: ListAuditsFilters = {}) {
 
   // Filter by date range
   if (dateFrom || dateTo) {
-    where.createdAt = {};
-    if (dateFrom) {
-      where.createdAt.gte = dateFrom;
-    }
-    if (dateTo) {
-      where.createdAt.lte = dateTo;
-    }
+    where.createdAt = {
+      ...(dateFrom ? { gte: dateFrom } : {}),
+      ...(dateTo ? { lte: dateTo } : {}),
+    };
   }
 
   // Filter by audit config IDs
@@ -348,7 +495,7 @@ export async function listAudits(filters: ListAuditsFilters = {}) {
   }
 
   // Build orderBy
-  const orderBy: any = {};
+  const orderBy: Prisma.AuditOrderByWithRelationInput = {};
   switch (sortBy) {
     case "created_at":
       orderBy.createdAt = sortOrder;
@@ -402,7 +549,7 @@ export async function listAudits(filters: ListAuditsFilters = {}) {
  * Returns raw Prisma data - transformations should be done in service layer
  */
 export async function getAuditsGroupedByFichesRaw(
-  filters: ListAuditsFilters = {}
+  filters: Partial<ListAuditsFilters> = {}
 ) {
   const {
     ficheIds,
@@ -418,7 +565,7 @@ export async function getAuditsGroupedByFichesRaw(
   } = filters;
 
   // Build where clause for audits
-  const auditWhere: any = {
+  const auditWhere: Prisma.AuditWhereInput = {
     isLatest: true,
   };
 
@@ -434,13 +581,10 @@ export async function getAuditsGroupedByFichesRaw(
 
   // Filter by date range
   if (dateFrom || dateTo) {
-    auditWhere.createdAt = {};
-    if (dateFrom) {
-      auditWhere.createdAt.gte = dateFrom;
-    }
-    if (dateTo) {
-      auditWhere.createdAt.lte = dateTo;
-    }
+    auditWhere.createdAt = {
+      ...(dateFrom ? { gte: dateFrom } : {}),
+      ...(dateTo ? { lte: dateTo } : {}),
+    };
   }
 
   // Filter by audit config IDs
@@ -451,7 +595,7 @@ export async function getAuditsGroupedByFichesRaw(
   }
 
   // Build where clause for fiches
-  const ficheWhere: any = {};
+  const ficheWhere: Prisma.FicheCacheWhereInput = {};
 
   // Filter by fiche IDs
   if (ficheIds && ficheIds.length > 0) {
@@ -466,7 +610,7 @@ export async function getAuditsGroupedByFichesRaw(
   }
 
   // Build orderBy for audits
-  const auditOrderBy: any = {};
+  const auditOrderBy: Prisma.AuditOrderByWithRelationInput = {};
   switch (sortBy) {
     case "created_at":
       auditOrderBy.createdAt = sortOrder;
@@ -525,4 +669,162 @@ export async function getAuditsGroupedByFichesRaw(
     fiches: allFiches,
     total: totalFiches,
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HUMAN REVIEW / OVERRIDES
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type AuditStepReviewOverride = {
+  conforme: string;
+  traite?: boolean;
+  score?: number;
+  niveauConformite?: string;
+  reviewer?: string;
+  reason?: string;
+};
+
+/**
+ * Update a single audit step result after human review.
+ *
+ * - Updates the step summary fields (conforme/score/etc) so existing endpoints reflect the override.
+ * - Preserves the original AI output by appending an audit trail entry into `rawResult.human_review`.
+ *
+ * Returns the updated row, or null if not found.
+ */
+export async function applyHumanReviewToAuditStepResult(
+  auditId: bigint,
+  stepPosition: number,
+  override: AuditStepReviewOverride
+) {
+  const existing = await prisma.auditStepResult.findUnique({
+    where: {
+      auditId_stepPosition: {
+        auditId,
+        stepPosition,
+      },
+    },
+  });
+
+  if (!existing) return null;
+
+  const nowIso = new Date().toISOString();
+
+  const reviewEntry = {
+    at: nowIso,
+    by: override.reviewer ?? null,
+    reason: override.reason ?? null,
+    previous: {
+      traite: existing.traite,
+      conforme: existing.conforme,
+      score: existing.score,
+      niveau_conformite: existing.niveauConformite,
+    },
+    override: {
+      traite: override.traite ?? existing.traite,
+      conforme: override.conforme,
+      score: override.score ?? existing.score,
+      niveau_conformite: override.niveauConformite ?? existing.niveauConformite,
+    },
+  };
+
+  let nextRawResult: unknown = existing.rawResult;
+  if (isRecord(existing.rawResult)) {
+    const raw = { ...(existing.rawResult as Record<string, unknown>) };
+    const existingReview = raw.human_review;
+    const history: unknown[] = Array.isArray(existingReview)
+      ? [...existingReview]
+      : existingReview
+        ? [existingReview]
+        : [];
+    history.push(reviewEntry);
+    raw.human_review = history;
+    nextRawResult = raw;
+  } else if (existing.rawResult == null) {
+    // Keep it minimal if rawResult is missing.
+    nextRawResult = { human_review: [reviewEntry] };
+  } else {
+    // rawResult exists but isn't an object (unlikely) — don't lose it, wrap it.
+    nextRawResult = { raw: existing.rawResult, human_review: [reviewEntry] };
+  }
+
+  return await prisma.auditStepResult.update({
+    where: {
+      auditId_stepPosition: {
+        auditId,
+        stepPosition,
+      },
+    },
+    data: {
+      conforme: override.conforme,
+      ...(override.traite !== undefined ? { traite: override.traite } : {}),
+      ...(override.score !== undefined ? { score: override.score } : {}),
+      ...(override.niveauConformite !== undefined
+        ? { niveauConformite: override.niveauConformite }
+        : {}),
+      rawResult: toPrismaJsonValue(nextRawResult),
+    },
+  });
+}
+
+export type AuditComplianceInputs = {
+  auditId: bigint;
+  status: string;
+  stepResults: Array<{
+    isCritical: boolean;
+    weight: number;
+    score: number;
+    conforme: string;
+  }>;
+};
+
+export async function getAuditComplianceInputs(
+  auditId: bigint
+): Promise<AuditComplianceInputs | null> {
+  const audit = await prisma.audit.findUnique({
+    where: { id: auditId },
+    select: {
+      id: true,
+      status: true,
+      stepResults: {
+        select: {
+          isCritical: true,
+          weight: true,
+          score: true,
+          conforme: true,
+        },
+      },
+    },
+  });
+
+  if (!audit) return null;
+
+  return {
+    auditId: audit.id,
+    status: audit.status,
+    stepResults: audit.stepResults,
+  };
+}
+
+export async function updateAuditComplianceSummary(
+  auditId: bigint,
+  params: {
+    scorePercentage: number;
+    niveau: string;
+    isCompliant: boolean;
+    criticalPassed: number;
+    criticalTotal: number;
+  }
+) {
+  return await prisma.audit.update({
+    where: { id: auditId },
+    data: {
+      overallScore: params.scorePercentage,
+      scorePercentage: params.scorePercentage,
+      niveau: params.niveau,
+      isCompliant: params.isCompliant,
+      criticalPassed: params.criticalPassed,
+      criticalTotal: params.criticalTotal,
+    },
+  });
 }

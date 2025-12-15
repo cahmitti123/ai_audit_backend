@@ -12,6 +12,7 @@
 
 import { z } from "zod";
 import { logger } from "../../shared/logger.js";
+import { ValidationError } from "../../shared/errors.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ENUMS
@@ -109,16 +110,22 @@ export const createAutomationScheduleInputSchema = z.object({
   useAutomaticAudits: z.boolean().default(true),
   specificAuditConfigs: z
     .preprocess((val) => {
-      if (!val || !Array.isArray(val)) return undefined;
-      // Filter out null/undefined values and convert strings to numbers
-      const filtered = val
-        .filter((id: any) => id !== null && id !== undefined && id !== "")
-        .map((id: any) => {
-          if (typeof id === "string") return parseInt(id, 10);
-          return id;
-        });
-      // Return undefined if array is empty after filtering
-      return filtered.length > 0 ? filtered : undefined;
+      if (!Array.isArray(val)) return undefined;
+
+      const parsed = val
+        .map((id) => {
+          if (typeof id === "number") return id;
+          if (typeof id === "string") {
+            const trimmed = id.trim();
+            if (!trimmed) return null;
+            const n = Number.parseInt(trimmed, 10);
+            return Number.isFinite(n) ? n : null;
+          }
+          return null;
+        })
+        .filter((n): n is number => typeof n === "number" && Number.isFinite(n));
+
+      return parsed.length > 0 ? parsed : undefined;
     }, z.array(z.number().int()).optional())
     .describe("Array of specific audit config IDs to run"),
 
@@ -135,8 +142,11 @@ export const createAutomationScheduleInputSchema = z.object({
     z.string().url().optional()
   ),
   notifyEmails: z.preprocess((val) => {
-    if (!val || !Array.isArray(val)) return [];
-    return val.filter((email: any) => email && email.trim() !== "");
+    if (!Array.isArray(val)) return [];
+    return val
+      .filter((email): email is string => typeof email === "string")
+      .map((email) => email.trim())
+      .filter(Boolean);
   }, z.array(z.string().email()).optional()),
 
   // External API
@@ -240,9 +250,9 @@ export const automationRunSchema = z.object({
   transcriptionsRun: z.number(),
   auditsRun: z.number(),
   errorMessage: z.string().nullable(),
-  errorDetails: z.any().nullable(),
-  configSnapshot: z.any(),
-  resultSummary: z.any().nullable(),
+  errorDetails: z.unknown().nullable(),
+  configSnapshot: z.unknown(),
+  resultSummary: z.unknown().nullable(),
 });
 
 /**
@@ -255,7 +265,7 @@ export const automationRunWithLogsSchema = automationRunSchema.extend({
       level: automationLogLevelSchema,
       message: z.string(),
       timestamp: z.date(),
-      metadata: z.any(),
+      metadata: z.unknown(),
     })
   ),
 });
@@ -269,7 +279,7 @@ export const automationLogSchema = z.object({
   level: automationLogLevelSchema,
   message: z.string(),
   timestamp: z.date(),
-  metadata: z.any(),
+  metadata: z.unknown(),
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -280,7 +290,12 @@ export const automationLogSchema = z.object({
  * Schema for manually triggering automation
  */
 export const triggerAutomationInputSchema = z.object({
-  scheduleId: z.number().int().positive(),
+  // Schedule IDs are BigInt in DB, returned as string in API responses.
+  // Accept either a positive integer or a numeric string.
+  scheduleId: z.union([
+    z.number().int().positive(),
+    z.string().trim().regex(/^\d+$/, "scheduleId must be a positive integer string"),
+  ]),
   overrideFicheSelection: ficheSelectionSchema.optional(),
 });
 
@@ -293,7 +308,7 @@ export const triggerAutomationInputSchema = z.object({
  */
 export const processedFicheDataSchema = z.object({
   ficheIds: z.array(z.string()),
-  fichesData: z.array(z.any()),
+  fichesData: z.array(z.unknown()),
   cles: z.record(z.string()),
 });
 
@@ -377,7 +392,7 @@ export function validateCreateAutomationScheduleInput(
     return createAutomationScheduleInputSchema.parse(data);
   } catch (error) {
     logger.error("Create automation schedule validation failed", { error });
-    throw new Error("Invalid automation schedule data");
+    throw new ValidationError("Invalid automation schedule data", error);
   }
 }
 
@@ -391,7 +406,7 @@ export function validateUpdateAutomationScheduleInput(
     return updateAutomationScheduleInputSchema.parse(data);
   } catch (error) {
     logger.error("Update automation schedule validation failed", { error });
-    throw new Error("Invalid automation schedule update data");
+    throw new ValidationError("Invalid automation schedule update data", error);
   }
 }
 
@@ -405,7 +420,7 @@ export function validateTriggerAutomationInput(
     return triggerAutomationInputSchema.parse(data);
   } catch (error) {
     logger.error("Trigger automation validation failed", { error });
-    throw new Error("Invalid trigger automation data");
+    throw new ValidationError("Invalid trigger automation data", error);
   }
 }
 
@@ -417,7 +432,7 @@ export function validateFicheSelection(data: unknown): FicheSelection {
     return ficheSelectionSchema.parse(data);
   } catch (error) {
     logger.error("Fiche selection validation failed", { error });
-    throw new Error("Invalid fiche selection data");
+    throw new ValidationError("Invalid fiche selection data", error);
   }
 }
 
@@ -431,7 +446,7 @@ export function validateAutomationNotification(
     return automationNotificationSchema.parse(data);
   } catch (error) {
     logger.error("Automation notification validation failed", { error });
-    throw new Error("Invalid notification data");
+    throw new ValidationError("Invalid notification data", error);
   }
 }
 

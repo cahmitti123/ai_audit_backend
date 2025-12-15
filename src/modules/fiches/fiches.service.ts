@@ -26,6 +26,7 @@ import * as fichesCache from "./fiches.cache.js";
 import * as fichesRevalidation from "./fiches.revalidation.js";
 import { logger } from "../../shared/logger.js";
 import { prisma } from "../../shared/prisma.js";
+import { publishRealtimeEvent, topicForJob } from "../../shared/realtime.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UTILITY HELPERS
@@ -616,6 +617,26 @@ export async function getFichesByDateRangeProgressive(
       remainingDays: remainingDates.length,
       dates: remainingDates.slice(0, 3),
     });
+
+    // Realtime: job created (best-effort)
+    publishRealtimeEvent({
+      topic: topicForJob(job.id),
+      type: "fiches.progressive_fetch.created",
+      source: "fiches-service",
+      data: {
+        jobId: job.id,
+        status: job.status,
+        startDate,
+        endDate,
+        progress: job.progress,
+        completedDays: job.completedDays,
+        totalDays: job.totalDays,
+        totalFiches: job.totalFiches,
+        datesCompleted: job.datesAlreadyFetched,
+        datesRemaining: job.datesRemaining,
+        datesFailed: job.datesFailed,
+      },
+    }).catch(() => null);
 
     // Trigger background fetch for ALL missing dates (no synchronous wait)
     if (options?.triggerBackgroundFetch) {

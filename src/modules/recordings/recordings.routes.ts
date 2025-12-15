@@ -5,7 +5,8 @@
  */
 
 import { Router, Request, Response } from "express";
-import { inngest } from "../../inngest/client.js";
+import { asyncHandler } from "../../middleware/async-handler.js";
+import { jsonResponse } from "../../shared/bigint-serializer.js";
 
 export const recordingsRouter = Router();
 
@@ -29,16 +30,15 @@ export const recordingsRouter = Router();
  *       500:
  *         description: Server error
  */
-recordingsRouter.get("/:fiche_id", async (req: Request, res: Response) => {
-  try {
+recordingsRouter.get(
+  "/:fiche_id",
+  asyncHandler(async (req: Request, res: Response) => {
     const { getRecordingsByFiche } = await import("./recordings.repository.js");
     const recordings = await getRecordingsByFiche(req.params.fiche_id);
-    res.json({ success: true, data: recordings, count: recordings.length });
-  } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch recordings",
-      message: error.message,
+    return jsonResponse(res, {
+      success: true,
+      data: recordings,
+      count: recordings.length,
     });
-  }
-});
+  })
+);

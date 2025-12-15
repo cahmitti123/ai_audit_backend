@@ -12,6 +12,7 @@
 
 import { z } from "zod";
 import { logger } from "../../shared/logger.js";
+import { ValidationError } from "../../shared/errors.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ENUMS
@@ -25,6 +26,7 @@ export const auditStatusEnum = z.enum([
 ]);
 
 export const auditNiveauEnum = z.enum([
+  "PENDING",
   "EXCELLENT",
   "BON",
   "ACCEPTABLE",
@@ -109,7 +111,7 @@ export const auditSchema = z.object({
   failedSteps: z.number().nullable(),
   recordingsCount: z.number().nullable(),
   timelineChunks: z.number().nullable(),
-  resultData: z.any().nullable(), // JSON data
+  resultData: z.unknown().nullable(), // JSON data
   version: z.number(),
   isLatest: z.boolean(),
   createdAt: z.date(),
@@ -212,6 +214,27 @@ export const batchAuditInputSchema = z.object({
     .min(1, "At least one fiche ID is required"),
   audit_config_id: z.number().int().positive().optional(),
   use_latest: z.boolean().optional().default(true),
+});
+
+/**
+ * Human review override for a single audit step result.
+ *
+ * Notes:
+ * - This is intended for post-audit QA where a human can override the AI's status.
+ * - We keep the original AI output in `rawResult` (DB) and update the step summary fields.
+ */
+export const reviewAuditStepResultInputSchema = z.object({
+  // Primary override: accept/reject/partial for this step
+  conforme: stepConformeEnum,
+
+  // Optional overrides (only set if you want to adjust these too)
+  traite: z.boolean().optional(),
+  score: z.number().int().min(0).optional(),
+  niveauConformite: stepNiveauConformiteEnum.optional(),
+
+  // Optional metadata (stored in rawResult human_review)
+  reviewer: z.string().min(1).max(200).optional(),
+  reason: z.string().min(1).max(5000).optional(),
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -350,6 +373,9 @@ export type ListAuditsQuery = z.infer<typeof listAuditsQuerySchema>;
 // Input Types
 export type RunAuditInput = z.infer<typeof runAuditInputSchema>;
 export type BatchAuditInput = z.infer<typeof batchAuditInputSchema>;
+export type ReviewAuditStepResultInput = z.infer<
+  typeof reviewAuditStepResultInputSchema
+>;
 
 // Response Types
 export type AuditListResponse = z.infer<typeof auditListResponseSchema>;
@@ -372,7 +398,7 @@ export const validateRunAuditInput = (data: unknown): RunAuditInput => {
     return runAuditInputSchema.parse(data);
   } catch (error) {
     logger.error("Run audit input validation failed", { error });
-    throw new Error("Invalid run audit input");
+    throw new ValidationError("Invalid run audit input", error);
   }
 };
 
@@ -381,7 +407,18 @@ export const validateBatchAuditInput = (data: unknown): BatchAuditInput => {
     return batchAuditInputSchema.parse(data);
   } catch (error) {
     logger.error("Batch audit input validation failed", { error });
-    throw new Error("Invalid batch audit input");
+    throw new ValidationError("Invalid batch audit input", error);
+  }
+};
+
+export const validateReviewAuditStepResultInput = (
+  data: unknown
+): ReviewAuditStepResultInput => {
+  try {
+    return reviewAuditStepResultInputSchema.parse(data);
+  } catch (error) {
+    logger.error("Review audit step result input validation failed", { error });
+    throw new ValidationError("Invalid review audit step result input", error);
   }
 };
 
@@ -390,7 +427,7 @@ export const validateListAuditsFilters = (data: unknown): ListAuditsFilters => {
     return listAuditsFiltersSchema.parse(data);
   } catch (error) {
     logger.error("List audits filters validation failed", { error });
-    throw new Error("Invalid list audits filters");
+    throw new ValidationError("Invalid list audits filters", error);
   }
 };
 
@@ -478,7 +515,7 @@ export const validateAuditDetail = (data: unknown): AuditDetail => {
     return auditDetailSchema.parse(data);
   } catch (error) {
     logger.error("Audit detail validation failed", { error });
-    throw new Error("Invalid audit detail format");
+    throw new ValidationError("Invalid audit detail format", error);
   }
 };
 
@@ -487,6 +524,6 @@ export const validateAudit = (data: unknown): Audit => {
     return auditSchema.parse(data);
   } catch (error) {
     logger.error("Audit validation failed", { error });
-    throw new Error("Invalid audit format");
+    throw new ValidationError("Invalid audit format", error);
   }
 };

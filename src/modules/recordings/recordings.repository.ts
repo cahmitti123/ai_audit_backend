@@ -5,6 +5,7 @@
  */
 
 import { prisma } from "../../shared/prisma.js";
+import type { Prisma } from "@prisma/client";
 
 /**
  * Get all recordings for a fiche
@@ -50,7 +51,8 @@ export async function updateRecordingTranscription(
   ficheCacheId: bigint,
   callId: string,
   transcriptionId: string,
-  transcriptionText?: string
+  transcriptionText?: string,
+  transcriptionData?: Prisma.InputJsonValue
 ) {
   return await prisma.recording.update({
     where: {
@@ -62,6 +64,7 @@ export async function updateRecordingTranscription(
     data: {
       transcriptionId,
       transcriptionText: transcriptionText || null,
+      ...(transcriptionData !== undefined && { transcriptionData }),
       hasTranscription: true,
       transcribedAt: new Date(),
     },

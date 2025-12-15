@@ -12,6 +12,7 @@
 
 import { z } from "zod";
 import { logger } from "../../shared/logger.js";
+import { ValidationError } from "../../shared/errors.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ENUMS
@@ -83,8 +84,10 @@ export const auditConfigSummarySchema = z.object({
   description: z.string().nullable(),
   systemPrompt: z.string().nullable(),
   isActive: z.boolean(),
+  runAutomatically: z.boolean(),
   stepsCount: z.number(),
   createdAt: z.date(),
+  updatedAt: z.date(),
   createdBy: z.string().nullable(),
 });
 
@@ -298,7 +301,7 @@ export const validateCreateAuditConfigInput = (
     return createAuditConfigInputSchema.parse(data);
   } catch (error) {
     logger.error("Create audit config input validation failed", { error });
-    throw new Error("Invalid create audit config input");
+    throw new ValidationError("Invalid create audit config input", error);
   }
 };
 
@@ -309,7 +312,7 @@ export const validateUpdateAuditConfigInput = (
     return updateAuditConfigInputSchema.parse(data);
   } catch (error) {
     logger.error("Update audit config input validation failed", { error });
-    throw new Error("Invalid update audit config input");
+    throw new ValidationError("Invalid update audit config input", error);
   }
 };
 
@@ -320,7 +323,7 @@ export const validateCreateAuditStepInput = (
     return createAuditStepInputSchema.parse(data);
   } catch (error) {
     logger.error("Create audit step input validation failed", { error });
-    throw new Error("Invalid create audit step input");
+    throw new ValidationError("Invalid create audit step input", error);
   }
 };
 
@@ -331,7 +334,7 @@ export const validateUpdateAuditStepInput = (
     return updateAuditStepInputSchema.parse(data);
   } catch (error) {
     logger.error("Update audit step input validation failed", { error });
-    throw new Error("Invalid update audit step input");
+    throw new ValidationError("Invalid update audit step input", error);
   }
 };
 

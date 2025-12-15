@@ -91,6 +91,34 @@ export type FichesProgressiveFetchEvent = {
 };
 
 /**
+ * Progressive fetch - per-day worker
+ * Each day is processed independently so it can run on any replica.
+ */
+export type FichesProgressiveFetchDayEvent = {
+  name: "fiches/progressive-fetch-day";
+  data: {
+    jobId: string;
+    date: string; // YYYY-MM-DD
+  };
+};
+
+/**
+ * Progressive fetch - per-day result
+ * Emitted by the day worker and consumed by the per-job updater (serialized by jobId).
+ */
+export type FichesProgressiveFetchDayProcessedEvent = {
+  name: "fiches/progressive-fetch-day.processed";
+  data: {
+    jobId: string;
+    date: string; // YYYY-MM-DD
+    ok: boolean;
+    cached: boolean;
+    fichesCount: number;
+    error?: string;
+  };
+};
+
+/**
  * All Fiches Events
  */
 export type FichesEvents = {
@@ -100,4 +128,6 @@ export type FichesEvents = {
   "fiches/revalidate-date": FichesRevalidateDateEvent["data"];
   "fiches/cache-sales-list": FichesCacheSalesListEvent["data"];
   "fiches/progressive-fetch-continue": FichesProgressiveFetchEvent["data"];
+  "fiches/progressive-fetch-day": FichesProgressiveFetchDayEvent["data"];
+  "fiches/progressive-fetch-day.processed": FichesProgressiveFetchDayProcessedEvent["data"];
 };

@@ -4,6 +4,29 @@ version: "3.8"
 # Usage: docker-compose -f docker-compose.prod.yml up -d
 
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: ai-audit-redis-prod
+    restart: always
+    ports:
+      # Bind to localhost; do not expose Redis publicly.
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    networks:
+      - ai-audit-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # Main API Server
   server:
     build:
@@ -13,7 +36,8 @@ services:
     container_name: ai-audit-server-prod
     restart: always
     ports:
-      - "${SERVER_PORT:-3002}:3002"
+      # Bind to localhost; put host Nginx/HTTPS in front of this port.
+      - "127.0.0.1:${SERVER_PORT:-3002}:3002"
     environment:
       - NODE_ENV=production
       - PORT=3002
@@ -22,17 +46,40 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
-      - FICHE_API_URL=${FICHE_API_URL}
+      - FICHE_API_BASE_URL=${FICHE_API_BASE_URL}
       - FICHE_API_AUTH_TOKEN=${FICHE_API_AUTH_TOKEN}
+      # Optional AI/model tuning
+      - OPENAI_MODEL_AUDIT=${OPENAI_MODEL_AUDIT:-gpt-5.2}
+      - OPENAI_MODEL_CHAT=${OPENAI_MODEL_CHAT:-gpt-5.2}
+      - OPENAI_TEMPERATURE_CHAT=${OPENAI_TEMPERATURE_CHAT:-0}
       - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
       - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
       - INNGEST_BASE_URL=http://inngest:8288
       - INNGEST_DEV=0
+      # Scaling/concurrency (single instance defaults)
+      - INNGEST_PARALLELISM_PER_SERVER=${INNGEST_PARALLELISM_PER_SERVER:-10}
+      - INNGEST_SERVER_REPLICAS=${SERVER_REPLICAS:-1}
       - FRONTEND_WEBHOOK_URL=${FRONTEND_WEBHOOK_URL}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
       - WEBHOOK_TIMEOUT=${WEBHOOK_TIMEOUT:-10000}
+      - WEBHOOK_MAX_ATTEMPTS=${WEBHOOK_MAX_ATTEMPTS:-3}
+      - WEBHOOK_ALLOWED_ORIGINS=${WEBHOOK_ALLOWED_ORIGINS}
       - VECTOR_STORE_ID=${VECTOR_STORE_ID}
       - VECTOR_STORE_MAX_RESULTS=${VECTOR_STORE_MAX_RESULTS:-5}
+      # Audit behavior
+      - AUDIT_EVIDENCE_GATING=${AUDIT_EVIDENCE_GATING:-1}
+      - PRODUCT_VECTORSTORE_FALLBACK=${PRODUCT_VECTORSTORE_FALLBACK:-0}
+      - AUDIT_STEP_TIMELINE_EXCERPT=${AUDIT_STEP_TIMELINE_EXCERPT:-1}
+      - AUDIT_STEP_TIMELINE_MAX_CHUNKS=${AUDIT_STEP_TIMELINE_MAX_CHUNKS:-40}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      # Automation scheduler
+      - AUTOMATION_SCHEDULER_CRON=${AUTOMATION_SCHEDULER_CRON:-*/1 * * * *}
+      - AUTOMATION_SCHEDULER_WINDOW_MINUTES=${AUTOMATION_SCHEDULER_WINDOW_MINUTES:-20}
+      # Distributed worker concurrency (single replica defaults)
+      - AUDIT_STEP_WORKER_CONCURRENCY=${AUDIT_STEP_WORKER_CONCURRENCY:-5}
+      - AUDIT_STEP_PER_AUDIT_CONCURRENCY=${AUDIT_STEP_PER_AUDIT_CONCURRENCY:-5}
+      - TRANSCRIPTION_RECORDING_WORKER_CONCURRENCY=${TRANSCRIPTION_RECORDING_WORKER_CONCURRENCY:-5}
+      - TRANSCRIPTION_RECORDING_PER_FICHE_CONCURRENCY=${TRANSCRIPTION_RECORDING_PER_FICHE_CONCURRENCY:-5}
     volumes:
       - audit-data:/app/data
     networks:
@@ -62,6 +109,9 @@ services:
         reservations:
           cpus: "1"
           memory: 512M
+    depends_on:
+      redis:
+        condition: service_healthy
 
   # Inngest Self-Hosted Server (Production)
   inngest:
@@ -69,8 +119,9 @@ services:
     container_name: ai-audit-inngest-prod
     restart: always
     ports:
-      - "${INNGEST_PORT:-8288}:8288"
-      - "${INNGEST_CONNECT_PORT:-8289}:8289"
+      # Bind to localhost; access UI via SSH tunnel.
+      - "127.0.0.1:${INNGEST_PORT:-8288}:8288"
+      - "127.0.0.1:${INNGEST_CONNECT_PORT:-8289}:8289"
     environment:
       - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
       - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
@@ -108,4 +159,6 @@ networks:
 
 volumes:
   audit-data:
+    driver: local
+  redis-data:
     driver: local

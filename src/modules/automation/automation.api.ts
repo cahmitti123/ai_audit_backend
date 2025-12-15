@@ -14,6 +14,18 @@
 import axios from "axios";
 import { logger } from "../../shared/logger.js";
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function getAxiosMeta(error: unknown): { code?: string; status?: number } {
+  if (!axios.isAxiosError(error)) return {};
+  return {
+    code: typeof error.code === "string" ? error.code : undefined,
+    status: typeof error.response?.status === "number" ? error.response.status : undefined,
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // FICHE API CALLS
 // ═══════════════════════════════════════════════════════════════════════════
@@ -32,9 +44,11 @@ export async function fetchFichesForDate(
   date: string,
   onlyWithRecordings: boolean,
   apiKey?: string
-): Promise<any[]> {
+): Promise<unknown[]> {
   const baseUrl =
-    process.env.FICHE_API_BASE_URL || "https://api.devis-mutuelle-pas-cher.com";
+    process.env.FICHE_API_BASE_URL ||
+    process.env.FICHE_API_URL ||
+    "https://api.devis-mutuelle-pas-cher.com";
   const apiBase = `${baseUrl}/api`;
 
   // The /by-date endpoint only returns basic fiche data
@@ -66,13 +80,12 @@ export async function fetchFichesForDate(
     });
 
     return dateFiches;
-  } catch (error: any) {
+  } catch (error: unknown) {
     logger.error(`Failed to fetch fiches for ${date}`, {
-      error: error.message,
-      code: error.code,
-      status: error.response?.status,
+      error: getErrorMessage(error),
+      ...getAxiosMeta(error),
     });
-    throw new Error(`Failed to fetch fiches for ${date}: ${error.message}`);
+    throw new Error(`Failed to fetch fiches for ${date}: ${getErrorMessage(error)}`);
   }
 }
 
@@ -88,9 +101,11 @@ export async function fetchFicheDetails(
   ficheId: string,
   cle?: string,
   apiKey?: string
-): Promise<any> {
+): Promise<unknown> {
   const baseUrl =
-    process.env.FICHE_API_BASE_URL || "https://api.devis-mutuelle-pas-cher.com";
+    process.env.FICHE_API_BASE_URL ||
+    process.env.FICHE_API_URL ||
+    "https://api.devis-mutuelle-pas-cher.com";
   const apiBase = `${baseUrl}/api`;
 
   const url = `${apiBase}/fiches/by-id/${ficheId}`;
@@ -117,14 +132,13 @@ export async function fetchFicheDetails(
     });
 
     return response.data;
-  } catch (error: any) {
+  } catch (error: unknown) {
     logger.error(`Failed to fetch fiche details for ${ficheId}`, {
-      error: error.message,
-      code: error.code,
-      status: error.response?.status,
+      error: getErrorMessage(error),
+      ...getAxiosMeta(error),
     });
     throw new Error(
-      `Failed to fetch fiche details for ${ficheId}: ${error.message}`
+      `Failed to fetch fiche details for ${ficheId}: ${getErrorMessage(error)}`
     );
   }
 }
@@ -141,7 +155,7 @@ export async function fetchFicheDetails(
  */
 export async function sendNotificationWebhook(
   webhookUrl: string,
-  payload: any
+  payload: unknown
 ): Promise<void> {
   try {
     logger.debug("Sending webhook notification", {
@@ -159,11 +173,11 @@ export async function sendNotificationWebhook(
     logger.info("Webhook notification sent successfully", {
       url: webhookUrl,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     logger.error("Failed to send webhook notification", {
-      error: error.message,
+      error: getErrorMessage(error),
       url: webhookUrl,
-      status: error.response?.status,
+      ...getAxiosMeta(error),
     });
     // Don't throw - notifications are best-effort
   }
@@ -211,7 +225,9 @@ export async function sendEmailNotification(
  */
 export async function checkApiHealth(apiKey?: string): Promise<boolean> {
   const baseUrl =
-    process.env.FICHE_API_BASE_URL || "https://api.devis-mutuelle-pas-cher.com";
+    process.env.FICHE_API_BASE_URL ||
+    process.env.FICHE_API_URL ||
+    "https://api.devis-mutuelle-pas-cher.com";
 
   try {
     const response = await axios.get(`${baseUrl}/health`, {

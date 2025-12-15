@@ -23,6 +23,15 @@ import type {
 } from "./audit-configs.schemas.js";
 import * as auditConfigsRepository from "./audit-configs.repository.js";
 import { logger } from "../../shared/logger.js";
+import { NotFoundError, ValidationError } from "../../shared/errors.js";
+
+function isPrismaNotFoundError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "P2025"
+  );
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AUDIT CONFIG OPERATIONS
@@ -39,38 +48,53 @@ export async function getAllAuditConfigs(options: {
     options.includeInactive
   );
 
-  return configs.map((config) => ({
-    id: config.id.toString(),
-    name: config.name,
-    description: config.description,
-    systemPrompt: config.systemPrompt,
-    isActive: config.isActive,
-    runAutomatically: config.runAutomatically,
-    createdBy: config.createdBy,
-    createdAt: config.createdAt,
-    updatedAt: config.updatedAt,
-    ...(options.includeSteps
-      ? {
-          steps: config.steps.map((step) => ({
-            id: step.id.toString(),
-            auditConfigId: step.auditConfigId.toString(),
-            name: step.name,
-            description: step.description,
-            prompt: step.prompt,
-            controlPoints: step.controlPoints,
-            keywords: step.keywords,
-            severityLevel: step.severityLevel as any,
-            isCritical: step.isCritical,
-            position: step.position,
-            weight: step.weight,
-            chronologicalImportant: step.chronologicalImportant,
-            verifyProductInfo: step.verifyProductInfo,
-            createdAt: step.createdAt,
-            updatedAt: step.updatedAt,
-          })),
-        }
-      : { stepsCount: config.steps.length }),
-  })) as any;
+  if (options.includeSteps) {
+    return configs.map(
+      (config): AuditConfigDetail => ({
+        id: config.id.toString(),
+        name: config.name,
+        description: config.description,
+        systemPrompt: config.systemPrompt,
+        isActive: config.isActive,
+        runAutomatically: config.runAutomatically,
+        createdBy: config.createdBy,
+        createdAt: config.createdAt,
+        updatedAt: config.updatedAt,
+        steps: config.steps.map((step) => ({
+          id: step.id.toString(),
+          auditConfigId: step.auditConfigId.toString(),
+          name: step.name,
+          description: step.description,
+          prompt: step.prompt,
+          controlPoints: step.controlPoints,
+          keywords: step.keywords,
+          severityLevel: step.severityLevel,
+          isCritical: step.isCritical,
+          position: step.position,
+          weight: step.weight,
+          chronologicalImportant: step.chronologicalImportant,
+          verifyProductInfo: step.verifyProductInfo,
+          createdAt: step.createdAt,
+          updatedAt: step.updatedAt,
+        })),
+      })
+    );
+  }
+
+  return configs.map(
+    (config): AuditConfigSummary => ({
+      id: config.id.toString(),
+      name: config.name,
+      description: config.description,
+      systemPrompt: config.systemPrompt,
+      isActive: config.isActive,
+      runAutomatically: config.runAutomatically,
+      stepsCount: config.steps.length,
+      createdAt: config.createdAt,
+      updatedAt: config.updatedAt,
+      createdBy: config.createdBy,
+    })
+  );
 }
 
 /**
@@ -104,7 +128,7 @@ export async function getAuditConfigById(
       prompt: step.prompt,
       controlPoints: step.controlPoints,
       keywords: step.keywords,
-      severityLevel: step.severityLevel as any,
+      severityLevel: step.severityLevel,
       isCritical: step.isCritical,
       position: step.position,
       weight: step.weight,
@@ -148,21 +172,21 @@ export async function createAuditConfig(
     });
 
     if (stepErrors.length > 0) {
-      const error = new Error(
-        `Validation failed for ${stepErrors.length} step(s):\n- ${stepErrors.join('\n- ')}`
-      );
       logger.error("Step validation failed before creation", { 
         errors: stepErrors,
         stepCount: input.steps.length 
       });
-      throw error;
+      throw new ValidationError(
+        `Validation failed for ${stepErrors.length} step(s)`,
+        { errors: stepErrors }
+      );
     }
 
     // Validate positions are unique and sequential
     const positions = input.steps.map((s) => s.position);
     const uniquePositions = new Set(positions);
     if (uniquePositions.size !== positions.length) {
-      throw new Error("Step positions must be unique");
+      throw new ValidationError("Step positions must be unique");
     }
   }
 
@@ -217,7 +241,7 @@ export async function updateAuditConfig(
   // Check if config exists
   const existing = await auditConfigsRepository.getAuditConfigById(configId);
   if (!existing) {
-    throw new Error("Audit config not found");
+    throw new NotFoundError("Audit config", String(configId));
   }
 
   // Filter out null values (convert to undefined for repository)
@@ -253,7 +277,7 @@ export async function deleteAuditConfig(id: string | bigint): Promise<void> {
   // Check if config exists
   const existing = await auditConfigsRepository.getAuditConfigById(configId);
   if (!existing) {
-    throw new Error("Audit config not found");
+    throw new NotFoundError("Audit config", String(configId));
   }
 
   // Check if config is in use
@@ -293,13 +317,13 @@ export async function addAuditStep(
   // Check if config exists
   const config = await auditConfigsRepository.getAuditConfigById(configId);
   if (!config) {
-    throw new Error("Audit config not found");
+    throw new NotFoundError("Audit config", String(configId));
   }
 
   // Validate position doesn't conflict
   const existingPositions = config.steps.map((s) => s.position);
   if (existingPositions.includes(input.position)) {
-    throw new Error(
+    throw new ValidationError(
       `Position ${input.position} is already taken. Available positions: ${
         Math.max(...existingPositions, -1) + 1
       }`
@@ -336,7 +360,16 @@ export async function updateAuditStep(
     description: input.description === null ? undefined : input.description,
   };
 
-  const updated = await auditConfigsRepository.updateAuditStep(id, cleanedInput);
+  let updated: Awaited<ReturnType<typeof auditConfigsRepository.updateAuditStep>>;
+  try {
+    updated = await auditConfigsRepository.updateAuditStep(id, cleanedInput);
+  } catch (error: unknown) {
+    // Prisma "record not found"
+    if (isPrismaNotFoundError(error)) {
+      throw new NotFoundError("Audit step", String(id));
+    }
+    throw error;
+  }
 
   logger.info("Audit step updated", {
     id: updated.id.toString(),
@@ -351,7 +384,7 @@ export async function updateAuditStep(
     prompt: updated.prompt,
     controlPoints: updated.controlPoints,
     keywords: updated.keywords,
-    severityLevel: updated.severityLevel as any,
+    severityLevel: updated.severityLevel,
     isCritical: updated.isCritical,
     position: updated.position,
     weight: updated.weight,
@@ -368,7 +401,14 @@ export async function updateAuditStep(
 export async function deleteAuditStep(stepId: string | bigint): Promise<void> {
   const id = typeof stepId === "string" ? BigInt(stepId) : stepId;
 
-  await auditConfigsRepository.deleteAuditStep(id);
+  try {
+    await auditConfigsRepository.deleteAuditStep(id);
+  } catch (error: unknown) {
+    if (isPrismaNotFoundError(error)) {
+      throw new NotFoundError("Audit step", String(id));
+    }
+    throw error;
+  }
 
   logger.info("Audit step deleted", {
     id: id.toString(),
@@ -387,7 +427,7 @@ export async function reorderSteps(
 
   const config = await auditConfigsRepository.getAuditConfigById(configId);
   if (!config) {
-    throw new Error("Audit config not found");
+    throw new NotFoundError("Audit config", String(configId));
   }
 
   // Validate all step IDs belong to this config
@@ -395,13 +435,11 @@ export async function reorderSteps(
   const invalidIds = stepIdsInOrder.filter((id) => !configStepIds.includes(id));
 
   if (invalidIds.length > 0) {
-    throw new Error(`Invalid step IDs: ${invalidIds.join(", ")}`);
+    throw new ValidationError(`Invalid step IDs: ${invalidIds.join(", ")}`);
   }
 
   if (stepIdsInOrder.length !== config.steps.length) {
-    throw new Error(
-      "Step IDs count doesn't match existing steps count"
-    );
+    throw new ValidationError("Step IDs count doesn't match existing steps count");
   }
 
   // Update positions
@@ -434,7 +472,7 @@ export async function getAuditConfigStats(
 
   const config = await auditConfigsRepository.getAuditConfigById(configId);
   if (!config) {
-    throw new Error("Audit config not found");
+    throw new NotFoundError("Audit config", String(configId));
   }
 
   // Get all audits for this config
@@ -539,7 +577,7 @@ export async function getAutomaticAuditConfigs(): Promise<
       prompt: step.prompt,
       controlPoints: step.controlPoints,
       keywords: step.keywords,
-      severityLevel: step.severityLevel as any,
+      severityLevel: step.severityLevel,
       isCritical: step.isCritical,
       position: step.position,
       weight: step.weight,

@@ -4,6 +4,14 @@
  * Application-wide constants and configuration
  */
 
+import { getInngestGlobalConcurrency } from "./inngest-concurrency.js";
+
+function toPositiveInt(value: unknown, fallback: number): number {
+  const n = typeof value === "string" ? Number.parseInt(value, 10) : Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.floor(n);
+}
+
 // Cache Configuration
 export const CACHE_EXPIRATION_HOURS = 240;
 
@@ -39,13 +47,22 @@ export const TIMEOUTS = {
 // Inngest Concurrency (maximum throughput)
 export const CONCURRENCY = {
   AUDIT_RUN: {
-    limit: 100, // Increased to 100 concurrent audits
+    // Default: 10 per server * number of server replicas
+    limit: toPositiveInt(process.env.AUDIT_RUN_CONCURRENCY, getInngestGlobalConcurrency()),
   },
   TRANSCRIPTION: {
-    limit: 50, // Increased to 50 concurrent transcriptions
+    // Default: 10 per server * number of server replicas
+    limit: toPositiveInt(
+      process.env.TRANSCRIPTION_FICHE_CONCURRENCY,
+      getInngestGlobalConcurrency()
+    ),
   },
   FICHE_FETCH: {
-    limit: 50, // 50 concurrent fiche fetches
+    // Default: 10 per server * number of server replicas
+    limit: toPositiveInt(
+      process.env.FICHE_FETCH_CONCURRENCY,
+      getInngestGlobalConcurrency()
+    ),
   },
 } as const;
 

@@ -4,19 +4,31 @@
  * Calculate and format payload sizes for monitoring
  */
 
+import { logger as appLogger } from "../shared/logger.js";
+
+type LoggerLike = {
+  info: (message: string, context?: Record<string, unknown>) => void;
+  warn: (message: string, context?: Record<string, unknown>) => void;
+  error: (message: string, error?: Error | Record<string, unknown>) => void;
+};
+
 /**
  * Calculate the size of a JSON payload in bytes
  */
-export function getPayloadSize(data: any): number {
+export function getPayloadSize(data: unknown): number {
   try {
     // Custom replacer to handle BigInt serialization
-    const jsonString = JSON.stringify(data, (key, value) =>
+    const jsonString = JSON.stringify(data, (_key, value) =>
       typeof value === "bigint" ? value.toString() : value
     );
     // Use Buffer.byteLength for accurate byte count (handles UTF-8)
     return Buffer.byteLength(jsonString, "utf8");
   } catch (error) {
-    console.error("Error calculating payload size:", error);
+    if (error instanceof Error) {
+      appLogger.error("Error calculating payload size", error);
+    } else {
+      appLogger.error("Error calculating payload size", { error: String(error) });
+    }
     return 0;
   }
 }
@@ -64,7 +76,7 @@ export interface PayloadSizeInfo {
 }
 
 export function getPayloadSizeInfo(
-  data: any,
+  data: unknown,
   limit: number = 50 * 1024 * 1024 // 50MB default
 ): PayloadSizeInfo {
   const bytes = getPayloadSize(data);
@@ -84,9 +96,9 @@ export function getPayloadSizeInfo(
  */
 export function logPayloadSize(
   label: string,
-  data: any,
+  data: unknown,
   limit: number = 50 * 1024 * 1024,
-  logger?: any
+  logger?: LoggerLike
 ): PayloadSizeInfo {
   const info = getPayloadSizeInfo(data, limit);
 
@@ -94,31 +106,14 @@ export function logPayloadSize(
     info.percentage
   }% of ${formatBytes(limit)} limit)`;
 
-  if (logger) {
-    if (info.isError) {
-      logger.error(logMessage, {
-        bytes: info.bytes,
-        percentage: info.percentage,
-      });
-    } else if (info.isWarning) {
-      logger.warn(logMessage, {
-        bytes: info.bytes,
-        percentage: info.percentage,
-      });
-    } else {
-      logger.info(logMessage, {
-        bytes: info.bytes,
-        percentage: info.percentage,
-      });
-    }
+  const log: LoggerLike = logger || appLogger;
+
+  if (info.isError) {
+    log.error(`🚨 ${logMessage}`, { bytes: info.bytes, percentage: info.percentage });
+  } else if (info.isWarning) {
+    log.warn(`⚠️  ${logMessage}`, { bytes: info.bytes, percentage: info.percentage });
   } else {
-    if (info.isError) {
-      console.error(`🚨 ${logMessage}`);
-    } else if (info.isWarning) {
-      console.warn(`⚠️  ${logMessage}`);
-    } else {
-      console.log(`📊 ${logMessage}`);
-    }
+    log.info(`📊 ${logMessage}`, { bytes: info.bytes, percentage: info.percentage });
   }
 
   return info;

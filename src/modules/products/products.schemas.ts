@@ -40,7 +40,7 @@ export const gammeSchema = z.object({
 });
 
 export const createGammeSchema = z.object({
-  groupeId: z.bigint(),
+  groupeId: z.coerce.bigint(),
   code: z.string().max(3),
   libelle: z.string().max(29),
   documents: z.record(z.string()).optional(),
@@ -78,7 +78,7 @@ export const formuleSchema = z.object({
 });
 
 export const createFormuleSchema = z.object({
-  gammeId: z.bigint(),
+  gammeId: z.coerce.bigint(),
   code: z.string().max(4),
   libelle: z.string().max(14),
   libelleAlternatif: z.string().max(13).optional(),

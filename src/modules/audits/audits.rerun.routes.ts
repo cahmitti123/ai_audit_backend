@@ -4,10 +4,12 @@
  * API endpoints for re-running individual audit steps
  */
 
-import { Router, Request, Response } from "express";
+import { Router, type Request, type Response } from "express";
 import { logger } from "../../shared/logger.js";
 import { jsonResponse } from "../../shared/bigint-serializer.js";
 import { inngest } from "../../inngest/client.js";
+import { asyncHandler } from "../../middleware/async-handler.js";
+import { ValidationError } from "../../shared/errors.js";
 
 export const auditRerunRouter = Router();
 
@@ -89,57 +91,57 @@ export const auditRerunRouter = Router();
  */
 auditRerunRouter.post(
   "/:audit_id/steps/:step_position/rerun",
-  async (req: Request, res: Response) => {
-    try {
-      const auditId = req.params.audit_id;
-      const stepPosition = parseInt(req.params.step_position);
+  asyncHandler(async (req: Request, res: Response) => {
+    const auditId = req.params.audit_id;
+    const stepPosition = Number.parseInt(req.params.step_position, 10);
 
-      logger.info("Queuing audit step re-run", {
-        audit_id: auditId,
-        step_position: stepPosition,
-        has_custom_prompt: Boolean(
-          req.body.customPrompt || req.body.customInstructions
-        ),
-      });
-
-      // Send event to Inngest (async processing)
-      const { ids } = await inngest.send({
-        name: "audit/step-rerun",
-        data: {
-          audit_id: auditId,
-          step_position: stepPosition,
-          custom_prompt: req.body.customPrompt || req.body.customInstructions,
-        },
-        id: `step-rerun-${auditId}-${stepPosition}-${Date.now()}`,
-      });
-
-      logger.info("Step re-run queued", {
-        audit_id: auditId,
-        step_position: stepPosition,
-        event_id: ids[0],
-      });
-
-      return jsonResponse(res, {
-        success: true,
-        message: "Step re-run queued",
-        event_id: ids[0],
-        audit_id: auditId,
-        step_position: stepPosition,
-      });
-    } catch (error: any) {
-      logger.error("Failed to queue step re-run", {
-        audit_id: req.params.audit_id,
-        step_position: req.params.step_position,
-        error: error.message,
-      });
-
-      return res.status(500).json({
-        success: false,
-        error: "Failed to queue step re-run",
-        message: error.message,
-      });
+    if (!Number.isFinite(stepPosition) || stepPosition <= 0) {
+      throw new ValidationError("Invalid step_position");
     }
-  }
+
+    const body = req.body as {
+      customPrompt?: unknown;
+      customInstructions?: unknown;
+    };
+    const custom_prompt =
+      typeof body.customPrompt === "string" && body.customPrompt.trim().length > 0
+        ? body.customPrompt
+        : typeof body.customInstructions === "string" &&
+            body.customInstructions.trim().length > 0
+          ? body.customInstructions
+          : undefined;
+
+    logger.info("Queuing audit step re-run", {
+      audit_id: auditId,
+      step_position: stepPosition,
+      has_custom_prompt: Boolean(custom_prompt),
+    });
+
+    // Send event to Inngest (async processing)
+    const { ids } = await inngest.send({
+      name: "audit/step-rerun",
+      data: {
+        audit_id: auditId,
+        step_position: stepPosition,
+        custom_prompt,
+      },
+      id: `step-rerun-${auditId}-${stepPosition}-${Date.now()}`,
+    });
+
+    logger.info("Step re-run queued", {
+      audit_id: auditId,
+      step_position: stepPosition,
+      event_id: ids[0],
+    });
+
+    return jsonResponse(res, {
+      success: true,
+      message: "Step re-run queued",
+      event_id: ids[0],
+      audit_id: auditId,
+      step_position: stepPosition,
+    });
+  })
 );
 
 

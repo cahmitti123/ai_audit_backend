@@ -24,6 +24,11 @@ import { webhooksRoutes } from "./modules/webhooks/index.js";
 import { automationRouter } from "./modules/automation/index.js";
 import { chatRouter } from "./modules/chat/index.js";
 import { productsRouter } from "./modules/products/index.js";
+import { realtimeRouter } from "./modules/realtime/index.js";
+
+// Error handling
+import { notFoundHandler } from "./middleware/not-found.js";
+import { errorHandler } from "./middleware/error-handler.js";
 
 // Middleware
 // import {
@@ -38,6 +43,13 @@ export function createApp() {
   const app = express();
 
   // Middleware
+  // Add instance marker so you can see which replica served each request.
+  // Visible in browser devtools / curl response headers.
+  app.use((req, res, next) => {
+    res.setHeader("X-Backend-Instance", process.env.HOSTNAME || `pid-${process.pid}`);
+    next();
+  });
+
   app.use(
     cors({
       origin: [
@@ -80,6 +92,7 @@ export function createApp() {
       timestamp: new Date().toISOString(),
       service: "ai-audit-system",
       version: "2.3.0",
+      instance: process.env.HOSTNAME || `pid-${process.pid}`,
     });
   });
 
@@ -93,7 +106,12 @@ export function createApp() {
   app.use("/api/webhooks", webhooksRoutes);
   app.use("/api/automation", automationRouter);
   app.use("/api/products", productsRouter);
+  app.use("/api/realtime", realtimeRouter);
   app.use("/api", chatRouter);
+
+  // 404 + error handling (keep last)
+  app.use(notFoundHandler);
+  app.use(errorHandler);
 
   return app;
 }

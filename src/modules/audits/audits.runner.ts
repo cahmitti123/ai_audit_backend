@@ -23,14 +23,22 @@ import {
   COMPLIANCE_THRESHOLDS,
   TIMELINE_CHUNK_SIZE,
 } from "../../shared/constants.js";
+import { logger } from "../../shared/logger.js";
 import "dotenv/config";
 import { FicheDetailsResponse } from "../fiches/fiches.schemas.js";
+import type { TimelineRecording } from "../../schemas.js";
+import type { AuditConfigForAnalysis, ProductLinkResult } from "./audits.types.js";
 const DATA_DIR = "./data";
+
+type AuditAnalysisResults = Awaited<ReturnType<typeof analyzeAllSteps>>;
 
 /**
  * Enrich citations with recording metadata from timeline
  */
-function enrichCitationsWithMetadata(auditResults: any, timeline: any[]) {
+function enrichCitationsWithMetadata(
+  auditResults: Pick<AuditAnalysisResults, "steps">,
+  timeline: ReadonlyArray<TimelineRecording>
+) {
   // Create a lookup map for quick access
   const timelineMap = new Map(
     timeline.map((rec) => [
@@ -48,12 +56,15 @@ function enrichCitationsWithMetadata(auditResults: any, timeline: any[]) {
 
   // Iterate through all steps and their control points
   for (const step of auditResults.steps) {
-    if (!step.points_controle) continue;
+    if (!("points_controle" in step)) continue;
+    const points = (step as { points_controle?: unknown }).points_controle;
+    if (!Array.isArray(points)) continue;
 
-    for (const controlPoint of step.points_controle) {
-      if (!controlPoint.citations) continue;
+    for (const controlPoint of points) {
+      const citations = (controlPoint as { citations?: unknown }).citations;
+      if (!Array.isArray(citations)) continue;
 
-      for (const citation of controlPoint.citations) {
+      for (const citation of citations as Array<{ recording_index: number; recording_date?: string; recording_time?: string; recording_url?: string }>) {
         // Look up recording metadata using recording_index
         const metadata = timelineMap.get(citation.recording_index);
         if (metadata) {
@@ -75,11 +86,13 @@ function enrichCitationsWithMetadata(auditResults: any, timeline: any[]) {
     }
   }
 
-  console.log(`✓ Enriched ${enrichedCount} citations with recording metadata`);
+  logger.info("Enriched citations with recording metadata", {
+    citations_enriched: enrichedCount,
+  });
   if (missingUrlCount > 0) {
-    console.warn(
-      `⚠️  ${missingUrlCount} citations have missing recording URLs`
-    );
+    logger.warn("Some citations have missing recording URLs", {
+      missing_urls: missingUrlCount,
+    });
   }
 
   return auditResults;
@@ -98,14 +111,22 @@ export interface AuditResult {
     config: {
       id: string;
       name: string;
-      description?: string;
+      description: string | null;
     };
     fiche: {
       fiche_id: string;
       prospect_name: string;
       groupe: string;
     };
-    results: any;
+    results: AuditAnalysisResults & {
+      compliance: {
+        score: number;
+        niveau: string;
+        points_critiques: string;
+        poids_obtenu: number;
+        poids_total: number;
+      };
+    };
     compliance: {
       score: number;
       niveau: string;
@@ -137,9 +158,11 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
   const startTime = Date.now();
   const startedAt = new Date().toISOString();
 
-  console.log("\n" + "=".repeat(80));
-  console.log("AI AUDIT PIPELINE");
-  console.log("=".repeat(80));
+  logger.info("AI audit pipeline started", {
+    fiche_id: options.ficheId,
+    audit_config_id: options.auditConfigId ?? null,
+    use_latest: Boolean(options.useLatest),
+  });
 
   // Create data directory
   if (!existsSync(DATA_DIR)) {
@@ -149,22 +172,22 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
   // ═══════════════════════════════════════════════════════════════════════════
   // 1. FETCH FICHE DATA (with cache)
   // ═══════════════════════════════════════════════════════════════════════════
-  console.log("\n📂 Step 1/5: Fetching fiche data");
+  logger.info("Step 1/5: Fetching fiche data", { fiche_id: options.ficheId });
 
   const cached = await getCachedFiche(options.ficheId);
 
-  let ficheData: any;
-  let ficheCache: any;
+  let ficheData: FicheDetailsResponse & { _salesListOnly?: boolean; cle?: string };
+  let ficheCacheId: bigint;
   if (cached) {
-    console.log(`✓ Using cached fiche data`);
-    ficheData = cached.rawData;
-    ficheCache = cached;
+    logger.info("Using cached fiche data", { fiche_id: options.ficheId });
+    ficheData = cached.rawData as FicheDetailsResponse & { _salesListOnly?: boolean; cle?: string };
+    ficheCacheId = cached.id;
 
     // Check if cached data is only sales list (minimal data without recordings)
     if (ficheData._salesListOnly) {
-      console.log(
-        `⚠️ Cached data is sales list only, fetching full details...`
-      );
+      logger.warn("Cached data is sales list only; fetching full details", {
+        fiche_id: options.ficheId,
+      });
       const cle = ficheData.cle;
       if (!cle) {
         throw new Error(
@@ -175,8 +198,12 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
       // Note: Product verification check will happen after config is loaded
       // For now, fetch without mail_devis (will refetch later if needed)
       ficheData = await fetchFicheDetails(options.ficheId, cle);
-      ficheCache = await cacheFicheDetails(ficheData as FicheDetailsResponse);
-      console.log(`✓ Fiche refreshed with full details (ID: ${ficheCache.id})`);
+      const refreshedCache = await cacheFicheDetails(ficheData as FicheDetailsResponse);
+      ficheCacheId = refreshedCache.id;
+      logger.info("Fiche refreshed with full details", {
+        fiche_id: options.ficheId,
+        fiche_cache_id: String(ficheCacheId),
+      });
     }
   } else {
     throw new Error(
@@ -184,34 +211,46 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
     );
   }
 
+  if (!ficheData.information) {
+    throw new Error(`Fiche ${options.ficheId} is missing information section`);
+  }
+  if (!ficheData.prospect) {
+    throw new Error(`Fiche ${options.ficheId} is missing prospect section`);
+  }
+
+  const info = ficheData.information;
+  const prospect = ficheData.prospect;
+
   ficheData.recordings = ficheData.recordings.map(enrichRecording);
 
-  console.log(`✓ Fiche ID: ${ficheData.information.fiche_id}`);
-  console.log(`✓ Recordings: ${ficheData.recordings.length}`);
-  console.log(
-    `✓ Prospect: ${ficheData.prospect.prenom} ${ficheData.prospect.nom}`
-  );
+  logger.info("Fiche loaded", {
+    fiche_id: info.fiche_id,
+    recordings: ficheData.recordings.length,
+    prospect: `${prospect.prenom} ${prospect.nom}`,
+  });
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 2. LOAD AUDIT CONFIG
   // ═══════════════════════════════════════════════════════════════════════════
-  console.log("\n📋 Step 2/5: Loading audit configuration");
+  logger.info("Step 2/5: Loading audit configuration", { fiche_id: options.ficheId });
 
-  let auditConfig: any;
+  let auditConfig: AuditConfigForAnalysis;
   if (options.useLatest) {
-    auditConfig = await getLatestActiveConfig();
-    if (!auditConfig) {
-      throw new Error("No active audit configuration found");
-    }
+    const latest = await getLatestActiveConfig();
+    if (!latest) throw new Error("No active audit configuration found");
+    auditConfig = {
+      id: latest.id.toString(),
+      name: latest.name,
+      description: latest.description,
+      systemPrompt: latest.systemPrompt,
+      auditSteps: latest.steps,
+    };
   } else {
     if (!options.auditConfigId) {
       throw new Error("auditConfigId required when useLatest is false");
     }
     const config = await getAuditConfigById(BigInt(options.auditConfigId));
-    if (!config) {
-      throw new Error(`Audit config ${options.auditConfigId} not found`);
-    }
-    // Convert Prisma result to expected format
+    if (!config) throw new Error(`Audit config ${options.auditConfigId} not found`);
     auditConfig = {
       id: config.id.toString(),
       name: config.name,
@@ -221,25 +260,27 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
     };
   }
 
-  console.log(`✓ Config: ${auditConfig.name}`);
-  console.log(`✓ Config ID: ${auditConfig.id}`);
-  console.log(`✓ Steps: ${auditConfig.auditSteps.length}`);
+  logger.info("Audit config loaded", {
+    config_id: String(auditConfig.id),
+    name: auditConfig.name,
+    steps: auditConfig.auditSteps.length,
+  });
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 2.5. CHECK PRODUCT VERIFICATION REQUIREMENTS
   // ═══════════════════════════════════════════════════════════════════════════
-  // If any audit step has verifyProductInfo=true, fetch product from database
+  // If at least one audit step has verifyProductInfo=true, fetch product from database
 
   const needsProductInfo = auditConfig.auditSteps.some(
-    (step: any) => step.verifyProductInfo === true
+    (step) => step.verifyProductInfo === true
   );
 
-  let productInfo: any = null;
+  let productInfo: ProductLinkResult | null = null;
 
   if (needsProductInfo) {
-    console.log(
-      `\nℹ️  Audit requires product verification - linking fiche to product database`
-    );
+    logger.info("Audit requires product verification; linking fiche to product DB", {
+      fiche_id: options.ficheId,
+    });
 
     try {
       // Import product service dynamically
@@ -252,32 +293,31 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
 
       if (linkResult.matched && linkResult.formule) {
         productInfo = linkResult;
-        console.log(`✓ Product matched successfully`);
-        console.log(`✓ Groupe: ${linkResult.formule.gamme.groupe.libelle}`);
-        console.log(`✓ Gamme: ${linkResult.formule.gamme.libelle}`);
-        console.log(`✓ Formule: ${linkResult.formule.libelle}`);
-        console.log(`✓ Garanties: ${linkResult.formule._counts.garanties}`);
-        console.log(`✓ Categories: ${linkResult.formule._counts.categories}`);
-        console.log(`✓ Items: ${linkResult.formule._counts.items}`);
+        logger.info("Product matched successfully", {
+          groupe: linkResult.formule.gamme.groupe.libelle,
+          gamme: linkResult.formule.gamme.libelle,
+          formule: linkResult.formule.libelle,
+          garanties: linkResult.formule._counts.garanties,
+          categories: linkResult.formule._counts.categories,
+          items: linkResult.formule._counts.items,
+        });
       } else {
-        console.warn(
-          `⚠️  No matching product found in database:` +
-            `\n   Searched: ${linkResult.searchCriteria.groupe_nom} > ${linkResult.searchCriteria.gamme_nom} > ${linkResult.searchCriteria.formule_nom}` +
-            `\n   Audit will proceed without product verification`
-        );
+        logger.warn("No matching product found in database", {
+          searched: `${linkResult.searchCriteria.groupe_nom} > ${linkResult.searchCriteria.gamme_nom} > ${linkResult.searchCriteria.formule_nom}`,
+        });
       }
-    } catch (error: any) {
-      console.warn(
-        `⚠️  Failed to link fiche to product: ${error.message}` +
-          `\n   Audit will proceed without product verification`
-      );
+    } catch (error: unknown) {
+      logger.warn("Failed to link fiche to product", {
+        fiche_id: options.ficheId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 3. TRANSCRIPTION
   // ═══════════════════════════════════════════════════════════════════════════
-  console.log("\n🎤 Step 3/5: Transcribing audio");
+  logger.info("Step 3/5: Transcribing audio", { fiche_id: options.ficheId });
   const transcriptionService = new TranscriptionService(
     process.env.ELEVENLABS_API_KEY!
   );
@@ -285,41 +325,44 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
   const transcriptions = await transcriptionService.transcribeAll(
     ficheData.recordings
   );
-  console.log(`✓ Transcriptions completed: ${transcriptions.length}`);
+  logger.info("Transcriptions completed", {
+    fiche_id: options.ficheId,
+    transcriptions: transcriptions.length,
+  });
 
   // Update database with transcription IDs in parallel
-  if (ficheCache) {
-    const dbUpdatePromises = transcriptions
-      .filter((t) => t.transcription_id && t.call_id)
-      .map((t) =>
-        updateRecordingTranscription(
-          ficheCache.id,
-          t.call_id!,
-          t.transcription_id!,
-          t.transcription.text
-        )
-      );
-
-    await Promise.all(dbUpdatePromises);
-    console.log(
-      `✓ ${dbUpdatePromises.length} transcription IDs and text saved to database`
+  const dbUpdatePromises = transcriptions
+    .filter((t) => t.transcription_id && t.call_id)
+    .map((t) =>
+      updateRecordingTranscription(
+        ficheCacheId,
+        t.call_id!,
+        t.transcription_id!,
+        t.transcription.text,
+        t.transcription
+      )
     );
-  }
+
+  await Promise.all(dbUpdatePromises);
+  logger.info("Saved transcription IDs and text to database", {
+    count: dbUpdatePromises.length,
+  });
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 4. GENERATE TIMELINE
   // ═══════════════════════════════════════════════════════════════════════════
-  console.log("\n📊 Step 4/5: Generating timeline");
+  logger.info("Step 4/5: Generating timeline", { fiche_id: options.ficheId });
   const timeline = generateTimeline(transcriptions);
   const totalChunks = timeline.reduce((sum, r) => sum + r.total_chunks, 0);
-  console.log(
-    `✓ Timeline: ${timeline.length} recordings, ${totalChunks} chunks`
-  );
+  logger.info("Timeline generated", {
+    recordings: timeline.length,
+    chunks: totalChunks,
+  });
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 5. RUN AUDIT
   // ═══════════════════════════════════════════════════════════════════════════
-  console.log("\n🤖 Step 5/5: Running AI audit");
+  logger.info("Step 5/5: Running AI audit", { fiche_id: options.ficheId });
 
   // Generate audit ID for webhook tracking
   const auditId = `audit-${options.ficheId}-${Date.now()}`;
@@ -330,39 +373,37 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
     timeline,
     timelineText,
     auditId,
-    ficheData.information.fiche_id,
+    info.fiche_id,
     productInfo // Pass product database info to analyzer
   );
 
   // Enrich citations with recording metadata (date/time)
   enrichCitationsWithMetadata(auditResults, timeline);
-  console.log("✓ Citations enriched with recording metadata");
+  logger.info("Citations enriched with recording metadata");
 
   // ═══════════════════════════════════════════════════════════════════════════
   // CALCULATE COMPLIANCE
   // ═══════════════════════════════════════════════════════════════════════════
-  const totalWeight = auditConfig.auditSteps.reduce(
-    (sum: number, s: any) => sum + s.weight,
-    0
-  );
+  const totalWeight = auditConfig.auditSteps.reduce((sum, s) => sum + s.weight, 0);
 
   // Cap each step's score at its maximum weight
-  const earnedWeight = auditResults.steps
-    .filter((s: any) => s.score !== undefined)
-    .reduce((sum: number, s: any) => {
-      const maxWeight = s.step_metadata?.weight || s.score;
-      const cappedScore = Math.min(s.score, maxWeight);
-      return sum + cappedScore;
-    }, 0);
+  const earnedWeight = auditResults.steps.reduce((sum, s) => {
+    const score = (s as { score?: unknown }).score;
+    if (typeof score !== "number") return sum;
+    const metaWeight = (s as { step_metadata?: { weight?: unknown } }).step_metadata?.weight;
+    const maxWeight = typeof metaWeight === "number" ? metaWeight : score;
+    return sum + Math.min(score, maxWeight);
+  }, 0);
 
   const score = (earnedWeight / totalWeight) * 100;
 
-  const criticalTotal = auditConfig.auditSteps.filter(
-    (s: any) => s.isCritical
-  ).length;
-  const criticalPassed = auditResults.steps.filter(
-    (s: any) => s.step_metadata?.is_critical && s.conforme === "CONFORME"
-  ).length;
+  const criticalTotal = auditConfig.auditSteps.filter((s) => s.isCritical).length;
+  const criticalPassed = auditResults.steps.filter((s) => {
+    const meta = (s as { step_metadata?: { is_critical?: unknown } }).step_metadata;
+    const isCritical = Boolean(meta && (meta as { is_critical?: unknown }).is_critical);
+    const conforme = (s as { conforme?: unknown }).conforme;
+    return isCritical && conforme === "CONFORME";
+  }).length;
 
   let niveau = "INSUFFISANT";
   if (criticalPassed < criticalTotal) {
@@ -399,9 +440,9 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
           description: auditConfig.description,
         },
         fiche: {
-          fiche_id: ficheData.information.fiche_id,
-          prospect_name: `${ficheData.prospect.prenom} ${ficheData.prospect.nom}`,
-          groupe: ficheData.information.groupe,
+          fiche_id: info.fiche_id,
+          prospect_name: `${prospect.prenom} ${prospect.nom}`,
+          groupe: info.groupe,
         },
         results: {
           ...auditResults,
@@ -424,10 +465,10 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
         duration_ms: duration,
       },
     },
-    ficheCache.id
+    ficheCacheId
   );
 
-  console.log(`\n💾 Audit saved to database (ID: ${savedAudit.id})`);
+  logger.info("Audit saved to database", { audit_db_id: String(savedAudit.id) });
 
   const result: AuditResult = {
     audit: {
@@ -438,9 +479,9 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
         description: auditConfig.description,
       },
       fiche: {
-        fiche_id: ficheData.information.fiche_id,
-        prospect_name: `${ficheData.prospect.prenom} ${ficheData.prospect.nom}`,
-        groupe: ficheData.information.groupe,
+        fiche_id: info.fiche_id,
+        prospect_name: `${prospect.prenom} ${prospect.nom}`,
+        groupe: info.groupe,
       },
       results: {
         ...auditResults,
@@ -468,20 +509,18 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
   if (options.saveToFile !== false) {
     const filename = `${DATA_DIR}/audit_${options.ficheId}_${Date.now()}.json`;
     writeFileSync(filename, JSON.stringify(result, null, 2));
-    console.log(`💾 Results saved: ${filename}`);
+    logger.info("Results saved to file", { filename });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SUMMARY
   // ═══════════════════════════════════════════════════════════════════════════
-  console.log("\n" + "=".repeat(80));
-  console.log("✅ AUDIT COMPLETED");
-  console.log("=".repeat(80));
-  console.log(`Score: ${score.toFixed(2)}%`);
-  console.log(`Niveau: ${niveau}`);
-  console.log(`Points critiques: ${criticalPassed}/${criticalTotal}`);
-  console.log(`Duration: ${(duration / 1000).toFixed(1)}s`);
-  console.log("=".repeat(80) + "\n");
+  logger.info("AUDIT COMPLETED", {
+    score_pct: Number(score.toFixed(2)),
+    niveau,
+    critical: `${criticalPassed}/${criticalTotal}`,
+    duration_seconds: Number((duration / 1000).toFixed(1)),
+  });
 
   return result;
 }

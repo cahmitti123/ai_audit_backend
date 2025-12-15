@@ -1,6 +1,23 @@
 version: "3.8"
 
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: ai-audit-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    networks:
+      - ai-audit-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
   # Main API Server
   server:
     build:
@@ -19,7 +36,7 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
-      - FICHE_API_URL=${FICHE_API_URL}
+      - FICHE_API_BASE_URL=${FICHE_API_BASE_URL}
       - FICHE_API_AUTH_TOKEN=${FICHE_API_AUTH_TOKEN}
       - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
       - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
@@ -30,6 +47,7 @@ services:
       - WEBHOOK_TIMEOUT=${WEBHOOK_TIMEOUT:-10000}
       - VECTOR_STORE_ID=${VECTOR_STORE_ID}
       - VECTOR_STORE_MAX_RESULTS=${VECTOR_STORE_MAX_RESULTS:-5}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
     volumes:
       - ./data:/app/data
     networks:
@@ -69,6 +87,8 @@ services:
       retries: 3
       start_period: 40s
     depends_on:
+      redis:
+        condition: service_healthy
       server:
         condition: service_healthy
 
@@ -78,4 +98,6 @@ networks:
 
 volumes:
   data:
+    driver: local
+  redis-data:
     driver: local

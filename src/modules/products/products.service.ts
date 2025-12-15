@@ -5,6 +5,7 @@
  */
 
 import * as productsRepository from "./products.repository.js";
+import { NotFoundError, ValidationError } from "../../shared/errors.js";
 import type {
   CreateGroupe,
   CreateGamme,
@@ -25,7 +26,7 @@ export async function listGroupes() {
 export async function getGroupeDetails(id: bigint) {
   const groupe = await productsRepository.getGroupeById(id);
   if (!groupe) {
-    throw new Error(`Groupe with ID ${id} not found`);
+    throw new NotFoundError("Groupe", id.toString());
   }
   return groupe;
 }
@@ -85,14 +86,17 @@ export async function listGammes(options?: {
 export async function getGammeDetails(id: bigint) {
   const gamme = await productsRepository.getGammeById(id);
   if (!gamme) {
-    throw new Error(`Gamme with ID ${id} not found`);
+    throw new NotFoundError("Gamme", id.toString());
   }
   return gamme;
 }
 
 export async function createGamme(data: CreateGamme) {
   // Verify groupe exists
-  await productsRepository.getGroupeById(data.groupeId);
+  const groupe = await productsRepository.getGroupeById(data.groupeId);
+  if (!groupe) {
+    throw new NotFoundError("Groupe", data.groupeId.toString());
+  }
 
   return productsRepository.createGamme({
     groupe: {
@@ -152,14 +156,17 @@ export async function listFormules(options?: {
 export async function getFormuleDetails(id: bigint) {
   const formule = await productsRepository.getFormuleById(id);
   if (!formule) {
-    throw new Error(`Formule with ID ${id} not found`);
+    throw new NotFoundError("Formule", id.toString());
   }
   return formule;
 }
 
 export async function createFormule(data: CreateFormule) {
   // Verify gamme exists
-  await productsRepository.getGammeById(data.gammeId);
+  const gamme = await productsRepository.getGammeById(data.gammeId);
+  if (!gamme) {
+    throw new NotFoundError("Gamme", data.gammeId.toString());
+  }
 
   return productsRepository.createFormule({
     gamme: {
@@ -206,7 +213,7 @@ export async function deleteFormule(id: bigint) {
 
 export async function searchProducts(query: string) {
   if (!query || query.trim().length < 2) {
-    throw new Error("Search query must be at least 2 characters");
+    throw new ValidationError("Search query must be at least 2 characters");
   }
 
   return productsRepository.searchProducts(query.trim());
@@ -228,24 +235,23 @@ export async function linkFicheToProduct(ficheId: string) {
   const ficheData = await getFicheWithCache(ficheId);
 
   // Extract product information from elements_souscription
-  const productInfo = (ficheData as any).elements_souscription?.produit;
+  const productInfo = ficheData.elements_souscription?.produit;
 
   if (!productInfo) {
-    throw new Error(`No product information found in fiche ${ficheId}`);
+    throw new NotFoundError("Product information for fiche", ficheId);
   }
 
   const { groupe_nom, gamme_nom, formule_nom } = productInfo;
 
   if (!groupe_nom || !gamme_nom || !formule_nom) {
-    throw new Error(
+    throw new ValidationError(
       `Incomplete product information in fiche ${ficheId}: ` +
         `groupe_nom=${groupe_nom}, gamme_nom=${gamme_nom}, formule_nom=${formule_nom}`
     );
   }
 
   // Extract client needs/requirements from questions_conseil
-  const clientNeeds =
-    (ficheData as any).elements_souscription?.questions_conseil || null;
+  const clientNeeds = ficheData.elements_souscription?.questions_conseil ?? null;
 
   // Extract fiche product data (what was sold)
   const ficheProductData = {

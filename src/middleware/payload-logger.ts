@@ -50,7 +50,7 @@ export function payloadSizeResponseLogger(
 ) {
   const originalJson = res.json.bind(res);
 
-  res.json = function (body: any) {
+  res.json = function (body: unknown) {
     const route = `${req.method} ${req.path}`;
 
     try {

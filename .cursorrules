@@ -1,0 +1,27 @@
+# Project Intelligence (Cursor)
+
+## Non-negotiables
+- Never commit real secrets; use placeholders.
+- Use `npm run build` to confirm TypeScript is green after substantial changes.
+
+## Inngest patterns
+- **Do not nest `step.*` calls inside `step.run`** (avoid `NESTING_STEPS`).
+  - Good: compute data inside `step.run`, then call `step.sendEvent` at top-level.
+  - Good: use separate `step.run` for DB writes after emitting events.
+- When emitting multiple events, prefer a single `step.sendEvent("some-step", eventsArray)`.
+
+## Automation scheduling
+- Scheduler tick is `scheduledAutomationCheck` (Inngest cron).
+- Default tick is every minute; can override with `AUTOMATION_SCHEDULER_CRON`.
+- “Due” detection is window-based using timezone-aware cron matching.
+
+## Webhooks / realtime
+- Central webhook sender is `src/shared/webhook.ts`.
+- For user-provided webhook URLs (progressive fetch), validate with SSRF guard.
+- For debugging webhook failures, log axios `code`, `status`, and URL path (avoid full secret leakage).
+
+
+
+
+
+

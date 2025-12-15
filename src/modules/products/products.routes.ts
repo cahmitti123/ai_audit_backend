@@ -15,26 +15,18 @@ import {
   updateFormuleSchema,
   productsQuerySchema,
 } from "./products.schemas.js";
-import { logger } from "../../shared/logger.js";
-import { serializeBigInt } from "../../shared/bigint-serializer.js";
+import { asyncHandler } from "../../middleware/async-handler.js";
+import { ValidationError } from "../../shared/errors.js";
+import { ok } from "../../shared/http.js";
 
 export const productsRouter = Router();
 
-// Helper for consistent JSON responses with BigInt serialization
-function jsonResponse(res: Response, data: any, statusCode = 200) {
-  const serialized = serializeBigInt(data);
-  return res.status(statusCode).json({
-    success: true,
-    data: serialized,
-  });
-}
-
-function errorResponse(res: Response, error: any, statusCode = 500) {
-  logger.error("Products API error", { error: error.message });
-  return res.status(statusCode).json({
-    success: false,
-    error: error.message || "Internal server error",
-  });
+function parseBigIntParam(value: string, name = "id"): bigint {
+  try {
+    return BigInt(value);
+  } catch {
+    throw new ValidationError(`Invalid ${name}`);
+  }
 }
 
 // ============================================
@@ -51,14 +43,13 @@ function errorResponse(res: Response, error: any, statusCode = 500) {
  *       200:
  *         description: Statistics about insurance products
  */
-productsRouter.get("/stats", async (req: Request, res: Response) => {
-  try {
+productsRouter.get(
+  "/stats",
+  asyncHandler(async (_req: Request, res: Response) => {
     const stats = await productsService.getStats();
-    return jsonResponse(res, stats);
-  } catch (error) {
-    return errorResponse(res, error);
-  }
-});
+    return ok(res, stats);
+  })
+);
 
 /**
  * @swagger
@@ -79,15 +70,14 @@ productsRouter.get("/stats", async (req: Request, res: Response) => {
  *       404:
  *         description: Fiche not found or no matching product
  */
-productsRouter.get("/link-fiche/:ficheId", async (req: Request, res: Response) => {
-  try {
+productsRouter.get(
+  "/link-fiche/:ficheId",
+  asyncHandler(async (req: Request, res: Response) => {
     const { ficheId } = req.params;
     const result = await productsService.linkFicheToProduct(ficheId);
-    return jsonResponse(res, result);
-  } catch (error) {
-    return errorResponse(res, error, 404);
-  }
-});
+    return ok(res, result);
+  })
+);
 
 /**
  * @swagger
@@ -106,19 +96,18 @@ productsRouter.get("/link-fiche/:ficheId", async (req: Request, res: Response) =
  *       200:
  *         description: Search results across groupes, gammes, and formules
  */
-productsRouter.get("/search", async (req: Request, res: Response) => {
-  try {
-    const { q } = req.query;
-    if (!q || typeof q !== "string") {
-      return errorResponse(res, new Error("Query parameter 'q' is required"), 400);
+productsRouter.get(
+  "/search",
+  asyncHandler(async (req: Request, res: Response) => {
+    const q = req.query.q;
+    if (typeof q !== "string" || q.trim().length === 0) {
+      throw new ValidationError("Query parameter 'q' is required");
     }
 
     const results = await productsService.searchProducts(q);
-    return jsonResponse(res, results);
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-});
+    return ok(res, results);
+  })
+);
 
 // ============================================
 // Groupes Endpoints
@@ -134,14 +123,13 @@ productsRouter.get("/search", async (req: Request, res: Response) => {
  *       200:
  *         description: List of insurance groups
  */
-productsRouter.get("/groupes", async (req: Request, res: Response) => {
-  try {
+productsRouter.get(
+  "/groupes",
+  asyncHandler(async (_req: Request, res: Response) => {
     const groupes = await productsService.listGroupes();
-    return jsonResponse(res, groupes);
-  } catch (error) {
-    return errorResponse(res, error);
-  }
-});
+    return ok(res, groupes);
+  })
+);
 
 /**
  * @swagger
@@ -159,15 +147,14 @@ productsRouter.get("/groupes", async (req: Request, res: Response) => {
  *       200:
  *         description: Groupe details with gammes
  */
-productsRouter.get("/groupes/:id", async (req: Request, res: Response) => {
-  try {
-    const id = BigInt(req.params.id);
+productsRouter.get(
+  "/groupes/:id",
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseBigIntParam(req.params.id, "groupe id");
     const groupe = await productsService.getGroupeDetails(id);
-    return jsonResponse(res, groupe);
-  } catch (error) {
-    return errorResponse(res, error, 404);
-  }
-});
+    return ok(res, groupe);
+  })
+);
 
 /**
  * @swagger
@@ -190,15 +177,14 @@ productsRouter.get("/groupes/:id", async (req: Request, res: Response) => {
  *       201:
  *         description: Groupe created successfully
  */
-productsRouter.post("/groupes", async (req: Request, res: Response) => {
-  try {
+productsRouter.post(
+  "/groupes",
+  asyncHandler(async (req: Request, res: Response) => {
     const validated = createGroupeSchema.parse(req.body);
     const groupe = await productsService.createGroupe(validated);
-    return jsonResponse(res, groupe, 201);
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-});
+    return ok(res, groupe, 201);
+  })
+);
 
 /**
  * @swagger
@@ -222,16 +208,15 @@ productsRouter.post("/groupes", async (req: Request, res: Response) => {
  *       200:
  *         description: Groupe updated successfully
  */
-productsRouter.put("/groupes/:id", async (req: Request, res: Response) => {
-  try {
-    const id = BigInt(req.params.id);
+productsRouter.put(
+  "/groupes/:id",
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseBigIntParam(req.params.id, "groupe id");
     const validated = updateGroupeSchema.parse(req.body);
     const groupe = await productsService.updateGroupe(id, validated);
-    return jsonResponse(res, groupe);
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-});
+    return ok(res, groupe);
+  })
+);
 
 /**
  * @swagger
@@ -249,15 +234,14 @@ productsRouter.put("/groupes/:id", async (req: Request, res: Response) => {
  *       200:
  *         description: Groupe deleted successfully
  */
-productsRouter.delete("/groupes/:id", async (req: Request, res: Response) => {
-  try {
-    const id = BigInt(req.params.id);
+productsRouter.delete(
+  "/groupes/:id",
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseBigIntParam(req.params.id, "groupe id");
     await productsService.deleteGroupe(id);
-    return jsonResponse(res, { message: "Groupe deleted successfully" });
-  } catch (error) {
-    return errorResponse(res, error, 404);
-  }
-});
+    return ok(res, { message: "Groupe deleted successfully" });
+  })
+);
 
 // ============================================
 // Gammes Endpoints
@@ -290,8 +274,9 @@ productsRouter.delete("/groupes/:id", async (req: Request, res: Response) => {
  *       200:
  *         description: Paginated list of gammes
  */
-productsRouter.get("/gammes", async (req: Request, res: Response) => {
-  try {
+productsRouter.get(
+  "/gammes",
+  asyncHandler(async (req: Request, res: Response) => {
     const query = productsQuerySchema.parse(req.query);
     const result = await productsService.listGammes({
       groupeId: query.groupeId,
@@ -299,11 +284,9 @@ productsRouter.get("/gammes", async (req: Request, res: Response) => {
       limit: query.limit,
       search: query.search,
     });
-    return jsonResponse(res, result);
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-});
+    return ok(res, result);
+  })
+);
 
 /**
  * @swagger
@@ -321,15 +304,14 @@ productsRouter.get("/gammes", async (req: Request, res: Response) => {
  *       200:
  *         description: Gamme details with formules
  */
-productsRouter.get("/gammes/:id", async (req: Request, res: Response) => {
-  try {
-    const id = BigInt(req.params.id);
+productsRouter.get(
+  "/gammes/:id",
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseBigIntParam(req.params.id, "gamme id");
     const gamme = await productsService.getGammeDetails(id);
-    return jsonResponse(res, gamme);
-  } catch (error) {
-    return errorResponse(res, error, 404);
-  }
-});
+    return ok(res, gamme);
+  })
+);
 
 /**
  * @swagger
@@ -347,15 +329,14 @@ productsRouter.get("/gammes/:id", async (req: Request, res: Response) => {
  *       201:
  *         description: Gamme created successfully
  */
-productsRouter.post("/gammes", async (req: Request, res: Response) => {
-  try {
+productsRouter.post(
+  "/gammes",
+  asyncHandler(async (req: Request, res: Response) => {
     const validated = createGammeSchema.parse(req.body);
     const gamme = await productsService.createGamme(validated);
-    return jsonResponse(res, gamme, 201);
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-});
+    return ok(res, gamme, 201);
+  })
+);
 
 /**
  * @swagger
@@ -373,16 +354,15 @@ productsRouter.post("/gammes", async (req: Request, res: Response) => {
  *       200:
  *         description: Gamme updated successfully
  */
-productsRouter.put("/gammes/:id", async (req: Request, res: Response) => {
-  try {
-    const id = BigInt(req.params.id);
+productsRouter.put(
+  "/gammes/:id",
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseBigIntParam(req.params.id, "gamme id");
     const validated = updateGammeSchema.parse(req.body);
     const gamme = await productsService.updateGamme(id, validated);
-    return jsonResponse(res, gamme);
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-});
+    return ok(res, gamme);
+  })
+);
 
 /**
  * @swagger
@@ -400,15 +380,14 @@ productsRouter.put("/gammes/:id", async (req: Request, res: Response) => {
  *       200:
  *         description: Gamme deleted successfully
  */
-productsRouter.delete("/gammes/:id", async (req: Request, res: Response) => {
-  try {
-    const id = BigInt(req.params.id);
+productsRouter.delete(
+  "/gammes/:id",
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseBigIntParam(req.params.id, "gamme id");
     await productsService.deleteGamme(id);
-    return jsonResponse(res, { message: "Gamme deleted successfully" });
-  } catch (error) {
-    return errorResponse(res, error, 404);
-  }
-});
+    return ok(res, { message: "Gamme deleted successfully" });
+  })
+);
 
 // ============================================
 // Formules Endpoints
@@ -441,8 +420,9 @@ productsRouter.delete("/gammes/:id", async (req: Request, res: Response) => {
  *       200:
  *         description: Paginated list of formules
  */
-productsRouter.get("/formules", async (req: Request, res: Response) => {
-  try {
+productsRouter.get(
+  "/formules",
+  asyncHandler(async (req: Request, res: Response) => {
     const query = productsQuerySchema.parse(req.query);
     const result = await productsService.listFormules({
       gammeId: query.gammeId,
@@ -450,11 +430,9 @@ productsRouter.get("/formules", async (req: Request, res: Response) => {
       limit: query.limit,
       search: query.search,
     });
-    return jsonResponse(res, result);
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-});
+    return ok(res, result);
+  })
+);
 
 /**
  * @swagger
@@ -472,15 +450,14 @@ productsRouter.get("/formules", async (req: Request, res: Response) => {
  *       200:
  *         description: Formule details with guarantees
  */
-productsRouter.get("/formules/:id", async (req: Request, res: Response) => {
-  try {
-    const id = BigInt(req.params.id);
+productsRouter.get(
+  "/formules/:id",
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseBigIntParam(req.params.id, "formule id");
     const formule = await productsService.getFormuleDetails(id);
-    return jsonResponse(res, formule);
-  } catch (error) {
-    return errorResponse(res, error, 404);
-  }
-});
+    return ok(res, formule);
+  })
+);
 
 /**
  * @swagger
@@ -498,15 +475,14 @@ productsRouter.get("/formules/:id", async (req: Request, res: Response) => {
  *       201:
  *         description: Formule created successfully
  */
-productsRouter.post("/formules", async (req: Request, res: Response) => {
-  try {
+productsRouter.post(
+  "/formules",
+  asyncHandler(async (req: Request, res: Response) => {
     const validated = createFormuleSchema.parse(req.body);
     const formule = await productsService.createFormule(validated);
-    return jsonResponse(res, formule, 201);
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-});
+    return ok(res, formule, 201);
+  })
+);
 
 /**
  * @swagger
@@ -524,16 +500,15 @@ productsRouter.post("/formules", async (req: Request, res: Response) => {
  *       200:
  *         description: Formule updated successfully
  */
-productsRouter.put("/formules/:id", async (req: Request, res: Response) => {
-  try {
-    const id = BigInt(req.params.id);
+productsRouter.put(
+  "/formules/:id",
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseBigIntParam(req.params.id, "formule id");
     const validated = updateFormuleSchema.parse(req.body);
     const formule = await productsService.updateFormule(id, validated);
-    return jsonResponse(res, formule);
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-});
+    return ok(res, formule);
+  })
+);
 
 /**
  * @swagger
@@ -551,13 +526,12 @@ productsRouter.put("/formules/:id", async (req: Request, res: Response) => {
  *       200:
  *         description: Formule deleted successfully
  */
-productsRouter.delete("/formules/:id", async (req: Request, res: Response) => {
-  try {
-    const id = BigInt(req.params.id);
+productsRouter.delete(
+  "/formules/:id",
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseBigIntParam(req.params.id, "formule id");
     await productsService.deleteFormule(id);
-    return jsonResponse(res, { message: "Formule deleted successfully" });
-  } catch (error) {
-    return errorResponse(res, error, 404);
-  }
-});
+    return ok(res, { message: "Formule deleted successfully" });
+  })
+);
 

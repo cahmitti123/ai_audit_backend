@@ -6,6 +6,12 @@
 
 import type { ProductVerificationContext } from "./audits.vector-store.js";
 import { formatVerificationContextForPrompt } from "./audits.vector-store.js";
+import type { TimelineRecording } from "../../schemas.js";
+import type {
+  AuditConfigForAnalysis,
+  AuditStepDefinition,
+  ProductLinkResult,
+} from "./audits.types.js";
 
 export function buildAnalysisRules(): string {
   return `═══════════════════════════════════════════════════════════════════════════════
@@ -24,6 +30,10 @@ STRUCTURE STRICTE:
 - Si statut=PRESENT: AU MOINS 1 citation requise
 - Si statut=ABSENT/NON_APPLICABLE: citations=[]
 - TOUS les champs obligatoires même si vides
+
+ANTI-HALLUCINATION (OBLIGATOIRE):
+- N'inventez jamais une citation. Le champ "texte" doit être un extrait exact présent dans la chronologie.
+- Si vous ne trouvez pas de preuve textuelle dans la chronologie, marquez le checkpoint "ABSENT" (ou "PARTIEL" si mention indirecte) et expliquez pourquoi.
 
 MÉTADONNÉES EXACTES:
 - recording_index: depuis "Enregistrement #X" (index = X-1)
@@ -49,7 +59,7 @@ VALEURS ENUM VALIDES:
 }}`;
 }
 
-export function buildTimelineText(timeline: any[]): string {
+export function buildTimelineText(timeline: ReadonlyArray<TimelineRecording>): string {
   let text =
     "═══════════════════════════════════════════════════════════════════════════════\n";
   text += "CHRONOLOGIE COMPLÈTE DE LA CONVERSATION\n";
@@ -85,13 +95,136 @@ export function buildTimelineText(timeline: any[]): string {
 }
 
 /**
+ * Build a smaller timeline excerpt for a single step.
+ * Useful when prompts would otherwise overflow (e.g., product verification steps).
+ */
+export function buildTimelineExcerptText(
+  timeline: ReadonlyArray<TimelineRecording>,
+  params: {
+    queryTerms: string[];
+    maxChunks?: number;
+    neighborChunks?: number;
+  }
+): string {
+  const maxChunks = Math.max(5, Number(params.maxChunks ?? 40));
+  const neighbor = Math.max(0, Number(params.neighborChunks ?? 1));
+
+  const normalize = (s: string) =>
+    String(s || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const terms = Array.from(
+    new Set(
+      (params.queryTerms || [])
+        .map((t) => normalize(t))
+        .filter((t) => t.length >= 4)
+        .slice(0, 40)
+    )
+  );
+
+  const scored: Array<{ recording_index: number; chunk_index: number; score: number }> = [];
+
+  for (const rec of timeline) {
+    for (const chunk of rec.chunks || []) {
+      const textNorm = normalize(chunk.full_text || "");
+      if (!textNorm) continue;
+
+      let score = 0;
+      for (const term of terms) {
+        if (textNorm.includes(term)) score++;
+      }
+      if (score > 0) {
+        scored.push({ recording_index: rec.recording_index, chunk_index: chunk.chunk_index, score });
+      }
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+
+  const selected = new Map<number, Set<number>>();
+  const take = scored.slice(0, maxChunks);
+  for (const c of take) {
+    if (!selected.has(c.recording_index)) selected.set(c.recording_index, new Set());
+    const set = selected.get(c.recording_index)!;
+    set.add(c.chunk_index);
+    for (let d = 1; d <= neighbor; d++) {
+      set.add(c.chunk_index - d);
+      set.add(c.chunk_index + d);
+    }
+  }
+
+  // If nothing matched, fall back to first 2 chunks per recording.
+  if (selected.size === 0) {
+    for (const rec of timeline) {
+      const set = new Set<number>();
+      for (const ch of rec.chunks || []) {
+        if (set.size >= 2) break;
+        set.add(ch.chunk_index);
+      }
+      selected.set(rec.recording_index, set);
+    }
+  }
+
+  let text =
+    "═══════════════════════════════════════════════════════════════════════════════\n";
+  text += "EXTRAIT PERTINENT DE LA CHRONOLOGIE (pour cette étape)\n";
+  text +=
+    "═══════════════════════════════════════════════════════════════════════════════\n\n";
+  text +=
+    "⚠️ IMPORTANT: Ceci est un extrait. N'inventez pas d'éléments absents de cet extrait.\n";
+  text +=
+    "Si vous ne trouvez pas de preuve dans l'extrait, marquez le checkpoint ABSENT/PARTIEL et expliquez.\n\n";
+
+  for (const recording of timeline) {
+    const wanted = selected.get(recording.recording_index);
+    if (!wanted || wanted.size === 0) continue;
+
+    text += `\n${"=".repeat(80)}\n`;
+    text += `Enregistrement #${recording.recording_index + 1}\n`;
+    text += `Date: ${recording.recording_date || "N/A"}\n`;
+    text += `Heure: ${recording.recording_time || "N/A"}\n`;
+    text += `Call ID: ${recording.call_id}\n`;
+    text += `De: ${recording.from_number || "N/A"} → Vers: ${
+      recording.to_number || "N/A"
+    }\n`;
+    text += `Durée: ${recording.duration_seconds}s\n`;
+    text += `Total Chunks: ${recording.total_chunks}\n`;
+    text += `${"=".repeat(80)}\n\n`;
+
+    const chunks = (recording.chunks || [])
+      .filter((ch) => wanted.has(ch.chunk_index))
+      .sort((a, b) => a.chunk_index - b.chunk_index);
+
+    for (const chunk of chunks) {
+      text += `\n─── Chunk ${chunk.chunk_index + 1} ───\n`;
+      text += `Temps: ${chunk.start_timestamp}s - ${chunk.end_timestamp}s\n`;
+      text += `Speakers: ${chunk.speakers.join(", ")}\n\n`;
+      text += `Conversation:\n${chunk.full_text}\n`;
+    }
+  }
+
+  text += `\n${"=".repeat(80)}\n`;
+  text += "FIN DE L'EXTRAIT\n";
+  text += `${"=".repeat(80)}\n\n`;
+
+  return text;
+}
+
+/**
  * Build Mail Devis context section for product verification
  */
 /**
  * Build comprehensive product context from database for AI verification
  * Includes ALL product information: guarantees, legal mentions, coverage details
  */
-export function buildProductContext(productInfo: any): string {
+export function buildProductContext(
+  productInfo: ProductLinkResult | null | undefined
+): string {
   if (!productInfo || !productInfo.matched || !productInfo.formule) {
     return "";
   }
@@ -178,7 +311,7 @@ IDENTIFICATION PRODUIT:
     context += `\nDOCUMENTS OFFICIELS SPÉCIFIQUES (Formule ${formule.libelle}):
 ─────────────────────────────────────────────────────────────────────────────
 `;
-    formule.documents.forEach((doc: any) => {
+    formule.documents.forEach((doc) => {
       const docLabels: Record<string, string> = {
         cg: "Conditions Générales",
         garanties: "Tableau des Garanties",
@@ -197,7 +330,7 @@ IDENTIFICATION PRODUIT:
     context += `\n═══════════════════════════════════════════════════════════════════════════════
 TABLEAUX DE GARANTIES DÉTAILLÉS COMPLETS
 ═══════════════════════════════════════════════════════════════════════════════
-Total: ${formule._counts.categories} catégories | ${formule._counts.items} items de garantie
+Total: ${formule._counts?.categories ?? 0} catégories | ${formule._counts?.items ?? 0} items de garantie
 
 ⚠️ LISEZ ATTENTIVEMENT: Ces tableaux contiennent TOUTES les garanties, plafonds,
 conditions et exclusions du produit. Vérifiez que le conseiller a communiqué
@@ -205,7 +338,7 @@ les informations correctes et complètes au client.
 
 `;
 
-    formule.garantiesParsed.forEach((garantie: any, gIndex: number) => {
+    formule.garantiesParsed.forEach((garantie, gIndex: number) => {
       // Add intro text if available (important context)
       if (
         garantie.introText &&
@@ -235,14 +368,14 @@ les informations correctes et complètes au client.
 
       // Add all categories with their complete items
       if (garantie.categories && garantie.categories.length > 0) {
-        garantie.categories.forEach((category: any, cIndex: number) => {
+        garantie.categories.forEach((category, cIndex: number) => {
           context += `\n▼ CATÉGORIE ${cIndex + 1}/${
             garantie.categories.length
           }: ${category.categoryName}\n`;
           context += `${"─".repeat(80)}\n`;
 
           if (category.items && category.items.length > 0) {
-            category.items.forEach((item: any, iIndex: number) => {
+            category.items.forEach((item, iIndex: number) => {
               const name = item.guaranteeName || "";
               const value = item.guaranteeValue || "";
 
@@ -314,10 +447,10 @@ les informations correctes et complètes au client.
   context += `\n═══════════════════════════════════════════════════════════════════════════════
 📊 RÉSUMÉ PRODUIT:
 ═══════════════════════════════════════════════════════════════════════════════
-  ✓ Garanties parsées:      ${formule._counts.garanties}
-  ✓ Catégories détaillées:  ${formule._counts.categories}
-  ✓ Items de garantie:      ${formule._counts.items}
-  ✓ Documents disponibles:  ${formule._counts.documents}
+  ✓ Garanties parsées:      ${formule._counts?.garanties ?? 0}
+  ✓ Catégories détaillées:  ${formule._counts?.categories ?? 0}
+  ✓ Items de garantie:      ${formule._counts?.items ?? 0}
+  ✓ Documents disponibles:  ${formule._counts?.documents ?? 0}
 
 ═══════════════════════════════════════════════════════════════════════════════
 ⚠️ INSTRUCTIONS CRITIQUES POUR LA VÉRIFICATION PRODUIT:
@@ -377,91 +510,12 @@ En cas de problème, CITEZ PRÉCISÉMENT:
   return context;
 }
 
-export function buildMailDevisContext(mailDevis: any): string {
-  if (!mailDevis || !mailDevis.garanties_details) {
-    return "";
-  }
-
-  const details = mailDevis.garanties_details;
-
-  let context = `
-═══════════════════════════════════════════════════════════════════════════════
-📋 INFORMATIONS PRODUIT OFFICIELLES (Mail Devis Personnalisé)
-═══════════════════════════════════════════════════════════════════════════════
-
-PRODUIT SOUSCRIT:
-─────────────────────────────────────────────────────────────────────────────
-  Gamme:         ${details.gamme}
-  Produit:       ${details.product_name}
-  Formule:       ${details.formule}
-  Prix:          ${details.price}€ par mois
-  Tranche d'âge: ${details.age_range}
-
-SOUSCRIPTEUR:
-─────────────────────────────────────────────────────────────────────────────
-  ${details.subscriber_info.civilite} ${details.subscriber_info.prenom} ${details.subscriber_info.nom}
-
-`;
-
-  // Add garanties information
-  if (details.garanties && Object.keys(details.garanties).length > 0) {
-    context += `GARANTIES ET REMBOURSEMENTS:
-─────────────────────────────────────────────────────────────────────────────
-`;
-
-    Object.entries(details.garanties).forEach(
-      ([key, category]: [string, any]) => {
-        context += `\n📌 ${category.category_name}\n`;
-
-        // Direct items
-        if (category.items && category.items.length > 0) {
-          category.items.forEach((item: any) => {
-            context += `   • ${item.name}: ${item.value}`;
-            if (item.note_ref) context += ` (${item.note_ref})`;
-            context += `\n`;
-          });
-        }
-
-        // Subcategories
-        if (category.subcategories) {
-          Object.entries(category.subcategories).forEach(
-            ([subKey, subcategory]: [string, any]) => {
-              context += `\n   ─ ${subcategory.name}\n`;
-              subcategory.items.forEach((item: any) => {
-                context += `     • ${item.name}: ${item.value}`;
-                if (item.note_ref) context += ` (${item.note_ref})`;
-                context += `\n`;
-              });
-            }
-          );
-        }
-      }
-    );
-  }
-
-  // Add notes (conditions, exclusions)
-  if (details.notes && details.notes.length > 0) {
-    context += `\nNOTES IMPORTANTES (Conditions & Exclusions):
-─────────────────────────────────────────────────────────────────────────────
-`;
-    details.notes.forEach((note: any) => {
-      context += `(${note.number}) ${note.text}\n\n`;
-    });
-  }
-
-  context += `═══════════════════════════════════════════════════════════════════════════════
-
-`;
-
-  return context;
-}
-
 export function buildStepPrompt(
-  step: any,
-  auditConfig: any,
+  step: AuditStepDefinition,
+  auditConfig: AuditConfigForAnalysis,
   timelineText: string,
   productVerificationContext?: ProductVerificationContext[] | null,
-  productInfo?: any
+  productInfo?: ProductLinkResult | null
 ): string {
   const totalSteps = auditConfig.auditSteps?.length || step.position;
 
@@ -521,7 +575,8 @@ En cas de divergence entre ce que dit le conseiller et la documentation:
   } else if (
     step.verifyProductInfo === true &&
     productInfo &&
-    productInfo.matched
+    productInfo.matched &&
+    productInfo.formule
   ) {
     // Only Product DB available (no vector store context)
     const formule = productInfo.formule;
@@ -538,6 +593,22 @@ Points à vérifier:
 - Plafonds et remboursements correspondent aux valeurs spécifiées
 
 En cas d'inexactitude, marquez le point comme NON_CONFORME avec explication.
+─────────────────────────────────────────────────────────────────────────────
+
+`;
+  } else if (step.verifyProductInfo === true) {
+    // No reliable product context available (DB not matched and/or vector-store disabled).
+    verificationSection = `
+⚠️ VÉRIFICATION PRODUIT IMPOSSIBLE (DONNÉES MANQUANTES):
+─────────────────────────────────────────────────────────────────────────────
+Aucune information produit fiable n'est disponible dans ce run.
+
+Règles anti-hallucination:
+- N'INVENTEZ JAMAIS des garanties/plafonds/exclusions.
+- Si un checkpoint nécessite une référence produit, marquez-le au minimum PARTIEL
+  et expliquez clairement: "documentation produit non disponible → impossible de vérifier".
+- Vous pouvez toujours citer ce que le conseiller a affirmé (avec citations transcript),
+  mais vous devez préciser que la conformité au produit ne peut pas être confirmée.
 ─────────────────────────────────────────────────────────────────────────────
 
 `;
@@ -561,6 +632,7 @@ ${step.description}
 
 INSTRUCTIONS:
 ${step.prompt}
+${step.customInstructions ? `\n\nINSTRUCTIONS SUPPLÉMENTAIRES:\n${step.customInstructions}` : ""}
 
 POINTS DE CONTRÔLE À ANALYSER:
 ${step.controlPoints

@@ -256,7 +256,7 @@ These types correspond to the following API endpoints:
 2. Update via API with proper audit config IDs
 3. Or mark audit configs as automatic in the database
 
-See `AUDIT_CONFIG_TROUBLESHOOTING.md` for detailed guide.
+See `docs/operations.md` for scheduler/webhook operational notes.
 
 ### Type errors with BigInt
 
@@ -282,7 +282,7 @@ import { formatDuration } from "./types/automation.utils";
 
 For issues or questions:
 
-1. Check `AUDIT_CONFIG_TROUBLESHOOTING.md`
+1. Check `docs/operations.md`
 2. Review the API documentation
 3. Check browser console for validation errors
 4. Use the `_diagnostic` object in API responses

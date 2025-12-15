@@ -1,6 +1,12 @@
 import axios from "axios";
 import crypto from "crypto";
-import { logger } from "./logger";
+import { logger } from "./logger.js";
+import {
+  publishRealtimeEvent,
+  topicForAudit,
+  topicForFiche,
+  topicForJob,
+} from "./realtime.js";
 
 // Webhook event types matching the documentation
 export type WebhookEventType =
@@ -35,17 +41,36 @@ export interface WebhookPayload {
   event: WebhookEventType;
   timestamp: string;
   source: string;
-  data: Record<string, any>;
+  data: Record<string, unknown>;
 }
 
 /**
  * Generate HMAC SHA256 signature for webhook payload
  */
-function generateSignature(payload: WebhookPayload, secret: string): string {
-  const payloadStr = JSON.stringify(payload);
+function generateSignature(body: string, secret: string): string {
   const hmac = crypto.createHmac("sha256", secret);
-  hmac.update(payloadStr);
+  hmac.update(body);
   return `sha256=${hmac.digest("hex")}`;
+}
+
+function generateSignatureV2(body: string, secret: string, timestamp: string): string {
+  const hmac = crypto.createHmac("sha256", secret);
+  hmac.update(`${timestamp}.${body}`);
+  return `sha256=${hmac.digest("hex")}`;
+}
+
+function calculateRetryDelay(attempt: number): number {
+  // Exponential backoff: 2^attempt seconds (cap 30s)
+  return Math.min(Math.pow(2, attempt) * 1000, 30000);
+}
+
+function safeUrlForLog(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    return `${u.protocol}//${u.host}${u.pathname}`;
+  } catch {
+    return rawUrl;
+  }
 }
 
 /**
@@ -53,14 +78,25 @@ function generateSignature(payload: WebhookPayload, secret: string): string {
  */
 export async function sendWebhook(
   eventType: WebhookEventType,
-  data: Record<string, any>,
+  data: Record<string, unknown>,
   source: string = "audit-service"
 ): Promise<boolean> {
   const webhookUrl = process.env.FRONTEND_WEBHOOK_URL;
 
-  if (!webhookUrl) {
-    logger.warn("FRONTEND_WEBHOOK_URL not configured, skipping webhook");
-    return false;
+  const topics = new Set<string>();
+  try {
+    if (typeof data?.audit_id === "string" && data.audit_id) {
+      topics.add(topicForAudit(data.audit_id));
+    }
+    if (typeof data?.fiche_id === "string" && data.fiche_id) {
+      topics.add(topicForFiche(data.fiche_id));
+    }
+    // Optional: some event payloads may contain jobId
+    if (typeof data?.jobId === "string" && data.jobId) {
+      topics.add(topicForJob(data.jobId));
+    }
+  } catch {
+    // ignore
   }
 
   const payload: WebhookPayload = {
@@ -70,44 +106,203 @@ export async function sendWebhook(
     data,
   };
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
+  const deliveryId = crypto.randomUUID();
+  const body = JSON.stringify(payload);
 
-  // Add signature if secret is configured
-  const webhookSecret = process.env.WEBHOOK_SECRET;
-  if (webhookSecret) {
-    headers["X-Webhook-Signature"] = generateSignature(payload, webhookSecret);
-  }
-
-  try {
-    const response = await axios.post(webhookUrl, payload, {
-      headers,
-      timeout: parseInt(process.env.WEBHOOK_TIMEOUT || "10000"),
-    });
-
-    logger.info("Webhook sent successfully", {
-      event: eventType,
-      status: response.status,
-    });
-
-    return true;
-  } catch (error) {
-    if (axios.isAxiosError(error)) {
-      logger.error("Webhook delivery failed", {
-        event: eventType,
-        error: error.message,
-        status: error.response?.status,
-        data: error.response?.data,
-      });
-    } else {
-      logger.error("Webhook delivery failed with unknown error", {
-        event: eventType,
-        error,
-      });
-    }
+  // If no webhook URL, still publish realtime event (SSE / internal subscribers)
+  if (!webhookUrl) {
+    logger.warn("FRONTEND_WEBHOOK_URL not configured, skipping webhook");
+    await Promise.all(
+      Array.from(topics).map((topic) =>
+        publishRealtimeEvent({
+          topic,
+          type: eventType,
+          source,
+          data: {
+            ...payload,
+            delivery: { configured: false, deliveryId },
+          },
+        }).catch(() => null)
+      )
+    );
     return false;
   }
+
+  const timeoutMs = parseInt(process.env.WEBHOOK_TIMEOUT || "10000");
+  const maxAttemptsEnv = parseInt(process.env.WEBHOOK_MAX_ATTEMPTS || "3");
+  const maxAttempts = eventType.endsWith(".progress") ? 1 : maxAttemptsEnv;
+
+  const webhookSecret = process.env.WEBHOOK_SECRET;
+  const signature = webhookSecret ? generateSignature(body, webhookSecret) : null;
+  const signatureV2 =
+    webhookSecret ? generateSignatureV2(body, webhookSecret, payload.timestamp) : null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "User-Agent": "AI-Audit-Webhook/1.0",
+      "X-Webhook-Event": eventType,
+      "X-Webhook-Delivery-Id": deliveryId,
+      "X-Webhook-Attempt": String(attempt),
+      "X-Webhook-Timestamp": payload.timestamp,
+      "X-Webhook-Source": source,
+    };
+
+    if (signature) headers["X-Webhook-Signature"] = signature;
+    if (signatureV2) headers["X-Webhook-Signature-V2"] = signatureV2;
+
+    try {
+      const response = await axios.post(webhookUrl, body, {
+        headers,
+        timeout: timeoutMs,
+        validateStatus: () => true,
+      });
+
+      const ok = response.status >= 200 && response.status < 300;
+
+      if (ok) {
+        logger.info("Webhook sent successfully", {
+          event: eventType,
+          status: response.status,
+          deliveryId,
+          attempt,
+        });
+
+        await Promise.all(
+          Array.from(topics).map((topic) =>
+            publishRealtimeEvent({
+              topic,
+              type: eventType,
+              source,
+              data: {
+                ...payload,
+                delivery: {
+                  configured: true,
+                  deliveryId,
+                  attempt,
+                  maxAttempts,
+                  success: true,
+                  status: response.status,
+                },
+              },
+            }).catch(() => null)
+          )
+        );
+
+        return true;
+      }
+
+      const retriable =
+        response.status === 429 || (response.status >= 500 && response.status <= 599);
+      const willRetry = retriable && attempt < maxAttempts;
+
+      logger.warn("Webhook delivery failed", {
+        event: eventType,
+        status: response.status,
+        deliveryId,
+        attempt,
+        maxAttempts,
+        willRetry,
+      });
+
+      if (!willRetry) {
+        await Promise.all(
+          Array.from(topics).map((topic) =>
+            publishRealtimeEvent({
+              topic,
+              type: eventType,
+              source,
+              data: {
+                ...payload,
+                delivery: {
+                  configured: true,
+                  deliveryId,
+                  attempt,
+                  maxAttempts,
+                  success: false,
+                  status: response.status,
+                },
+              },
+            }).catch(() => null)
+          )
+        );
+        return false;
+      }
+    } catch (error) {
+      const willRetry = attempt < maxAttempts;
+
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        const code = error.code;
+        logger.error("Webhook delivery error", {
+          event: eventType,
+          error: error.message,
+          code,
+          status,
+          url: safeUrlForLog(webhookUrl),
+          deliveryId,
+          attempt,
+          maxAttempts,
+          willRetry,
+        });
+      } else if (error instanceof Error) {
+        logger.error("Webhook delivery error", {
+          event: eventType,
+          error: error.message,
+          url: safeUrlForLog(webhookUrl),
+          deliveryId,
+          attempt,
+          maxAttempts,
+          willRetry,
+        });
+      } else {
+        logger.error("Webhook delivery error", {
+          event: eventType,
+          error: String(error),
+          url: safeUrlForLog(webhookUrl),
+          deliveryId,
+          attempt,
+          maxAttempts,
+          willRetry,
+        });
+      }
+
+      const msg = axios.isAxiosError(error)
+        ? error.message
+        : error instanceof Error
+          ? error.message
+          : String(error);
+
+      if (!willRetry) {
+        await Promise.all(
+          Array.from(topics).map((topic) =>
+            publishRealtimeEvent({
+              topic,
+              type: eventType,
+              source,
+              data: {
+                ...payload,
+                delivery: {
+                  configured: true,
+                  deliveryId,
+                  attempt,
+                  maxAttempts,
+                  success: false,
+                  error: msg,
+                },
+              },
+            }).catch(() => null)
+          )
+        );
+        return false;
+      }
+    }
+
+    const delay = calculateRetryDelay(attempt);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+
+  return false;
 }
 
 /**
@@ -115,12 +310,13 @@ export async function sendWebhook(
  */
 export async function sendWebhookAsync(
   eventType: WebhookEventType,
-  data: Record<string, any>,
+  data: Record<string, unknown>,
   source?: string
 ): Promise<void> {
   // Don't await - fire and forget
   sendWebhook(eventType, data, source).catch((error) => {
-    logger.error("Async webhook failed", { event: eventType, error });
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error("Async webhook failed", { event: eventType, error: msg });
   });
 }
 
@@ -436,9 +632,9 @@ export const auditWebhooks = {
     rerunId: string,
     auditId: string,
     stepPosition: number,
-    originalStep: any,
-    rerunStep: any,
-    comparison: any
+    originalStep: unknown,
+    rerunStep: unknown,
+    comparison: unknown
   ) =>
     sendWebhook("audit.step_completed", {
       rerun_id: rerunId,

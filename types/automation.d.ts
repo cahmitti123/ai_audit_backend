@@ -175,9 +175,9 @@ export interface AutomationRunResponse {
   auditsRun: number;
 
   errorMessage: string | null;
-  errorDetails: any | null;
+  errorDetails: unknown | null;
 
-  configSnapshot: any;
+  configSnapshot: unknown;
   resultSummary: ResultSummary | null;
 
   logs?: AutomationLogResponse[];
@@ -209,7 +209,7 @@ export interface AutomationLogResponse {
 
   level: LogLevel;
   message: string;
-  metadata: any;
+  metadata: unknown;
   timestamp: string; // ISO 8601
 }
 
@@ -226,7 +226,7 @@ export interface TriggerAutomationRequest {
 // API RESPONSE TYPES
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export interface ApiSuccessResponse<T = any> {
+export interface ApiSuccessResponse<T = unknown> {
   success: true;
   data: T;
 }
@@ -236,7 +236,7 @@ export interface ApiErrorResponse {
   error: string;
 }
 
-export type ApiResponse<T = any> = ApiSuccessResponse<T> | ApiErrorResponse;
+export type ApiResponse<T = unknown> = ApiSuccessResponse<T> | ApiErrorResponse;
 
 /**
  * List Schedules Response

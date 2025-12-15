@@ -12,6 +12,7 @@ import type { FichesEvents } from "../modules/fiches/fiches.events.js";
 import type { TranscriptionsEvents } from "../modules/transcriptions/transcriptions.events.js";
 import type { AuditsEvents } from "../modules/audits/audits.events.js";
 import type { AutomationEvents } from "../modules/automation/automation.events.js";
+import { logger } from "../shared/logger.js";
 
 /**
  * Combined Event Type Definitions
@@ -28,17 +29,35 @@ type Events = {
   "fiches/progressive-fetch-continue": {
     data: FichesEvents["fiches/progressive-fetch-continue"];
   };
+  "fiches/progressive-fetch-day": {
+    data: FichesEvents["fiches/progressive-fetch-day"];
+  };
+  "fiches/progressive-fetch-day.processed": {
+    data: FichesEvents["fiches/progressive-fetch-day.processed"];
+  };
 
   // Transcriptions domain events
   "fiche/transcribe": { data: TranscriptionsEvents["fiche/transcribe"] };
   "fiche/transcribed": { data: TranscriptionsEvents["fiche/transcribed"] };
+  "transcription/recording.transcribe": {
+    data: TranscriptionsEvents["transcription/recording.transcribe"];
+  };
+  "transcription/recording.transcribed": {
+    data: TranscriptionsEvents["transcription/recording.transcribed"];
+  };
 
   // Audits domain events
   "audit/run": { data: AuditsEvents["audit/run"] };
+  "audit/step.analyze": { data: AuditsEvents["audit/step.analyze"] };
+  "audit/step.analyzed": { data: AuditsEvents["audit/step.analyzed"] };
   "audit/completed": { data: AuditsEvents["audit/completed"] };
   "audit/failed": { data: AuditsEvents["audit/failed"] };
   "audit/batch": { data: AuditsEvents["audit/batch"] };
   "audit/batch.completed": { data: AuditsEvents["audit/batch.completed"] };
+  "audit/step-rerun": { data: AuditsEvents["audit/step-rerun"] };
+  "audit/step-rerun-completed": {
+    data: AuditsEvents["audit/step-rerun-completed"];
+  };
 
   // Automation domain events
   "automation/run": { data: AutomationEvents["automation/run"] };
@@ -56,7 +75,7 @@ const hasBaseUrl = Boolean(process.env.INNGEST_BASE_URL);
 const hasEventKey = Boolean(process.env.INNGEST_EVENT_KEY);
 
 // Log configuration on startup
-console.log("🔧 Inngest Client Configuration:", {
+logger.info("Inngest client configuration", {
   mode: isDevelopment ? "DEVELOPMENT" : hasBaseUrl ? "SELF-HOSTED" : "CLOUD",
   isDev: isDevelopment,
   baseUrl: process.env.INNGEST_BASE_URL || "not set (will use cloud)",

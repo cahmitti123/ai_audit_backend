@@ -14,6 +14,8 @@ import crypto from "crypto";
 import axios from "axios";
 import { logger } from "../../shared/logger.js";
 import { prisma } from "../../shared/prisma.js";
+import { validateOutgoingWebhookUrl } from "../../shared/webhook-security.js";
+import type { Prisma } from "@prisma/client";
 
 /**
  * Webhook payload types
@@ -40,16 +42,28 @@ export type WebhookPayload = {
       prospectNom: string | null;
       prospectPrenom: string | null;
       recordingsCount: number;
-      createdAt: Date;
+      createdAt: string;
     }>;
   };
 };
+
+function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
+  const json: unknown = JSON.parse(JSON.stringify(value));
+  return json as Prisma.InputJsonValue;
+}
 
 /**
  * Generate HMAC signature for webhook payload
  */
 function generateSignature(payload: string, secret: string): string {
   return crypto.createHmac("sha256", secret).update(payload).digest("hex");
+}
+
+function generateSignatureV2(payload: string, secret: string, timestamp: string): string {
+  return crypto
+    .createHmac("sha256", secret)
+    .update(`${timestamp}.${payload}`)
+    .digest("hex");
 }
 
 /**
@@ -85,13 +99,49 @@ export async function sendWebhook(
     data,
   };
 
+  // Validate URL to reduce SSRF risk (defense in depth; route should validate too)
+  const validation = validateOutgoingWebhookUrl(webhookUrl);
+  if (!validation.ok) {
+    const delivery = await prisma.webhookDelivery.create({
+      data: {
+        jobId,
+        event,
+        url: webhookUrl,
+        payload: toPrismaJsonValue(payload),
+        status: "failed",
+        attempt: 1,
+        maxAttempts,
+        responseBody: validation.error,
+        sentAt: new Date(),
+      },
+    });
+
+    await prisma.progressiveFetchJob.update({
+      where: { id: jobId },
+      data: {
+        lastWebhookSentAt: new Date(),
+        webhookAttempts: { increment: 1 },
+        webhookLastError: validation.error,
+      },
+    });
+
+    logger.warn("Rejected unsafe webhookUrl", {
+      deliveryId: delivery.id,
+      jobId,
+      url: webhookUrl,
+      error: validation.error,
+    });
+
+    return;
+  }
+
   // Create webhook delivery record
   const delivery = await prisma.webhookDelivery.create({
     data: {
       jobId,
       event,
       url: webhookUrl,
-      payload: payload as any,
+      payload: toPrismaJsonValue(payload),
       status: "pending",
       attempt: 1,
       maxAttempts,
@@ -150,6 +200,7 @@ async function attemptWebhookDelivery(
         "X-Webhook-Job-Id": job.id,
         "X-Webhook-Delivery-Id": deliveryId,
         "X-Webhook-Attempt": String(attempt),
+        "X-Webhook-Timestamp": webhookPayload.timestamp,
       };
 
       // Add HMAC signature if secret provided
@@ -158,12 +209,20 @@ async function attemptWebhookDelivery(
         if (webhookSecret) {
           const signature = generateSignature(body, webhookSecret);
           headers["X-Webhook-Signature"] = `sha256=${signature}`;
+
+          // v2 signature includes timestamp to reduce replay risk
+          const signatureV2 = generateSignatureV2(
+            body,
+            webhookSecret,
+            webhookPayload.timestamp
+          );
+          headers["X-Webhook-Signature-V2"] = `sha256=${signatureV2}`;
         }
       }
 
       // Send webhook
       const startTime = Date.now();
-      const response = await axios.post(url, webhookPayload, {
+      const response = await axios.post(url, body, {
         headers,
         timeout: 10000, // 10 second timeout
         validateStatus: () => true, // Don't throw on any status
@@ -214,13 +273,13 @@ async function attemptWebhookDelivery(
         });
         return false;
       }
-    } catch (error) {
-      const err = error as Error;
+    } catch (error: unknown) {
+      const errMsg = error instanceof Error ? error.message : String(error);
       logger.error("Webhook delivery error", {
         deliveryId,
         jobId: job.id,
         event: webhookPayload.event,
-        error: err.message,
+        error: errMsg,
         attempt,
         maxAttempts,
       });
@@ -230,7 +289,7 @@ async function attemptWebhookDelivery(
         where: { id: deliveryId },
         data: {
           status: "failed",
-          responseBody: err.message.substring(0, 1000),
+          responseBody: errMsg.substring(0, 1000),
         },
       });
 
@@ -355,7 +414,14 @@ export async function sendProgressWebhookWithData(
       totalFiches: data.totalFiches,
       currentFichesCount: data.currentFichesCount,
       latestDate: data.latestDate,
-      partialData: data.fiches,
+      partialData: data.fiches.map((f) => ({
+        ficheId: f.ficheId,
+        groupe: f.groupe,
+        prospectNom: f.prospectNom,
+        prospectPrenom: f.prospectPrenom,
+        recordingsCount: f.recordingsCount,
+        createdAt: f.createdAt.toISOString(),
+      })),
     },
   };
 
@@ -365,7 +431,7 @@ export async function sendProgressWebhookWithData(
       jobId,
       event: "progress",
       url: webhookUrl,
-      payload: payload as any,
+      payload: toPrismaJsonValue(payload),
       status: "pending",
       attempt: 1,
       maxAttempts: 3,

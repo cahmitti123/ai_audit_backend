@@ -11,6 +11,7 @@
  */
 
 import { prisma } from "../../shared/prisma.js";
+import type { AuditSeverity } from "@prisma/client";
 
 /**
  * Get all audit configurations
@@ -57,7 +58,7 @@ export async function createAuditConfig(data: {
     prompt: string;
     controlPoints: string[];
     keywords: string[];
-    severityLevel: string;
+    severityLevel: AuditSeverity;
     isCritical: boolean;
     position: number;
     weight: number;
@@ -92,7 +93,7 @@ export async function createAuditConfig(data: {
             prompt: step.prompt,
             controlPoints: step.controlPoints,
             keywords: step.keywords,
-            severityLevel: step.severityLevel as any,
+            severityLevel: step.severityLevel,
             isCritical: step.isCritical,
             position: step.position,
             weight: step.weight,
@@ -158,7 +159,7 @@ export async function addAuditStep(
     prompt: string;
     controlPoints: string[];
     keywords: string[];
-    severityLevel: string;
+    severityLevel: AuditSeverity;
     isCritical: boolean;
     position: number;
     weight: number;
@@ -174,7 +175,7 @@ export async function addAuditStep(
       prompt: stepData.prompt,
       controlPoints: stepData.controlPoints,
       keywords: stepData.keywords,
-      severityLevel: stepData.severityLevel as any,
+      severityLevel: stepData.severityLevel,
       isCritical: stepData.isCritical,
       position: stepData.position,
       weight: stepData.weight,
@@ -195,7 +196,7 @@ export async function updateAuditStep(
     prompt: string;
     controlPoints: string[];
     keywords: string[];
-    severityLevel: string;
+    severityLevel: AuditSeverity;
     isCritical: boolean;
     weight: number;
     chronologicalImportant: boolean;
@@ -205,10 +206,7 @@ export async function updateAuditStep(
 ) {
   return await prisma.auditStep.update({
     where: { id: stepId },
-    data: {
-      ...data,
-      severityLevel: data.severityLevel as any, // Prisma enum cast
-    },
+    data,
   });
 }
 

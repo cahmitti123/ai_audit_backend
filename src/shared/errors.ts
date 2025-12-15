@@ -38,7 +38,7 @@ export class NotFoundError extends AppError {
  * Validation error
  */
 export class ValidationError extends AppError {
-  constructor(message: string, public details?: any) {
+  constructor(message: string, public details?: unknown) {
     super(message, 400, "VALIDATION_ERROR");
   }
 }
@@ -47,7 +47,11 @@ export class ValidationError extends AppError {
  * External API error
  */
 export class ExternalApiError extends AppError {
-  constructor(public api: string, message: string, public originalError?: any) {
+  constructor(
+    public api: string,
+    message: string,
+    public originalError?: unknown
+  ) {
     super(`${api} API error: ${message}`, 502, "EXTERNAL_API_ERROR");
   }
 }
@@ -56,7 +60,7 @@ export class ExternalApiError extends AppError {
  * Database error
  */
 export class DatabaseError extends AppError {
-  constructor(message: string, public originalError?: any) {
+  constructor(message: string, public originalError?: unknown) {
     super(`Database error: ${message}`, 500, "DATABASE_ERROR");
   }
 }

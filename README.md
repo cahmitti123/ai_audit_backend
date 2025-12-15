@@ -1,6 +1,6 @@
 # AI Audit System
 
-**REST API for AI-powered quality audit system with GPT-5, Inngest, and Prisma.**
+**REST API for AI-powered quality audit system with OpenAI, Inngest, and Prisma.**
 
 Production-ready backend service that analyzes sales call recordings, transcribes them with ElevenLabs, and performs comprehensive compliance audits using GPT-5.
 
@@ -18,18 +18,12 @@ npm install
 
 # 2. Setup environment
 cp .env.example .env
-# Edit .env with your API keys (including VECTOR_STORE_ID for product verification)
+# Edit .env with your connection strings and API keys
 
-# 3. Generate Prisma client
-npx prisma generate
+# 3. Apply database migrations (dev) + generate Prisma client
+npx prisma migrate dev
 
-# 4. Test database connection
-npm run test:db
-
-# 5. (Optional) Test vector store product verification
-npm run test:vector-store
-
-# 6. Start the server
+# 4. Start the server
 npm run dev
 ```
 
@@ -37,20 +31,20 @@ npm run dev
 
 ```bash
 # 1. Setup environment
-cp .env.docker .env
+cp .env.docker.example .env
 # Edit .env with your configuration
 
 # 2. Build and start services
-docker-compose up -d
+docker compose up -d --build
 
 # 3. View logs
-docker-compose logs -f
+docker compose logs -f
 
 # 4. Stop services
-docker-compose down
+docker compose down
 ```
 
-**📖 Full Docker guide**: [DOCKER_DEPLOYMENT.md](./DOCKER_DEPLOYMENT.md)
+**📖 Deployment docs**: [`docs/deployment.md`](./docs/deployment.md)
 
 **Server:** http://localhost:3002  
 **Swagger UI:** http://localhost:3002/api-docs  
@@ -63,14 +57,14 @@ docker-compose down
 
 ```
 src/
-├── modules/              → 5 domain modules (fiches, recordings, transcriptions, audit-configs, audits)
+├── modules/              → Domain modules (fiches, audits, automation, products, chat, ...)
 ├── shared/               → Utilities (prisma, constants, errors, logger)
 ├── inngest/              → Event-driven workflows
 ├── app.ts                → Express factory
 └── server.ts             → Entry point
 ```
 
-**See [ARCHITECTURE.md](./ARCHITECTURE.md) for complete architecture documentation.**
+**See [`docs/architecture.md`](./docs/architecture.md) for architecture documentation.**
 
 ---
 
@@ -108,11 +102,19 @@ src/
 - `GET /api/audits/by-fiche/:fiche_id` - Get audit history
 - `GET /api/audits/:audit_id` - Get audit details
 
+### Realtime (SSE)
+
+These endpoints stream backend events in realtime (Redis-backed when `REDIS_URL` is configured) and support resume via the `Last-Event-ID` header:
+
+- `GET /api/realtime/fiches/:ficheId` - Audit + transcription events for a fiche
+- `GET /api/realtime/audits/:auditId` - Audit-specific events
+- `GET /api/realtime/jobs/:jobId` - Progressive fetch job events
+
 **Interactive docs:** http://localhost:3002/api-docs
 
 ---
 
-## 🔍 Vector Store Product Verification (NEW)
+## 🔍 Product Verification (Vector Store)
 
 The system now supports **automatic product information verification** using OpenAI's Vector Store. When analyzing audit steps with `verifyProductInfo: true`, the system:
 
@@ -125,24 +127,23 @@ The system now supports **automatic product information verification** using Ope
 
 ```bash
 # 1. Add to .env
-VECTOR_STORE_ID=vs_68e5139a7f848191af1a05a7e5d3452d
+VECTOR_STORE_ID=vs_...
 
-# 2. Test the integration
-npm run test:vector-store
-
-# 3. Enable on audit steps
+# 2. Enable on audit steps
 {
   "position": 13,
   "name": "Devoir de conseil",
   "verifyProductInfo": true  // ← Enable verification
 }
+
+# 3. Run an audit (see the curl example below)
 ```
 
 **📖 Documentation:**
 
-- **Quick Start:** [VECTOR_STORE_QUICK_START.md](./VECTOR_STORE_QUICK_START.md)
-- **Full Guide:** [VECTOR_STORE_PRODUCT_VERIFICATION.md](./VECTOR_STORE_PRODUCT_VERIFICATION.md)
-- **Example Config:** [config/audit_config_with_verification_example.json](./config/audit_config_with_verification_example.json)
+- **Docs index:** [`docs/README.md`](./docs/README.md)
+- **Operations (webhooks/security):** [`docs/operations.md`](./docs/operations.md)
+- **Example Config:** [`config/audit_config_with_verification_example.json`](./config/audit_config_with_verification_example.json)
 
 ---
 
@@ -154,22 +155,7 @@ Start Inngest dev server:
 npm run inngest
 ```
 
-**Registered Functions:**
-
-1. `fetch-fiche` - Fetch and cache fiche data
-2. `transcribe-fiche` - Transcribe recordings
-3. `run-audit` - Execute complete audit pipeline
-4. `batch-audit` - Process multiple audits
-5. `cleanup-old-caches` - Daily cleanup (2 AM)
-
-All workflows feature:
-
-- ✅ Automatic retries
-- ✅ Rate limiting
-- ✅ Concurrency control
-- ✅ Timeouts
-- ✅ Event deduplication
-- ✅ Durable execution
+See the Inngest UI for the full list of registered functions and executions.
 
 ---
 
@@ -178,39 +164,13 @@ All workflows feature:
 ```bash
 npm run dev          # Start development server
 npm run inngest      # Start Inngest dev server
-npm run test:api     # Test API endpoints (requires server running)
-npm run test:direct  # Test modules directly
-npm run test:db           # Test database connection
-npm run test:vector-store # Test vector store integration (requires OPENAI_API_KEY)
-npm run seed              # Seed audit configurations
+npm run seed         # Seed audit configurations
 npm run build        # Build TypeScript
+npx prisma migrate dev # Apply migrations (dev)
+npx prisma studio    # Explore DB
 ```
 
-### Test via HTTP API (Recommended)
-
-```bash
-# Make sure server is running first:
-npm run dev
-
-# In another terminal, test with known working fiche
-npm run test:api 1762209 13
-
-# Test with default fiche (1762209)
-npm run test:api
-
-# Test with custom config
-npm run test:api 1762209 11  # Use Comprehensive Audit (18 steps)
-```
-
-### Test Direct (bypasses HTTP)
-
-```bash
-# Test by calling modules directly
-npm run test:direct 1762209 13
-
-# Note: May fail if external API requires authentication
-# Use API test instead
-```
+Use Swagger UI: http://localhost:3002/api-docs
 
 ---
 
@@ -313,19 +273,13 @@ INNGEST_EVENT_KEY="..."
 
 ## 🧪 Testing
 
-Use the included HTTP file:
-
-```
-test-fiche-endpoints.http
-```
-
-Or use Swagger UI: http://localhost:3002/api-docs
+Use Swagger UI: http://localhost:3002/api-docs
 
 ---
 
 ## 📖 Documentation
 
-- **[ARCHITECTURE.md](./ARCHITECTURE.md)** - Complete architecture guide with flows and patterns
+- **[`docs/README.md`](./docs/README.md)** - Canonical docs for this repo
 
 ---
 

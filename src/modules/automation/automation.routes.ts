@@ -22,6 +22,7 @@ import {
 import * as automationService from "./automation.service.js";
 import { inngest } from "../../inngest/client.js";
 import { logger } from "../../shared/logger.js";
+import { asyncHandler } from "../../middleware/async-handler.js";
 
 const router = Router();
 
@@ -36,25 +37,18 @@ const router = Router();
  *     summary: Create automation schedule
  *     tags: [Automation]
  */
-router.post("/schedules", async (req: Request, res: Response) => {
-  try {
+router.post(
+  "/schedules",
+  asyncHandler(async (req: Request, res: Response) => {
     const input = validateCreateAutomationScheduleInput(req.body);
     const schedule = await automationService.createAutomationSchedule(input);
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       data: schedule,
     });
-  } catch (error: any) {
-    logger.error("Failed to create automation schedule", {
-      error: error.message,
-    });
-    res.status(400).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+  })
+);
 
 /**
  * @swagger
@@ -63,28 +57,21 @@ router.post("/schedules", async (req: Request, res: Response) => {
  *     summary: List all automation schedules
  *     tags: [Automation]
  */
-router.get("/schedules", async (req: Request, res: Response) => {
-  try {
+router.get(
+  "/schedules",
+  asyncHandler(async (req: Request, res: Response) => {
     const includeInactive = req.query.include_inactive === "true";
     const schedules = await automationService.getAllAutomationSchedules(
       includeInactive
     );
 
-    res.json({
+    return res.json({
       success: true,
       data: schedules,
       count: schedules.length,
     });
-  } catch (error: any) {
-    logger.error("Failed to list automation schedules", {
-      error: error.message,
-    });
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+  })
+);
 
 /**
  * @swagger
@@ -93,8 +80,9 @@ router.get("/schedules", async (req: Request, res: Response) => {
  *     summary: Get automation schedule by ID
  *     tags: [Automation]
  */
-router.get("/schedules/:id", async (req: Request, res: Response) => {
-  try {
+router.get(
+  "/schedules/:id",
+  asyncHandler(async (req: Request, res: Response) => {
     const schedule = await automationService.getAutomationScheduleById(
       req.params.id
     );
@@ -106,20 +94,12 @@ router.get("/schedules/:id", async (req: Request, res: Response) => {
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
       data: schedule,
     });
-  } catch (error: any) {
-    logger.error("Failed to get automation schedule", {
-      error: error.message,
-    });
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+  })
+);
 
 /**
  * @swagger
@@ -128,28 +108,21 @@ router.get("/schedules/:id", async (req: Request, res: Response) => {
  *     summary: Update automation schedule
  *     tags: [Automation]
  */
-router.patch("/schedules/:id", async (req: Request, res: Response) => {
-  try {
+router.patch(
+  "/schedules/:id",
+  asyncHandler(async (req: Request, res: Response) => {
     const input = validateUpdateAutomationScheduleInput(req.body);
     const schedule = await automationService.updateAutomationSchedule(
       req.params.id,
       input
     );
 
-    res.json({
+    return res.json({
       success: true,
       data: schedule,
     });
-  } catch (error: any) {
-    logger.error("Failed to update automation schedule", {
-      error: error.message,
-    });
-    res.status(400).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+  })
+);
 
 /**
  * @swagger
@@ -158,24 +131,17 @@ router.patch("/schedules/:id", async (req: Request, res: Response) => {
  *     summary: Delete automation schedule
  *     tags: [Automation]
  */
-router.delete("/schedules/:id", async (req: Request, res: Response) => {
-  try {
+router.delete(
+  "/schedules/:id",
+  asyncHandler(async (req: Request, res: Response) => {
     await automationService.deleteAutomationSchedule(req.params.id);
 
-    res.json({
+    return res.json({
       success: true,
       message: "Schedule deleted successfully",
     });
-  } catch (error: any) {
-    logger.error("Failed to delete automation schedule", {
-      error: error.message,
-    });
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+  })
+);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TRIGGER ENDPOINT
@@ -188,8 +154,9 @@ router.delete("/schedules/:id", async (req: Request, res: Response) => {
  *     summary: Trigger automation schedule manually
  *     tags: [Automation]
  */
-router.post("/trigger", async (req: Request, res: Response) => {
-  try {
+router.post(
+  "/trigger",
+  asyncHandler(async (req: Request, res: Response) => {
     const input = validateTriggerAutomationInput(req.body);
 
     logger.info("Triggering automation", {
@@ -211,23 +178,14 @@ router.post("/trigger", async (req: Request, res: Response) => {
       event_ids: result.ids,
     });
 
-    res.json({
+    return res.json({
       success: true,
       message: "Automation triggered successfully",
       schedule_id: input.scheduleId,
       event_ids: result.ids,
     });
-  } catch (error: any) {
-    logger.error("Failed to trigger automation", {
-      error: error.message,
-      stack: error.stack,
-    });
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+  })
+);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DIAGNOSTIC ENDPOINT
@@ -240,8 +198,9 @@ router.post("/trigger", async (req: Request, res: Response) => {
  *     summary: Get Inngest configuration diagnostic
  *     tags: [Automation]
  */
-router.get("/diagnostic", async (req: Request, res: Response) => {
-  try {
+router.get(
+  "/diagnostic",
+  asyncHandler(async (_req: Request, res: Response) => {
     const isDev =
       process.env.INNGEST_DEV === "1" || process.env.NODE_ENV === "development";
     const hasBaseUrl = Boolean(process.env.INNGEST_BASE_URL);
@@ -250,14 +209,12 @@ router.get("/diagnostic", async (req: Request, res: Response) => {
 
     const mode = isDev ? "DEVELOPMENT" : hasBaseUrl ? "SELF-HOSTED" : "CLOUD";
 
-    let recommendations: string[] = [];
-    let warnings: string[] = [];
+    const recommendations: string[] = [];
+    const warnings: string[] = [];
 
     if (!isDev && !hasBaseUrl && !hasEventKey) {
       warnings.push("⚠️ No Inngest configuration detected. Events will fail.");
-      recommendations.push(
-        "Set INNGEST_DEV=1 for local development (recommended)"
-      );
+      recommendations.push("Set INNGEST_DEV=1 for local development (recommended)");
       recommendations.push("OR set INNGEST_BASE_URL and keys for self-hosted");
       recommendations.push("OR set INNGEST_EVENT_KEY for cloud");
     }
@@ -270,9 +227,7 @@ router.get("/diagnostic", async (req: Request, res: Response) => {
     }
 
     if (mode === "SELF-HOSTED" && !hasSigningKey) {
-      warnings.push(
-        "⚠️ INNGEST_SIGNING_KEY not set (required for self-hosted)"
-      );
+      warnings.push("⚠️ INNGEST_SIGNING_KEY not set (required for self-hosted)");
       recommendations.push("Generate with: openssl rand -hex 32");
     }
 
@@ -280,7 +235,7 @@ router.get("/diagnostic", async (req: Request, res: Response) => {
       warnings.push("⚠️ INNGEST_EVENT_KEY not set (required for cloud)");
     }
 
-    res.json({
+    return res.json({
       success: true,
       inngest: {
         mode,
@@ -300,14 +255,8 @@ router.get("/diagnostic", async (req: Request, res: Response) => {
         trigger: "POST /api/automation/trigger",
       },
     });
-  } catch (error: any) {
-    logger.error("Failed to get diagnostic info", { error: error.message });
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+  })
+);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RUN ENDPOINTS
@@ -320,10 +269,18 @@ router.get("/diagnostic", async (req: Request, res: Response) => {
  *     summary: Get runs for a schedule
  *     tags: [Automation]
  */
-router.get("/schedules/:id/runs", async (req: Request, res: Response) => {
-  try {
-    const limit = parseInt(req.query.limit as string) || 20;
-    const offset = parseInt(req.query.offset as string) || 0;
+router.get(
+  "/schedules/:id/runs",
+  asyncHandler(async (req: Request, res: Response) => {
+    const limitRaw = req.query.limit;
+    const offsetRaw = req.query.offset;
+    const limitParsed =
+      typeof limitRaw === "string" ? Number.parseInt(limitRaw, 10) : NaN;
+    const offsetParsed =
+      typeof offsetRaw === "string" ? Number.parseInt(offsetRaw, 10) : NaN;
+
+    const limit = Number.isFinite(limitParsed) ? limitParsed : 20;
+    const offset = Number.isFinite(offsetParsed) ? offsetParsed : 0;
 
     const runs = await automationService.getAutomationRuns(
       req.params.id,
@@ -331,21 +288,15 @@ router.get("/schedules/:id/runs", async (req: Request, res: Response) => {
       offset
     );
 
-    res.json({
+    return res.json({
       success: true,
       data: runs,
       count: runs.length,
       limit,
       offset,
     });
-  } catch (error: any) {
-    logger.error("Failed to get automation runs", { error: error.message });
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+  })
+);
 
 /**
  * @swagger
@@ -354,8 +305,9 @@ router.get("/schedules/:id/runs", async (req: Request, res: Response) => {
  *     summary: Get automation run by ID
  *     tags: [Automation]
  */
-router.get("/runs/:id", async (req: Request, res: Response) => {
-  try {
+router.get(
+  "/runs/:id",
+  asyncHandler(async (req: Request, res: Response) => {
     const run = await automationService.getAutomationRunById(req.params.id);
 
     if (!run) {
@@ -365,18 +317,12 @@ router.get("/runs/:id", async (req: Request, res: Response) => {
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
       data: run,
     });
-  } catch (error: any) {
-    logger.error("Failed to get automation run", { error: error.message });
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+  })
+);
 
 /**
  * @swagger
@@ -385,27 +331,21 @@ router.get("/runs/:id", async (req: Request, res: Response) => {
  *     summary: Get logs for an automation run
  *     tags: [Automation]
  */
-router.get("/runs/:id/logs", async (req: Request, res: Response) => {
-  try {
-    const level = req.query.level as string | undefined;
-    const logs = await automationService.getAutomationLogs(
-      req.params.id,
-      level
-    );
+router.get(
+  "/runs/:id/logs",
+  asyncHandler(async (req: Request, res: Response) => {
+    const level =
+      typeof req.query.level === "string" ? req.query.level : undefined;
 
-    res.json({
+    const logs = await automationService.getAutomationLogs(req.params.id, level);
+
+    return res.json({
       success: true,
       data: logs,
       count: logs.length,
     });
-  } catch (error: any) {
-    logger.error("Failed to get automation logs", { error: error.message });
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
+  })
+);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // EXPORTS

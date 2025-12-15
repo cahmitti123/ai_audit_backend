@@ -23,7 +23,8 @@ export const TranscriptionSchema = z.object({
   recording_url: z.string(),
   transcription_id: z.string().optional(),
   call_id: z.string().optional(),
-  recording: z.any(),
+  // Recording payload shape varies by provider; keep strict typing by using unknown.
+  recording: z.unknown(),
   transcription: z.object({
     text: z.string(),
     language_code: z.string().optional(),
@@ -252,9 +253,9 @@ export const AutomationRunResponseSchema = z.object({
   transcriptionsRun: z.number(),
   auditsRun: z.number(),
   errorMessage: z.string().nullable(),
-  errorDetails: z.any().nullable(),
-  configSnapshot: z.any(),
-  resultSummary: z.any().nullable(),
+  errorDetails: z.unknown().nullable(),
+  configSnapshot: z.unknown(),
+  resultSummary: z.unknown().nullable(),
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -14,7 +14,7 @@ package-lock.json
 
 # Keep example files
 !.env.example
-!.env.docker
+!.env.docker.example
 
 # Build outputs
 dist/

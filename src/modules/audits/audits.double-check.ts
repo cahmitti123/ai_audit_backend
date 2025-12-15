@@ -15,29 +15,39 @@
  */
 
 import { analyzeStep } from "./audits.analyzer.js";
+import { logger } from "../../shared/logger.js";
+import type { AuditStepResult } from "../../schemas.js";
+import type {
+  AuditConfigForAnalysis,
+  AuditStepDefinition,
+  ProductLinkResult,
+} from "./audits.types.js";
 
 export interface DoubleCheckOptions {
-  step: any;
-  auditConfig: any;
+  step: AuditStepDefinition;
+  auditConfig: AuditConfigForAnalysis;
   timelineText: string;
   auditId: string;
   ficheId: string;
-  productInfo?: any;
-  firstPassResult: any;
+  productInfo?: ProductLinkResult | null;
+  firstPassResult: AuditStepResult;
 }
 
 export interface DoubleCheckResult {
   useDoubleCheck: boolean;
-  firstPass: any;
-  secondPass?: any;
-  finalResult: any;
+  firstPass: AuditStepResult;
+  secondPass?: AuditStepResult;
+  finalResult: AuditStepResult;
   reasoning: string;
 }
 
 /**
  * Determine if a step result should trigger double-check
  */
-function shouldDoubleCheck(stepResult: any, stepDef: any): boolean {
+function shouldDoubleCheck(
+  stepResult: AuditStepResult,
+  stepDef: Pick<AuditStepDefinition, "weight" | "isCritical">
+): boolean {
   // Double-check if:
   // 1. Result is NON_CONFORME or low PARTIEL score
   const isNonConforme = stepResult.conforme === "NON_CONFORME";
@@ -49,10 +59,7 @@ function shouldDoubleCheck(stepResult: any, stepDef: any): boolean {
 
   // 3. AND has few citations (< 3) - suggests AI couldn't find evidence
   const fewCitations =
-    (stepResult.points_controle?.reduce(
-      (sum: number, pc: any) => sum + (pc.citations?.length || 0),
-      0
-    ) || 0) < 3;
+    stepResult.points_controle.reduce((sum, pc) => sum + pc.citations.length, 0) < 3;
 
   return (isNonConforme || isLowPartiel) && isImportant && fewCitations;
 }
@@ -60,7 +67,7 @@ function shouldDoubleCheck(stepResult: any, stepDef: any): boolean {
 /**
  * Create relaxed prompt for second pass
  */
-function createRelaxedPrompt(stepDef: any): string {
+function createRelaxedPrompt(stepDef: Pick<AuditStepDefinition, "customInstructions">): string {
   return `
 DEUXIÈME VÉRIFICATION (CRITÈRES ASSOUPLIS):
 
@@ -113,9 +120,18 @@ export async function doubleCheckStep(
     };
   }
 
-  console.log(`\n🔍 Double-check triggered for step: ${step.name}`);
-  console.log(`   First pass: ${firstPassResult.score}/${step.weight} (${firstPassResult.conforme})`);
-  console.log(`   Reason: ${firstPassResult.conforme} with ${firstPassResult.points_controle?.reduce((sum: number, pc: any) => sum + (pc.citations?.length || 0), 0) || 0} citations`);
+  logger.info("Double-check triggered", {
+    audit_id: auditId,
+    fiche_id: ficheId,
+    step_name: step.name,
+    first_pass: `${firstPassResult.score}/${step.weight}`,
+    conforme: firstPassResult.conforme,
+    citations:
+      firstPassResult.points_controle.reduce(
+        (sum, pc) => sum + pc.citations.length,
+        0
+      ),
+  });
 
   // Create modified step with relaxed instructions
   const relaxedStep = {
@@ -123,7 +139,11 @@ export async function doubleCheckStep(
     customInstructions: createRelaxedPrompt(step),
   };
 
-  console.log(`   🔄 Running second pass with relaxed criteria...`);
+  logger.info("Running second pass (relaxed criteria)", {
+    audit_id: auditId,
+    fiche_id: ficheId,
+    step_name: step.name,
+  });
 
   // Run second analysis
   const secondPassResult = await analyzeStep(
@@ -132,42 +152,54 @@ export async function doubleCheckStep(
     timelineText,
     `${auditId}-doublecheck`,
     ficheId,
-    productInfo
+    productInfo ?? null
   );
 
-  console.log(`   Second pass: ${secondPassResult.score}/${step.weight} (${secondPassResult.conforme})`);
+  logger.info("Second pass completed", {
+    audit_id: auditId,
+    fiche_id: ficheId,
+    step_name: step.name,
+    second_pass: `${secondPassResult.score}/${step.weight}`,
+    conforme: secondPassResult.conforme,
+  });
 
   // Decide which result to use
-  let finalResult: any;
+  let finalResult: AuditStepResult;
   let reasoning: string;
 
   // If second pass found more evidence, use it
   if (secondPassResult.score > firstPassResult.score) {
     finalResult = secondPassResult;
     reasoning = `Second pass found more evidence (${secondPassResult.score} vs ${firstPassResult.score}). Using relaxed verification result.`;
-    console.log(`   ✅ Using second pass (better score)`);
+    logger.info("Using second pass (better score)", {
+      audit_id: auditId,
+      fiche_id: ficheId,
+      step_name: step.name,
+    });
   }
   // If scores similar but second pass has more citations
   else if (
     Math.abs(secondPassResult.score - firstPassResult.score) <= 1 &&
-    (secondPassResult.points_controle?.reduce(
-      (sum: number, pc: any) => sum + (pc.citations?.length || 0),
-      0
-    ) || 0) >
-      (firstPassResult.points_controle?.reduce(
-        (sum: number, pc: any) => sum + (pc.citations?.length || 0),
-        0
-      ) || 0)
+    secondPassResult.points_controle.reduce((sum, pc) => sum + pc.citations.length, 0) >
+      firstPassResult.points_controle.reduce((sum, pc) => sum + pc.citations.length, 0)
   ) {
     finalResult = secondPassResult;
     reasoning = `Second pass provided more detailed citations. Using for better traceability.`;
-    console.log(`   ✅ Using second pass (more citations)`);
+    logger.info("Using second pass (more citations)", {
+      audit_id: auditId,
+      fiche_id: ficheId,
+      step_name: step.name,
+    });
   }
   // Otherwise keep first pass (stricter)
   else {
     finalResult = firstPassResult;
     reasoning = `First pass result confirmed after second verification. Requirement truly not met.`;
-    console.log(`   ℹ️  Keeping first pass (confirmed non-conformity)`);
+    logger.info("Keeping first pass (confirmed non-conformity)", {
+      audit_id: auditId,
+      fiche_id: ficheId,
+      step_name: step.name,
+    });
   }
 
   return {
@@ -183,15 +215,20 @@ export async function doubleCheckStep(
  * Enhance step analysis with automatic double-check
  */
 export async function analyzeStepWithDoubleCheck(
-  step: any,
-  auditConfig: any,
+  step: AuditStepDefinition,
+  auditConfig: AuditConfigForAnalysis,
   timelineText: string,
   auditId: string,
   ficheId: string,
-  productInfo?: any
-): Promise<{ result: any; wasDoubleChecked: boolean; reasoning?: string }> {
+  productInfo: ProductLinkResult | null = null
+): Promise<{ result: AuditStepResult; wasDoubleChecked: boolean; reasoning?: string }> {
   // First pass - strict verification
-  console.log(`\n📊 Analyzing step ${step.position}: ${step.name} (First Pass - Strict)`);
+  logger.debug("Analyzing step (first pass - strict)", {
+    audit_id: auditId,
+    fiche_id: ficheId,
+    step_position: step.position,
+    step_name: step.name,
+  });
   
   const firstPassResult = await analyzeStep(
     step,
@@ -199,7 +236,7 @@ export async function analyzeStepWithDoubleCheck(
     timelineText,
     auditId,
     ficheId,
-    productInfo
+    productInfo ?? null
   );
 
   // Check if double-check is needed
@@ -209,13 +246,17 @@ export async function analyzeStepWithDoubleCheck(
     timelineText,
     auditId,
     ficheId,
-    productInfo,
+    productInfo: productInfo ?? null,
     firstPassResult,
   });
 
   if (doubleCheckResult.useDoubleCheck) {
-    console.log(`\n✅ Double-check completed:`);
-    console.log(`   ${doubleCheckResult.reasoning}`);
+    logger.info("Double-check completed", {
+      audit_id: auditId,
+      fiche_id: ficheId,
+      step_name: step.name,
+      reasoning: doubleCheckResult.reasoning,
+    });
     
     return {
       result: doubleCheckResult.finalResult,

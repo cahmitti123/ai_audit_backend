@@ -4,11 +4,23 @@
  * API endpoints for transcription operations
  */
 
-import { Router, Request, Response } from "express";
+import { Router, type Request, type Response } from "express";
 import { inngest } from "../../inngest/client.js";
 import { getFicheTranscriptionStatus } from "./transcriptions.service.js";
+import { logger } from "../../shared/logger.js";
+import { asyncHandler } from "../../middleware/async-handler.js";
 
 export const transcriptionsRouter = Router();
+
+function hasWordsArray(
+  value: unknown
+): value is { words: unknown[] } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as { words?: unknown }).words)
+  );
+}
 
 /**
  * @swagger
@@ -34,8 +46,9 @@ export const transcriptionsRouter = Router();
  *       200:
  *         description: Transcription job queued successfully
  */
-transcriptionsRouter.post("/:fiche_id", async (req: Request, res: Response) => {
-  try {
+transcriptionsRouter.post(
+  "/:fiche_id(\\d+)",
+  asyncHandler(async (req: Request, res: Response) => {
     const { fiche_id } = req.params;
     const priorityParam = req.query.priority as string | undefined;
     const priority: "high" | "normal" | "low" =
@@ -47,28 +60,24 @@ transcriptionsRouter.post("/:fiche_id", async (req: Request, res: Response) => {
     const eventId = `transcribe-${fiche_id}-${Date.now()}`;
     const { ids } = await inngest.send({
       name: "fiche/transcribe",
-      data: { fiche_id, priority },
+      data: { fiche_id, priority, wait_for_completion: false },
       id: eventId,
     });
 
-    console.log(
-      `✓ Queued transcription job for fiche ${fiche_id}. Event ID: ${ids[0]}`
-    );
+    logger.info("Queued transcription job", {
+      fiche_id,
+      event_id: ids[0],
+      priority,
+    });
 
-    res.json({
+    return res.json({
       success: true,
       message: "Transcription job queued",
       fiche_id,
       event_id: ids[0],
     });
-  } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      error: "Failed to queue transcription",
-      message: error.message,
-    });
-  }
-});
+  })
+);
 
 /**
  * @swagger
@@ -88,18 +97,10 @@ transcriptionsRouter.post("/:fiche_id", async (req: Request, res: Response) => {
  */
 transcriptionsRouter.get(
   "/:fiche_id/status",
-  async (req: Request, res: Response) => {
-    try {
-      const status = await getFicheTranscriptionStatus(req.params.fiche_id);
-      res.json({ success: true, data: status });
-    } catch (error: any) {
-      res.status(500).json({
-        success: false,
-        error: "Failed to get transcription status",
-        message: error.message,
-      });
-    }
-  }
+  asyncHandler(async (req: Request, res: Response) => {
+    const status = await getFicheTranscriptionStatus(req.params.fiche_id);
+    return res.json({ success: true, data: status });
+  })
 );
 
 /**
@@ -127,82 +128,71 @@ transcriptionsRouter.get(
  */
 transcriptionsRouter.get(
   "/:fiche_id/recordings/:call_id",
-  async (req: Request, res: Response) => {
-    try {
-      const { fiche_id, call_id } = req.params;
+  asyncHandler(async (req: Request, res: Response) => {
+    const { fiche_id, call_id } = req.params;
 
-      const { prisma } = await import("../../shared/prisma.js");
-      const { readFileSync, existsSync } = await import("fs");
+    const { prisma } = await import("../../shared/prisma.js");
 
-      // Get recording from DB
-      const recording = await prisma.recording.findFirst({
-        where: {
-          ficheCache: { ficheId: fiche_id },
-          callId: call_id,
-        },
-      });
+    // Get recording from DB
+    const recording = await prisma.recording.findFirst({
+      where: {
+        ficheCache: { ficheId: fiche_id },
+        callId: call_id,
+      },
+    });
 
-      if (!recording) {
-        return res.status(404).json({
-          success: false,
-          error: "Recording not found",
-        });
-      }
-
-      if (!recording.hasTranscription) {
-        return res.status(404).json({
-          success: false,
-          error: "No transcription available for this recording",
-        });
-      }
-
-      // Try DB first, then file cache fallback
-      let transcriptionData;
-
-      if (recording.transcriptionText) {
-        transcriptionData = {
-          text: recording.transcriptionText,
-          language_code: "fr",
-          words: [],
-        };
-      } else if (recording.recordingUrl) {
-        // Fallback to file cache
-        const CACHE_FILE = "./data/transcription_cache.json";
-        if (existsSync(CACHE_FILE)) {
-          const cache = JSON.parse(readFileSync(CACHE_FILE, "utf-8"));
-          const cached = cache[recording.recordingUrl];
-          if (cached) {
-            transcriptionData = cached.transcription;
-          }
-        }
-      }
-
-      if (!transcriptionData) {
-        return res.status(404).json({
-          success: false,
-          error: "Transcription data not found in DB or cache",
-        });
-      }
-
-      res.json({
-        success: true,
-        data: {
-          call_id: recording.callId,
-          recording_url: recording.recordingUrl,
-          duration_seconds: recording.durationSeconds,
-          transcription_id: recording.transcriptionId,
-          transcription: transcriptionData,
-          has_transcription: true,
-        },
-      });
-    } catch (error: any) {
-      res.status(500).json({
+    if (!recording) {
+      return res.status(404).json({
         success: false,
-        error: "Failed to get transcription",
-        message: error.message,
+        error: "Recording not found",
       });
     }
-  }
+
+    if (!recording.hasTranscription) {
+      return res.status(404).json({
+        success: false,
+        error: "No transcription available for this recording",
+      });
+    }
+
+    // Try DB first, then file cache fallback
+    let transcriptionData;
+
+    const dbPayload = recording.transcriptionData as unknown;
+    if (
+      dbPayload &&
+      typeof dbPayload === "object" &&
+      hasWordsArray(dbPayload) &&
+      dbPayload.words.length > 0
+    ) {
+      transcriptionData = dbPayload;
+    } else if (recording.transcriptionText) {
+      transcriptionData = {
+        text: recording.transcriptionText,
+        language_code: "fr",
+        words: [],
+      };
+    }
+
+    if (!transcriptionData) {
+      return res.status(404).json({
+        success: false,
+        error: "Transcription data not found in DB",
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        call_id: recording.callId,
+        recording_url: recording.recordingUrl,
+        duration_seconds: recording.durationSeconds,
+        transcription_id: recording.transcriptionId,
+        transcription: transcriptionData,
+        has_transcription: true,
+      },
+    });
+  })
 );
 
 /**
@@ -257,8 +247,9 @@ transcriptionsRouter.get(
  *       500:
  *         description: Failed to queue transcriptions
  */
-transcriptionsRouter.post("/batch", async (req: Request, res: Response) => {
-  try {
+transcriptionsRouter.post(
+  "/batch",
+  asyncHandler(async (req: Request, res: Response) => {
     const { fiche_ids, priority = "normal" } = req.body;
 
     if (!fiche_ids || !Array.isArray(fiche_ids)) {
@@ -272,28 +263,23 @@ transcriptionsRouter.post("/batch", async (req: Request, res: Response) => {
     const { ids } = await inngest.send(
       fiche_ids.map((fiche_id) => ({
         name: "fiche/transcribe",
-        data: { fiche_id, priority },
+        data: { fiche_id, priority, wait_for_completion: false },
         // Deduplication ID: prevent duplicate transcription requests within 24h
         id: `transcribe-${fiche_id}-${new Date().toISOString().split("T")[0]}`,
       }))
     );
 
-    console.log(
-      `✓ Queued ${fiche_ids.length} transcription jobs. Event IDs:`,
-      ids
-    );
+    logger.info("Queued batch transcription jobs", {
+      fiche_count: fiche_ids.length,
+      priority,
+      event_ids_count: ids.length,
+    });
 
-    res.json({
+    return res.json({
       success: true,
       message: `${fiche_ids.length} transcription jobs queued`,
       fiche_ids,
       event_ids: ids,
     });
-  } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      error: "Failed to queue transcriptions",
-      message: error.message,
-    });
-  }
-});
+  })
+);

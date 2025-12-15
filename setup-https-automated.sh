@@ -1,150 +1,165 @@
 #!/bin/bash
 
-# 🔒 Automated HTTPS Setup for qa-audit.site
-# Run this script on your VPS as root
+# 🔒 Automated HTTPS Setup (host Nginx + Certbot)
+# Run this script on your VPS as root.
+#
+# Usage (recommended):
+#   DOMAIN=api.example.com EMAIL=you@example.com bash setup-https-automated.sh
+#
+# Optional:
+#   INCLUDE_WWW=1                 # also request a cert for www.${DOMAIN}
+#   UPSTREAM_PORT=3002            # where your Docker stack listens on localhost
+#
+# Security note:
+# - Do NOT expose Inngest UI publicly by default. Access it via SSH tunnel:
+#     ssh -L 8288:127.0.0.1:8288 root@your-vps
 
-set -e  # Exit on error
+set -euo pipefail
 
-echo "================================================================"
-echo "🔒 Setting up HTTPS for qa-audit.site"
-echo "================================================================"
+DOMAIN="${DOMAIN:-${1:-}}"
+EMAIL="${EMAIL:-${2:-}}"
+INCLUDE_WWW="${INCLUDE_WWW:-0}"
+UPSTREAM_PORT="${UPSTREAM_PORT:-3002}"
 
-# Check if running as root
-if [ "$EUID" -ne 0 ]; then 
-  echo "❌ Please run as root (use: sudo bash setup-https-automated.sh)"
+if [ -z "${DOMAIN}" ] || [ -z "${EMAIL}" ]; then
+  echo "Usage:"
+  echo "  DOMAIN=api.example.com EMAIL=you@example.com bash setup-https-automated.sh"
+  echo ""
+  echo "Optional:"
+  echo "  INCLUDE_WWW=1 UPSTREAM_PORT=3002"
   exit 1
 fi
 
-# STEP 1: Install Nginx
+SERVER_NAMES="${DOMAIN}"
+if [ "${INCLUDE_WWW}" = "1" ]; then
+  SERVER_NAMES="${SERVER_NAMES} www.${DOMAIN}"
+fi
+
+echo "================================================================"
+echo "🔒 Setting up HTTPS for ${DOMAIN}"
+echo "================================================================"
+
+if [ "$EUID" -ne 0 ]; then
+  echo "❌ Please run as root (use: sudo -E bash setup-https-automated.sh)"
+  exit 1
+fi
+
 echo ""
-echo "📦 Step 1: Installing Nginx..."
+echo "📦 Installing Nginx + Certbot..."
 apt-get update
-apt-get install -y nginx
+apt-get install -y nginx certbot python3-certbot-nginx
 
-# STEP 2: Create Nginx Configuration
 echo ""
-echo "⚙️  Step 2: Creating Nginx configuration..."
-cat > /etc/nginx/sites-available/ai-audit << 'EOF'
+echo "⚙️  Writing Nginx site config..."
+cat > /etc/nginx/sites-available/ai-audit << EOF
 server {
-    listen 80;
-    server_name qa-audit.site www.qa-audit.site;
+  listen 80;
+  server_name ${SERVER_NAMES};
 
-    client_max_body_size 50M;
+  client_max_body_size 50m;
 
-    # API endpoints
-    location / {
-        proxy_pass http://localhost:3002;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
-        
-        proxy_connect_timeout 600s;
-        proxy_send_timeout 600s;
-        proxy_read_timeout 600s;
-    }
-}
+  add_header X-Request-Id \$request_id always;
 
-# Inngest on separate subdomain or port
-server {
-    listen 8288;
-    server_name qa-audit.site;
+  location /api/realtime/ {
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Request-Id \$request_id;
 
-    location / {
-        proxy_pass http://localhost:8288;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-    }
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+
+    proxy_pass http://127.0.0.1:${UPSTREAM_PORT};
+  }
+
+  location /api/inngest {
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Request-Id \$request_id;
+
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_cache off;
+
+    proxy_connect_timeout 5s;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 3;
+    proxy_next_upstream_timeout 15s;
+
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+
+    proxy_pass http://127.0.0.1:${UPSTREAM_PORT};
+  }
+
+  location / {
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Request-Id \$request_id;
+
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
+
+    proxy_pass http://127.0.0.1:${UPSTREAM_PORT};
+  }
 }
 EOF
 
-# STEP 3: Enable Configuration
 echo ""
-echo "🔗 Step 3: Enabling Nginx configuration..."
-ln -sf /etc/nginx/sites-available/ai-audit /etc/nginx/sites-enabled/
-rm -f /etc/nginx/sites-enabled/default  # Remove default config
+echo "🔗 Enabling Nginx site..."
+ln -sf /etc/nginx/sites-available/ai-audit /etc/nginx/sites-enabled/ai-audit
+rm -f /etc/nginx/sites-enabled/default || true
 
-# Test Nginx configuration
+echo ""
+echo "🧪 Testing Nginx configuration..."
 nginx -t
 
-# Start/Reload Nginx
+echo ""
+echo "♻️  Restarting Nginx..."
 systemctl enable nginx
 systemctl restart nginx
 
 echo ""
-echo "✅ Nginx configured and running"
-
-# STEP 4: Install Certbot
-echo ""
-echo "🔐 Step 4: Installing Certbot (for SSL certificates)..."
-apt-get install -y certbot python3-certbot-nginx
-
-# STEP 5: Get SSL Certificate
-echo ""
-echo "🔒 Step 5: Obtaining SSL certificate from Let's Encrypt..."
-echo ""
-echo "⚠️  Please enter your email address for SSL certificate notifications:"
-read -p "Email: " email
-
-certbot --nginx \
-  -d qa-audit.site \
-  -d www.qa-audit.site \
-  --non-interactive \
-  --agree-tos \
-  --email "$email" \
-  --redirect
-
-# STEP 6: Test HTTPS
-echo ""
-echo "🧪 Step 6: Testing HTTPS..."
-sleep 2
-
-if curl -f -s https://qa-audit.site/health > /dev/null; then
-    echo ""
-    echo "================================================================"
-    echo "✅ SUCCESS! HTTPS is now enabled!"
-    echo "================================================================"
-    echo ""
-    echo "Your API is now available at:"
-    echo "  • https://qa-audit.site"
-    echo "  • https://qa-audit.site/api-docs"
-    echo "  • https://www.qa-audit.site"
-    echo ""
-    echo "Inngest Dashboard:"
-    echo "  • http://qa-audit.site:8288 (or set up subdomain)"
-    echo ""
-    echo "SSL certificate will auto-renew every 90 days."
-    echo "================================================================"
-else
-    echo ""
-    echo "⚠️  HTTPS setup completed, but health check failed."
-    echo "This might be normal if your API isn't running yet."
-    echo ""
-    echo "Try accessing: https://qa-audit.site"
-    echo "================================================================"
+echo "🔒 Requesting Let's Encrypt certificate..."
+CERTBOT_DOMAINS=(-d "${DOMAIN}")
+if [ "${INCLUDE_WWW}" = "1" ]; then
+  CERTBOT_DOMAINS+=(-d "www.${DOMAIN}")
 fi
 
-# STEP 7: Setup Auto-Renewal
+certbot --nginx \
+  "${CERTBOT_DOMAINS[@]}" \
+  --non-interactive \
+  --agree-tos \
+  --email "${EMAIL}" \
+  --redirect \
+  --keep-until-expiring
+
 echo ""
-echo "🔄 Setting up automatic SSL renewal..."
+echo "🔄 Enabling automatic SSL renewal..."
 systemctl enable certbot.timer
 systemctl start certbot.timer
 
 echo ""
-echo "✅ All done! Your server now has HTTPS enabled."
+echo "🧪 Quick health check (may fail if app isn't up yet)..."
+curl -fsS "https://${DOMAIN}/health" >/dev/null && echo "✅ Health check OK" || echo "⚠️  Health check failed (app may not be running yet)"
+
 echo ""
-echo "Next steps:"
-echo "  1. Update your frontend to use: https://qa-audit.site"
-echo "  2. Update CORS settings if needed"
-echo "  3. Test all API endpoints"
-echo ""
+echo "✅ Done."
+echo "API should be available at: https://${DOMAIN}"
+echo "Swagger UI: https://${DOMAIN}/api-docs"
 
 
 

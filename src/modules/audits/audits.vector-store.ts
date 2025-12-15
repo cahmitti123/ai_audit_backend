@@ -5,6 +5,7 @@
  */
 
 import OpenAI from "openai";
+import { logger } from "../../shared/logger.js";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -18,7 +19,7 @@ export interface VectorSearchResult {
   content: string;
   file_name?: string;
   score?: number;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ProductVerificationContext {
@@ -35,7 +36,7 @@ export async function searchVectorStore(
   maxResults: number = MAX_RESULTS
 ): Promise<VectorSearchResult[]> {
   try {
-    console.log(`🔍 Searching vector store for: "${query}"`);
+    logger.info("Searching vector store", { query });
 
     // Create a thread with vector store attached
     const thread = await openai.beta.threads.create({
@@ -72,7 +73,13 @@ export async function searchVectorStore(
     }
 
     if (runStatus.status === "failed") {
-      console.error("❌ Vector store search failed:", runStatus.last_error);
+      const lastError =
+        typeof runStatus === "object" && runStatus !== null
+          ? ((runStatus as { last_error?: unknown }).last_error ?? null)
+          : null;
+      logger.error("Vector store search failed", {
+        error: lastError,
+      });
       return [];
     }
 
@@ -108,7 +115,9 @@ export async function searchVectorStore(
                     },
                   }))
                   .catch((error) => {
-                    console.error("Error retrieving file:", error);
+                    logger.error("Error retrieving vector store file", {
+                      error: error instanceof Error ? error.message : String(error),
+                    });
                     return null;
                   });
                 
@@ -135,24 +144,32 @@ export async function searchVectorStore(
     await openai.beta.assistants.del(assistant.id);
     await openai.beta.threads.del(thread.id);
 
-    console.log(`✅ Found ${results.length} relevant documents`);
+    logger.info("Vector store search complete", { results: results.length });
     return results.slice(0, maxResults);
   } catch (error) {
-    console.error("❌ Error searching vector store:", error);
+    logger.error("Error searching vector store", {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return [];
   }
 }
+
+export type ProductVerificationStep = {
+  name: string;
+  controlPoints: string[];
+  keywords: string[];
+};
 
 /**
  * Get product verification context for all checkpoints in a step
  */
 export async function getProductVerificationContext(
-  step: any
+  step: ProductVerificationStep
 ): Promise<ProductVerificationContext[]> {
-  console.log(
-    `\n🔍 Retrieving product verification context for step: ${step.name}`
-  );
-  console.log(`🚀 Processing ${step.controlPoints.length} checkpoints in parallel...`);
+  logger.info("Retrieving product verification context", {
+    step_name: step.name,
+    checkpoints: step.controlPoints.length,
+  });
 
   // Process all checkpoints in parallel for maximum speed
   const contextPromises = step.controlPoints.map(async (checkpoint: string, index: number) => {
@@ -173,7 +190,7 @@ export async function getProductVerificationContext(
   });
 
   const contexts = await Promise.all(contextPromises);
-  console.log(`✅ Retrieved context for ${contexts.length} checkpoints`);
+  logger.info("Retrieved verification context", { checkpoints: contexts.length });
 
   return contexts;
 }
@@ -181,7 +198,7 @@ export async function getProductVerificationContext(
 /**
  * Build optimized search query for product information
  */
-function buildProductSearchQuery(step: any, checkpoint: string): string {
+function buildProductSearchQuery(step: ProductVerificationStep, checkpoint: string): string {
   // Combine step context with checkpoint for targeted search
   const stepKeywords = step.keywords.slice(0, 5).join(" ");
 
@@ -232,7 +249,7 @@ export function formatVerificationContextForPrompt(
 export async function verifyCheckpointAgainstDocumentation(
   checkpoint: string,
   advisorStatement: string,
-  stepContext: any
+  stepContext: { name: string }
 ): Promise<{
   compliant: boolean;
   confidence: "high" | "medium" | "low";
@@ -253,9 +270,7 @@ Est-ce que cette affirmation est conforme aux garanties et conditions du produit
 
   return {
     compliant: hasRelevantDocs,
-    confidence: hasRelevantDocs
-      ? "medium"
-      : ("low" as "high" | "medium" | "low"),
+    confidence: hasRelevantDocs ? "medium" : "low",
     discrepancies: [],
     supportingDocs: docs,
   };

@@ -10,18 +10,38 @@
  * LAYER: Presentation (HTTP)
  */
 
-import { Router, Request, Response } from "express";
+import { Router, type Request, type Response } from "express";
 import { inngest } from "../../inngest/client.js";
 import * as auditsService from "./audits.service.js";
 import {
   validateRunAuditInput,
   validateBatchAuditInput,
   parseListAuditsQuery,
+  type ListAuditsQuery,
+  validateReviewAuditStepResultInput,
 } from "./audits.schemas.js";
 import { jsonResponse } from "../../shared/bigint-serializer.js";
 import { logger } from "../../shared/logger.js";
+import { asyncHandler } from "../../middleware/async-handler.js";
+import { ValidationError } from "../../shared/errors.js";
 
 export const auditsRouter = Router();
+
+function parseBigIntParam(value: string, name = "id"): bigint {
+  try {
+    return BigInt(value);
+  } catch {
+    throw new ValidationError(`Invalid ${name}`);
+  }
+}
+
+function parsePositiveIntParam(value: string, name = "value"): number {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new ValidationError(`Invalid ${name}`);
+  }
+  return n;
+}
 
 /**
  * @swagger
@@ -105,24 +125,23 @@ export const auditsRouter = Router();
  *       500:
  *         description: Server error
  */
-auditsRouter.get("/", async (req: Request, res: Response) => {
-  try {
+auditsRouter.get(
+  "/",
+  asyncHandler(async (req: Request, res: Response) => {
     // Parse and validate query parameters
-    const filters = parseListAuditsQuery(req.query as any);
+    const filters = parseListAuditsQuery(req.query as unknown as ListAuditsQuery);
 
     // Execute query via service
     const result = await auditsService.listAudits(filters);
 
     // Calculate pagination info
-    const totalPages = Math.ceil(
-      result.pagination.total / result.pagination.limit
-    );
+    const totalPages = Math.ceil(result.pagination.total / result.pagination.limit);
     const currentPage =
       Math.floor(result.pagination.offset / result.pagination.limit) + 1;
     const hasNextPage = currentPage < totalPages;
     const hasPrevPage = currentPage > 1;
 
-    res.json({
+    return res.json({
       success: true,
       data: result.audits,
       pagination: {
@@ -135,16 +154,8 @@ auditsRouter.get("/", async (req: Request, res: Response) => {
         has_prev_page: hasPrevPage,
       },
     });
-  } catch (error: any) {
-    logger.error("Error listing audits", { error: error.message });
-    res.status(500).json({
-      success: false,
-      error: "Failed to list audits",
-      message: error.message,
-      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-    });
-  }
-});
+  })
+);
 
 /**
  * @swagger
@@ -277,24 +288,23 @@ auditsRouter.get("/", async (req: Request, res: Response) => {
  *       500:
  *         description: Server error
  */
-auditsRouter.get("/grouped-by-fiches", async (req: Request, res: Response) => {
-  try {
+auditsRouter.get(
+  "/grouped-by-fiches",
+  asyncHandler(async (req: Request, res: Response) => {
     // Parse and validate query parameters
-    const filters = parseListAuditsQuery(req.query as any);
+    const filters = parseListAuditsQuery(req.query as unknown as ListAuditsQuery);
 
     // Execute query via service
     const result = await auditsService.getAuditsGroupedByFiches(filters);
 
     // Calculate pagination info
-    const totalPages = Math.ceil(
-      result.pagination.total / result.pagination.limit
-    );
+    const totalPages = Math.ceil(result.pagination.total / result.pagination.limit);
     const currentPage =
       Math.floor(result.pagination.offset / result.pagination.limit) + 1;
     const hasNextPage = currentPage < totalPages;
     const hasPrevPage = currentPage > 1;
 
-    res.json({
+    return res.json({
       success: true,
       data: result.data,
       pagination: {
@@ -307,18 +317,8 @@ auditsRouter.get("/grouped-by-fiches", async (req: Request, res: Response) => {
         has_prev_page: hasPrevPage,
       },
     });
-  } catch (error: any) {
-    logger.error("Error fetching audits grouped by fiches", {
-      error: error.message,
-    });
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch audits grouped by fiches",
-      message: error.message,
-      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-    });
-  }
-});
+  })
+);
 
 /**
  * @swagger
@@ -383,60 +383,63 @@ auditsRouter.get("/grouped-by-fiches", async (req: Request, res: Response) => {
  *       500:
  *         description: Failed to queue audit
  */
-auditsRouter.post("/run", async (req: Request, res: Response) => {
-  try {
-    const { audit_id, fiche_id, user_id } = req.body;
+auditsRouter.post(
+  "/run",
+  asyncHandler(async (req: Request, res: Response) => {
+    const body: unknown = req.body;
+    const data =
+      typeof body === "object" && body !== null
+        ? (body as Record<string, unknown>)
+        : {};
+
+    // Backwards-compatible: accept either `audit_id` (legacy) or `audit_config_id` (preferred)
+    const auditConfigRaw = data.audit_config_id ?? data.audit_id;
+    const fiche_id = data.fiche_id;
+    const user_id = data.user_id;
+
+    const auditConfigId = Number.parseInt(String(auditConfigRaw ?? ""), 10);
+    const ficheIdStr = typeof fiche_id === "string" ? fiche_id : String(fiche_id ?? "");
 
     // Validation
-    if (!audit_id || !fiche_id) {
+    if (!Number.isFinite(auditConfigId) || auditConfigId <= 0 || !ficheIdStr) {
       return res.status(400).json({
         success: false,
         error: "Missing required parameters",
-        message: "Both audit_id and fiche_id are required",
+        message: "Both audit_config_id (or audit_id) and fiche_id are required",
       });
     }
 
-    console.log(
-      `\n${"=".repeat(
-        80
-      )}\nQueuing audit: Config ID ${audit_id}, Fiche ID ${fiche_id}\n${"=".repeat(
-        80
-      )}\n`
-    );
+    logger.info("Queuing audit", {
+      fiche_id: ficheIdStr,
+      audit_config_id: auditConfigId,
+      has_user_id: Boolean(user_id),
+    });
 
     // Send event to Inngest (async processing)
-    const eventId = `audit-${fiche_id}-${audit_id}-${Date.now()}`;
+    const eventId = `audit-${ficheIdStr}-${auditConfigId}-${Date.now()}`;
     const { ids } = await inngest.send({
       name: "audit/run",
       data: {
-        fiche_id: fiche_id.toString(),
-        audit_config_id: parseInt(audit_id),
-        user_id,
+        fiche_id: ficheIdStr,
+        audit_config_id: auditConfigId,
+        ...(typeof user_id === "string" && user_id ? { user_id } : {}),
       },
       id: eventId,
     });
 
-    res.json({
+    return res.json({
       success: true,
       message: "Audit queued for processing",
       event_id: ids[0],
-      fiche_id,
-      audit_config_id: audit_id,
+      fiche_id: ficheIdStr,
+      audit_config_id: auditConfigId,
       metadata: {
         timestamp: new Date().toISOString(),
         status: "queued",
       },
     });
-  } catch (error: any) {
-    console.error("Error queuing audit:", error);
-    res.status(500).json({
-      success: false,
-      error: "Failed to queue audit",
-      message: error.message,
-      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-    });
-  }
-});
+  })
+);
 
 /**
  * @swagger
@@ -472,8 +475,9 @@ auditsRouter.post("/run", async (req: Request, res: Response) => {
  *       500:
  *         description: Failed to queue audit
  */
-auditsRouter.post("/run-latest", async (req: Request, res: Response) => {
-  try {
+auditsRouter.post(
+  "/run-latest",
+  asyncHandler(async (req: Request, res: Response) => {
     const { fiche_id, user_id } = req.body;
 
     if (!fiche_id) {
@@ -497,13 +501,11 @@ auditsRouter.post("/run-latest", async (req: Request, res: Response) => {
       });
     }
 
-    console.log(
-      `\n${"=".repeat(
-        80
-      )}\nQueuing audit with latest config: Fiche ID ${fiche_id}\n${"=".repeat(
-        80
-      )}\n`
-    );
+    logger.info("Queuing audit with latest config", {
+      fiche_id: String(fiche_id),
+      audit_config_id: String(latestConfig.id),
+      has_user_id: Boolean(user_id),
+    });
 
     // Send event to Inngest
     const eventId = `audit-${fiche_id}-${latestConfig.id}-${Date.now()}`;
@@ -517,7 +519,7 @@ auditsRouter.post("/run-latest", async (req: Request, res: Response) => {
       id: eventId,
     });
 
-    res.json({
+    return res.json({
       success: true,
       message: "Audit queued for processing",
       event_id: ids[0],
@@ -529,16 +531,8 @@ auditsRouter.post("/run-latest", async (req: Request, res: Response) => {
         status: "queued",
       },
     });
-  } catch (error: any) {
-    console.error("Error queuing audit:", error);
-    res.status(500).json({
-      success: false,
-      error: "Failed to queue audit",
-      message: error.message,
-      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-    });
-  }
-});
+  })
+);
 
 /**
  * @swagger
@@ -578,8 +572,9 @@ auditsRouter.post("/run-latest", async (req: Request, res: Response) => {
  *       500:
  *         description: Failed to queue batch audit
  */
-auditsRouter.post("/batch", async (req: Request, res: Response) => {
-  try {
+auditsRouter.post(
+  "/batch",
+  asyncHandler(async (req: Request, res: Response) => {
     const { fiche_ids, audit_config_id, user_id } = req.body;
 
     if (!fiche_ids || !Array.isArray(fiche_ids)) {
@@ -604,12 +599,14 @@ auditsRouter.post("/batch", async (req: Request, res: Response) => {
       ts: Date.now(),
     });
 
-    console.log(
-      `✓ Queued batch audit for ${fiche_ids.length} fiches. Batch ID:`,
-      batchId
-    );
+    logger.info("Queued batch audit", {
+      batch_id: batchId,
+      fiche_count: fiche_ids.length,
+      audit_config_id: audit_config_id ?? null,
+      has_user_id: Boolean(user_id),
+    });
 
-    res.json({
+    return res.json({
       success: true,
       message: `Batch audit queued for ${fiche_ids.length} fiches`,
       fiche_ids,
@@ -617,14 +614,8 @@ auditsRouter.post("/batch", async (req: Request, res: Response) => {
       batch_id: batchId,
       event_ids: ids,
     });
-  } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      error: "Failed to queue batch audit",
-      message: error.message,
-    });
-  }
-});
+  })
+);
 
 /**
  * @swagger
@@ -633,8 +624,9 @@ auditsRouter.post("/batch", async (req: Request, res: Response) => {
  *     tags: [Audits]
  *     summary: Get audit history for a fiche
  */
-auditsRouter.get("/by-fiche/:fiche_id", async (req: Request, res: Response) => {
-  try {
+auditsRouter.get(
+  "/by-fiche/:fiche_id",
+  asyncHandler(async (req: Request, res: Response) => {
     const includeDetails = req.query.include_details === "true";
     const audits = await auditsService.getAuditsByFiche(
       req.params.fiche_id,
@@ -646,18 +638,8 @@ auditsRouter.get("/by-fiche/:fiche_id", async (req: Request, res: Response) => {
       data: audits,
       count: audits.length,
     });
-  } catch (error: any) {
-    logger.error("Error fetching audits by fiche", {
-      ficheId: req.params.fiche_id,
-      error: error.message,
-    });
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch audits",
-      message: error.message,
-    });
-  }
-});
+  })
+);
 
 /**
  * @swagger
@@ -666,8 +648,9 @@ auditsRouter.get("/by-fiche/:fiche_id", async (req: Request, res: Response) => {
  *     tags: [Audits]
  *     summary: Get detailed audit results
  */
-auditsRouter.get("/:audit_id", async (req: Request, res: Response) => {
-  try {
+auditsRouter.get(
+  "/:audit_id",
+  asyncHandler(async (req: Request, res: Response) => {
     const audit = await auditsService.getAuditById(req.params.audit_id);
 
     if (!audit) {
@@ -681,15 +664,76 @@ auditsRouter.get("/:audit_id", async (req: Request, res: Response) => {
       success: true,
       data: audit,
     });
-  } catch (error: any) {
-    logger.error("Error fetching audit", {
-      auditId: req.params.audit_id,
-      error: error.message,
+  })
+);
+
+/**
+ * @swagger
+ * /api/audits/{audit_id}/steps/{step_position}/review:
+ *   patch:
+ *     tags: [Audits]
+ *     summary: Override an audit step result after human review
+ *     description: |
+ *       Allows a human reviewer to override the AI decision for a specific step.
+ *       This updates the step summary fields (conforme/score/etc) and stores an audit trail
+ *       entry in `rawResult.human_review` for traceability.
+ *     parameters:
+ *       - in: path
+ *         name: audit_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: step_position
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [conforme]
+ *             properties:
+ *               conforme:
+ *                 type: string
+ *                 enum: [CONFORME, NON_CONFORME, PARTIEL]
+ *               traite:
+ *                 type: boolean
+ *               score:
+ *                 type: integer
+ *               niveauConformite:
+ *                 type: string
+ *                 enum: [EXCELLENT, BON, ACCEPTABLE, INSUFFISANT, REJET]
+ *               reviewer:
+ *                 type: string
+ *               reason:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Updated step result
+ *       400:
+ *         description: Invalid input
+ *       404:
+ *         description: Step result not found
+ */
+auditsRouter.patch(
+  "/:audit_id/steps/:step_position/review",
+  asyncHandler(async (req: Request, res: Response) => {
+    const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
+    const stepPosition = parsePositiveIntParam(req.params.step_position, "step_position");
+    const input = validateReviewAuditStepResultInput(req.body);
+
+    const updated = await auditsService.reviewAuditStepResult(
+      auditId,
+      stepPosition,
+      input
+    );
+
+    return jsonResponse(res, {
+      success: true,
+      data: updated,
     });
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch audit",
-      message: error.message,
-    });
-  }
-});
+  })
+);

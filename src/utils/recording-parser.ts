@@ -4,6 +4,8 @@
  * Parses recording URLs to extract date, time, UUID, and phone numbers
  */
 
+import { logger } from "../shared/logger.js";
+
 interface ParsedRecording {
   uuid: string;
   date: string; // DD/MM/YYYY
@@ -13,6 +15,25 @@ interface ParsedRecording {
   toNumber: string;
   fileName: string;
 }
+
+export type RecordingLike = {
+  recording_url?: string | null;
+  recordingUrl?: string | null;
+  call_id?: string;
+  callId?: string;
+  [key: string]: unknown;
+};
+
+export type EnrichedParsedRecording = {
+  uuid: string;
+  date: string;
+  time: string;
+  timestamp: string;
+  from_number: string;
+  to_number: string;
+  from_number_raw: string;
+  to_number_raw: string;
+};
 
 /**
  * Parse recording URL/filename
@@ -66,7 +87,10 @@ export function parseRecordingUrl(url: string): ParsedRecording | null {
       fileName,
     };
   } catch (error) {
-    console.error("Error parsing recording URL:", url, error);
+    logger.error("Error parsing recording URL", {
+      url,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }
@@ -118,12 +142,14 @@ export function getCallDirection(
  * Handles both snake_case (API) and camelCase (Database) field names
  * ALWAYS returns recording_url in snake_case for consistency
  */
-export function enrichRecording(recording: any): any {
+export function enrichRecording<T extends RecordingLike>(
+  recording: T
+): T & { recording_url: string; call_id: string; parsed: EnrichedParsedRecording | null } {
   // Handle both formats: recording_url (API) and recordingUrl (DB)
   const url = recording.recording_url || recording.recordingUrl || "";
   const callId = recording.call_id || recording.callId || "";
 
-  console.log(`📍 [enrichRecording] Processing recording:`, {
+  logger.debug("enrichRecording: processing recording", {
     call_id: callId,
     has_recording_url: Boolean(recording.recording_url),
     has_recordingUrl: Boolean(recording.recordingUrl),
@@ -133,9 +159,7 @@ export function enrichRecording(recording: any): any {
   const parsed = parseRecordingUrl(url);
 
   if (!parsed) {
-    console.warn(
-      `⚠️  [enrichRecording] Failed to parse URL for call_id: ${callId}`
-    );
+    logger.warn("enrichRecording: failed to parse URL", { call_id: callId });
     return {
       ...recording,
       // Normalize field names to snake_case
@@ -145,7 +169,7 @@ export function enrichRecording(recording: any): any {
     };
   }
 
-  console.log(`✓ [enrichRecording] Successfully enriched:`, {
+  logger.debug("enrichRecording: successfully enriched", {
     call_id: callId,
     date: parsed.date,
     time: parsed.time,

@@ -1,4 +1,4 @@
-import { Router, Request, Response } from "express";
+import { Router, type Request, type Response } from "express";
 import {
   sendWebhook,
   sendNotification,
@@ -6,8 +6,9 @@ import {
   transcriptionWebhooks,
   batchWebhooks,
   WebhookEventType,
-} from "../../shared/webhook";
-import { logger } from "../../shared/logger";
+} from "../../shared/webhook.js";
+import { logger } from "../../shared/logger.js";
+import { asyncHandler } from "../../middleware/async-handler.js";
 
 const router = Router();
 
@@ -55,8 +56,8 @@ const router = Router();
  *       500:
  *         description: Webhook delivery failed
  */
-router.post("/test", async (req: Request, res: Response) => {
-  const { eventType } = req.body;
+router.post("/test", asyncHandler(async (req: Request, res: Response) => {
+  const { eventType } = req.body as { eventType?: unknown };
 
   if (!eventType) {
     return res.status(400).json({
@@ -65,18 +66,17 @@ router.post("/test", async (req: Request, res: Response) => {
     });
   }
 
-  try {
-    const results: Record<string, boolean> = {};
+  const results: Record<string, boolean> = {};
 
-    // Send all event types for testing
-    if (eventType === "all") {
-      results["audit.started"] = await auditWebhooks.started(
-        "test-audit-123",
-        "1762209",
-        "13",
-        "Audit Rapide (5 étapes)",
-        5 // totalSteps
-      );
+  // Send all event types for testing
+  if (eventType === "all") {
+    results["audit.started"] = await auditWebhooks.started(
+      "test-audit-123",
+      "1762209",
+      "13",
+      "Audit Rapide (5 étapes)",
+      5 // totalSteps
+    );
 
       results["audit.progress"] = await auditWebhooks.progress(
         "test-audit-123",
@@ -147,30 +147,28 @@ router.post("/test", async (req: Request, res: Response) => {
         "This is a test notification from the webhook test endpoint"
       );
 
-      const successCount = Object.values(results).filter((r) => r).length;
+    const successCount = Object.values(results).filter((r) => r).length;
 
-      return res.json({
-        success: true,
-        message: `Sent ${successCount}/${
-          Object.keys(results).length
-        } test webhooks`,
-        results,
-      });
-    }
+    return res.json({
+      success: true,
+      message: `Sent ${successCount}/${Object.keys(results).length} test webhooks`,
+      results,
+    });
+  }
 
-    // Send specific event type
-    let success = false;
+  // Send specific event type
+  let success = false;
 
-    switch (eventType as WebhookEventType) {
-      case "audit.started":
-        success = await auditWebhooks.started(
-          "test-audit-123",
-          "1762209",
-          "13",
-          "Audit Rapide (5 étapes)",
-          5 // totalSteps
-        );
-        break;
+  switch (eventType as WebhookEventType) {
+    case "audit.started":
+      success = await auditWebhooks.started(
+        "test-audit-123",
+        "1762209",
+        "13",
+        "Audit Rapide (5 étapes)",
+        5 // totalSteps
+      );
+      break;
 
       case "audit.progress":
         success = await auditWebhooks.progress(
@@ -250,29 +248,22 @@ router.post("/test", async (req: Request, res: Response) => {
         );
         break;
 
-      default:
-        return res.status(400).json({
-          success: false,
-          error: `Unknown event type: ${eventType}`,
-        });
-    }
-
-    return res.json({
-      success: true,
-      eventType,
-      delivered: success,
-      message: success
-        ? `Webhook ${eventType} sent successfully`
-        : `Webhook ${eventType} failed to send`,
-    });
-  } catch (error) {
-    logger.error("Webhook test endpoint error", { error });
-    return res.status(500).json({
-      success: false,
-      error: "Failed to send webhook",
-    });
+    default:
+      return res.status(400).json({
+        success: false,
+        error: `Unknown event type: ${eventType}`,
+      });
   }
-});
+
+  return res.json({
+    success: true,
+    eventType,
+    delivered: success,
+    message: success
+      ? `Webhook ${eventType} sent successfully`
+      : `Webhook ${eventType} failed to send`,
+  });
+}));
 
 /**
  * @swagger
@@ -297,15 +288,15 @@ router.post("/test", async (req: Request, res: Response) => {
  *       200:
  *         description: Workflow simulation completed
  */
-router.post("/test/workflow", async (req: Request, res: Response) => {
-  const delay = req.body.delay || 1000;
+router.post("/test/workflow", asyncHandler(async (req: Request, res: Response) => {
+  const delayRaw = (req.body as { delay?: unknown })?.delay;
+  const delay = typeof delayRaw === "number" ? delayRaw : 1000;
   const auditId = `test-audit-${Date.now()}`;
   const ficheId = "1762209";
 
-  try {
-    // Start workflow in background
-    (async () => {
-      logger.info("Starting webhook workflow simulation", { auditId });
+  // Start workflow in background
+  void (async () => {
+    logger.info("Starting webhook workflow simulation", { auditId });
 
       // 1. Audit started
       await auditWebhooks.started(
@@ -352,31 +343,27 @@ router.post("/test/workflow", async (req: Request, res: Response) => {
         Math.round((steps.length * delay) / 1000) // durationSeconds
       );
 
-      logger.info("Webhook workflow simulation completed", { auditId });
-    })();
+    logger.info("Webhook workflow simulation completed", { auditId });
+  })().catch((error) => {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error("Workflow simulation background error", { auditId, error: msg });
+  });
 
-    return res.json({
-      success: true,
-      message: "Workflow simulation started",
-      auditId,
-      steps: 7,
-      estimatedDuration: `${(7 * delay) / 1000}s`,
-    });
-  } catch (error) {
-    logger.error("Workflow simulation error", { error });
-    return res.status(500).json({
-      success: false,
-      error: "Failed to start workflow simulation",
-    });
-  }
-});
+  return res.json({
+    success: true,
+    message: "Workflow simulation started",
+    auditId,
+    steps: 7,
+    estimatedDuration: `${(7 * delay) / 1000}s`,
+  });
+}));
 
 /**
  * @swagger
  * /api/webhooks/test/custom:
  *   post:
  *     summary: Send custom webhook event
- *     description: Send a custom webhook with any event type and data
+ *     description: Send a custom webhook with an arbitrary supported event type and data
  *     tags:
  *       - Webhooks (Testing)
  *     requestBody:
@@ -401,8 +388,12 @@ router.post("/test/workflow", async (req: Request, res: Response) => {
  *       200:
  *         description: Custom webhook sent
  */
-router.post("/test/custom", async (req: Request, res: Response) => {
-  const { event, data, source } = req.body;
+router.post("/test/custom", asyncHandler(async (req: Request, res: Response) => {
+  const { event, data, source } = req.body as {
+    event?: unknown;
+    data?: unknown;
+    source?: unknown;
+  };
 
   if (!event || !data) {
     return res.status(400).json({
@@ -411,25 +402,30 @@ router.post("/test/custom", async (req: Request, res: Response) => {
     });
   }
 
-  try {
-    const success = await sendWebhook(
-      event as WebhookEventType,
-      data,
-      source || "custom-test"
-    );
-
-    return res.json({
-      success: true,
-      delivered: success,
-      message: success ? "Custom webhook sent" : "Custom webhook failed",
-    });
-  } catch (error) {
-    logger.error("Custom webhook error", { error });
-    return res.status(500).json({
+  if (typeof event !== "string") {
+    return res.status(400).json({
       success: false,
-      error: "Failed to send custom webhook",
+      error: "event must be a string",
     });
   }
-});
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return res.status(400).json({
+      success: false,
+      error: "data must be an object",
+    });
+  }
+
+  const success = await sendWebhook(
+    event as WebhookEventType,
+    data as Record<string, unknown>,
+    typeof source === "string" && source.trim().length > 0 ? source : "custom-test"
+  );
+
+  return res.json({
+    success: true,
+    delivered: success,
+    message: success ? "Custom webhook sent" : "Custom webhook failed",
+  });
+}));
 
 export default router;

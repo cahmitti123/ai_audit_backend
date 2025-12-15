@@ -10,11 +10,32 @@ import {
   ConversationChunk,
 } from "../../schemas.js";
 import { TIMELINE_CHUNK_SIZE } from "../../shared/constants.js";
+import { logger } from "../../shared/logger.js";
 import {
   logPayloadSize,
   formatBytes,
   getPayloadSize,
 } from "../../utils/payload-size.js";
+
+type RecordingMetadata = {
+  parsed?: {
+    date?: string;
+    time?: string;
+    from_number?: string;
+    to_number?: string;
+  } | null;
+  recording_url?: string;
+  call_id?: string;
+  start_time?: string;
+  duration_seconds?: number;
+};
+
+type TimelineMessage = {
+  speaker: string;
+  text: string;
+  start: number;
+  end: number;
+};
 
 export function generateTimeline(
   transcriptions: Transcription[]
@@ -25,29 +46,27 @@ export function generateTimeline(
     const t = transcriptions[i];
 
     // Extract parsed recording info if available
-    const recording = t.recording as {
-      parsed?: {
-        date?: string;
-        time?: string;
-        from_number?: string;
-        to_number?: string;
-      } | null;
-    };
-    const parsed = recording?.parsed || null;
+    const recording = (t.recording ?? null) as RecordingMetadata | null;
+    const parsed = recording?.parsed ?? null;
 
     // Debug logging for troubleshooting
     if (!parsed) {
-      console.warn(`⚠️  Recording ${i} has no parsed metadata`);
-      console.warn(`   URL: ${t.recording_url}`);
+      logger.warn("Recording has no parsed metadata", {
+        recording_index: i,
+        recording_url: t.recording_url,
+      });
     } else if (!parsed.date || !parsed.time) {
-      console.warn(`⚠️  Recording ${i} has incomplete parsed metadata`);
-      console.warn(`   Date: ${parsed.date}, Time: ${parsed.time}`);
+      logger.warn("Recording has incomplete parsed metadata", {
+        recording_index: i,
+        date: parsed.date,
+        time: parsed.time,
+      });
     }
     const words = t.transcription.words;
 
     // Grouper par speaker
-    const messages: any[] = [];
-    let currentSpeaker = null;
+    const messages: TimelineMessage[] = [];
+    let currentSpeaker = "unknown";
     let currentText: string[] = [];
     let currentStart = 0;
     let currentEnd = 0;
@@ -55,7 +74,9 @@ export function generateTimeline(
     for (const word of words) {
       if (word.type === "spacing") continue;
 
-      if (word.speaker_id !== currentSpeaker) {
+      const speaker = word.speaker_id ?? "unknown";
+
+      if (speaker !== currentSpeaker) {
         if (currentText.length > 0) {
           messages.push({
             speaker: currentSpeaker,
@@ -64,7 +85,7 @@ export function generateTimeline(
             end: currentEnd,
           });
         }
-        currentSpeaker = word.speaker_id;
+        currentSpeaker = speaker;
         currentText = [word.text];
         currentStart = word.start;
         currentEnd = word.end;
@@ -100,12 +121,12 @@ export function generateTimeline(
     }
 
     // Get recording URL from enriched recording or fallback to transcription object
-    const recordingUrl = t.recording?.recording_url || t.recording_url || "";
-    const callId = t.recording?.call_id || t.call_id || "";
+    const recordingUrl = recording?.recording_url || t.recording_url || "";
+    const callId = recording?.call_id || t.call_id || "";
 
-    console.log(`📍 [Timeline] Recording ${i}:`, {
+    logger.debug("Timeline recording summary", {
       call_id: callId,
-      recording_url_from_recording: t.recording?.recording_url ? "YES" : "NO",
+      recording_url_from_recording: recording?.recording_url ? "YES" : "NO",
       recording_url_from_transcription: t.recording_url ? "YES" : "NO",
       final_url: recordingUrl
         ? `${recordingUrl.substring(0, 50)}...`
@@ -116,19 +137,20 @@ export function generateTimeline(
 
     // Warn if recording URL is missing
     if (!recordingUrl) {
-      console.warn(
-        `⚠️  [Timeline] Recording ${i} (call_id: ${callId}) has no recording URL!`
-      );
-      console.warn(`   t.recording.recording_url:`, t.recording?.recording_url);
-      console.warn(`   t.recording_url:`, t.recording_url);
-      console.warn(`   t.recording keys:`, Object.keys(t.recording || {}));
+      logger.warn("Timeline recording missing recording URL", {
+        recording_index: i,
+        call_id: callId,
+        recording_recording_url: recording?.recording_url ?? null,
+        transcription_recording_url: t.recording_url || null,
+        recording_keys: Object.keys(recording ?? {}),
+      });
     }
 
     timeline.push({
       recording_index: i,
       call_id: callId,
-      start_time: t.recording?.start_time || "",
-      duration_seconds: t.recording?.duration_seconds || 0,
+      start_time: recording?.start_time || "",
+      duration_seconds: recording?.duration_seconds || 0,
       recording_url: recordingUrl,
       recording_date: parsed?.date || "",
       recording_time: parsed?.time || "",
@@ -144,19 +166,17 @@ export function generateTimeline(
   const timelineSize = getPayloadSize(timeline);
   const transcriptionsSize = getPayloadSize(transcriptions);
 
-  console.log("\n📊 [Timeline Size Analysis]");
-  console.log(`   Recordings: ${timeline.length}`);
-  console.log(`   Total chunks: ${totalChunks}`);
-  console.log(
-    `   Average chunks per recording: ${(totalChunks / timeline.length).toFixed(
-      1
-    )}`
-  );
-  console.log(`   Input (transcriptions): ${formatBytes(transcriptionsSize)}`);
-  console.log(`   Output (timeline): ${formatBytes(timelineSize)}`);
-  console.log(
-    `   Size ratio: ${((timelineSize / transcriptionsSize) * 100).toFixed(1)}%`
-  );
+  logger.info("Timeline size analysis", {
+    recordings: timeline.length,
+    total_chunks: totalChunks,
+    avg_chunks_per_recording:
+      timeline.length > 0 ? Number((totalChunks / timeline.length).toFixed(1)) : 0,
+    input_transcriptions: formatBytes(transcriptionsSize),
+    output_timeline: formatBytes(timelineSize),
+    size_ratio_pct: transcriptionsSize > 0
+      ? Number(((timelineSize / transcriptionsSize) * 100).toFixed(1))
+      : null,
+  });
 
   // Log detailed size breakdown for first recording (sample)
   if (timeline.length > 0) {
@@ -168,18 +188,19 @@ export function generateTimeline(
       textLength: c.full_text.length,
     }));
 
-    console.log(`\n   Sample recording #0 breakdown:`);
-    console.log(`     Total size: ${formatBytes(sampleSize)}`);
-    console.log(`     Chunks: ${sampleRecording.chunks.length}`);
-    console.log(
-      `     Avg chunk size: ${formatBytes(
-        sampleSize / sampleRecording.chunks.length
-      )}`
-    );
+    logger.debug("Timeline sample recording breakdown", {
+      sample_index: 0,
+      total_size: formatBytes(sampleSize),
+      chunks: sampleRecording.chunks.length,
+      avg_chunk_size: sampleRecording.chunks.length > 0
+        ? formatBytes(sampleSize / sampleRecording.chunks.length)
+        : "N/A",
+    });
     if (sampleChunkSizes.length > 0) {
-      console.log(
-        `     First chunk: ${sampleChunkSizes[0].size} (${sampleChunkSizes[0].textLength} chars)`
-      );
+      logger.debug("Timeline sample first chunk", {
+        size: sampleChunkSizes[0].size,
+        text_length: sampleChunkSizes[0].textLength,
+      });
     }
   }
 

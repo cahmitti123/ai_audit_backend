@@ -24,10 +24,87 @@ import type {
   AutomationRun,
   AutomationRunWithLogs,
   AutomationLog,
+  AutomationLogLevel,
+  AutomationRunStatus,
+  TranscriptionPriority,
 } from "./automation.schemas.js";
+import type {
+  AutomationLog as DbAutomationLog,
+  AutomationRun as DbAutomationRun,
+  AutomationSchedule as DbAutomationSchedule,
+} from "@prisma/client";
 import * as automationRepository from "./automation.repository.js";
 import * as automationApi from "./automation.api.js";
 import { logger } from "../../shared/logger.js";
+import { cronMatches, parseCronExpression } from "./automation.cron.js";
+import { NotFoundError, ValidationError } from "../../shared/errors.js";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function getString(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+type ExternalFicheSummary = {
+  id: string;
+  cle?: string;
+  statut?: string;
+  nom?: string;
+  prenom?: string;
+  email?: string;
+  telephone?: string;
+  telephone_2?: string;
+};
+
+function toExternalFicheSummary(value: unknown): ExternalFicheSummary | null {
+  if (!isRecord(value)) return null;
+  const idRaw = getString(value.id);
+  if (!idRaw) return null;
+
+  const pick = (key: string): string | undefined => {
+    const v = (value as Record<string, unknown>)[key];
+    return typeof v === "string" && v.trim() ? v : undefined;
+  };
+
+  return {
+    id: idRaw,
+    cle: pick("cle"),
+    statut: pick("statut"),
+    nom: pick("nom"),
+    prenom: pick("prenom"),
+    email: pick("email"),
+    telephone: pick("telephone"),
+    telephone_2: pick("telephone_2"),
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function toTranscriptionPriority(value: unknown): TranscriptionPriority {
+  return value === "low" || value === "normal" || value === "high" ? value : "normal";
+}
+
+function toAutomationRunStatus(value: unknown): AutomationRunStatus {
+  return value === "pending" ||
+    value === "running" ||
+    value === "completed" ||
+    value === "partial" ||
+    value === "failed"
+    ? value
+    : "failed";
+}
+
+function toAutomationLogLevel(value: unknown): AutomationLogLevel {
+  return value === "debug" || value === "info" || value === "warning" || value === "error"
+    ? value
+    : "info";
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SCHEDULE BUSINESS LOGIC
@@ -147,6 +224,140 @@ export function getNextRunTime(
   // For CRON type, you'd need to parse the cron expression
   // For now, return null
   return null;
+}
+
+/**
+ * Find the most recent scheduled time (<= now) within the last `windowMinutes`.
+ * Used by the scheduler tick to decide whether a schedule is due.
+ */
+export function getMostRecentScheduledTimeWithinWindow(params: {
+  cronExpression: string;
+  now: Date;
+  windowMinutes: number;
+  timezone?: string;
+}): Date | null {
+  const cronExpression = params.cronExpression;
+  const windowMinutes = Math.max(1, Math.floor(params.windowMinutes));
+  const timezone = params.timezone || "UTC";
+
+  const spec = parseCronExpression(cronExpression);
+
+  // Truncate to the minute to avoid missing matches due to seconds
+  const base = new Date(params.now);
+  base.setSeconds(0, 0);
+
+  for (let i = 0; i <= windowMinutes; i++) {
+    const candidate = new Date(base.getTime() - i * 60 * 1000);
+    const parts = getDatePartsInTimeZone(candidate, timezone);
+
+    // Day-of-week in parts is 0-6 (Sun-Sat)
+    if (
+      cronMatches(spec, {
+        minute: parts.minute,
+        hour: parts.hour,
+        dayOfMonth: parts.dayOfMonth,
+        month: parts.month,
+        dayOfWeek: parts.dayOfWeek,
+      })
+    ) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+export function getCronExpressionForSchedule(params: {
+  scheduleType: ScheduleType;
+  cronExpression?: string | null;
+  timeOfDay?: string | null;
+  dayOfWeek?: number | null;
+  dayOfMonth?: number | null;
+}): string | null {
+  const scheduleType = params.scheduleType;
+  if (scheduleType === "MANUAL") return null;
+
+  if (scheduleType === "CRON") {
+    return params.cronExpression || null;
+  }
+
+  return generateCronExpression(
+    scheduleType,
+    params.timeOfDay || null,
+    params.dayOfWeek ?? null,
+    params.dayOfMonth ?? null,
+    null
+  );
+}
+
+function getDatePartsInTimeZone(
+  date: Date,
+  timeZone: string
+): {
+  year: number;
+  month: number; // 1-12
+  dayOfMonth: number; // 1-31
+  dayOfWeek: number; // 0-6 (Sun-Sat)
+  hour: number; // 0-23
+  minute: number; // 0-59
+} {
+  const tz = timeZone && timeZone.trim() ? timeZone.trim() : "UTC";
+
+  let fmt: Intl.DateTimeFormat;
+  try {
+    fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      weekday: "short",
+      hour12: false,
+    });
+  } catch {
+    // Invalid timezone -> fallback to UTC
+    fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: "UTC",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      weekday: "short",
+      hour12: false,
+    });
+  }
+
+  const parts = fmt.formatToParts(date);
+  const map: Record<string, string> = {};
+  for (const p of parts) {
+    if (p.type !== "literal") map[p.type] = p.value;
+  }
+
+  const weekdayStr = map.weekday;
+  const weekdayMap: Record<string, number> = {
+    Sun: 0,
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+  };
+
+  const dayOfWeek = weekdayStr && weekdayMap[weekdayStr] !== undefined ? weekdayMap[weekdayStr] : date.getUTCDay();
+  const hourRaw = Number(map.hour);
+  const hour = hourRaw === 24 ? 0 : hourRaw;
+
+  return {
+    year: Number(map.year),
+    month: Number(map.month),
+    dayOfMonth: Number(map.day),
+    dayOfWeek,
+    hour,
+    minute: Number(map.minute),
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -275,7 +486,7 @@ function parseDateDDMMYYYY(dateStr: string): Date {
  * Note: /by-date returns basic data WITHOUT recordings
  */
 export function processFichesData(
-  fiches: any[],
+  fiches: unknown[],
   maxFiches?: number,
   onlyWithRecordings?: boolean
 ): ProcessedFicheData {
@@ -293,17 +504,8 @@ export function processFichesData(
 
   // Extract fiche IDs and cles (needed for detailed fetch later)
   const fichesWithIds = fiches
-    .filter((fiche: any) => fiche.id) // Must have an ID
-    .map((fiche: any) => ({
-      id: fiche.id,
-      cle: fiche.cle,
-      statut: fiche.statut,
-      nom: fiche.nom,
-      prenom: fiche.prenom,
-      email: fiche.email,
-      telephone: fiche.telephone,
-      telephone_2: fiche.telephone_2,
-    }));
+    .map(toExternalFicheSummary)
+    .filter((fiche): fiche is ExternalFicheSummary => fiche !== null);
 
   // Apply max limit
   const limitedFiches = fichesWithIds.slice(
@@ -321,7 +523,7 @@ export function processFichesData(
   });
 
   // Store basic data (will be used if we can't fetch detailed later)
-  const fichesData = limitedFiches.map((fiche: any) => ({
+  const fichesData = limitedFiches.map((fiche) => ({
     id: fiche.id,
     cle: fiche.cle,
     statut: fiche.statut,
@@ -395,9 +597,9 @@ export async function fetchFichesBySelection(
       );
       logger.debug(`Fetched ${dateFiches.length} fiches for ${date}`);
       return dateFiches;
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.error(`Failed to fetch fiches for ${date}`, {
-        error: error.message,
+        error: errorMessage(error),
       });
       return [];
     }
@@ -429,25 +631,25 @@ export async function createAutomationSchedule(
 
   // Business validation: Check schedule type requirements
   if (input.scheduleType === "DAILY" && !input.timeOfDay) {
-    throw new Error("DAILY schedule requires timeOfDay");
+    throw new ValidationError("DAILY schedule requires timeOfDay");
   }
 
   if (
     input.scheduleType === "WEEKLY" &&
     (!input.timeOfDay || input.dayOfWeek === undefined)
   ) {
-    throw new Error("WEEKLY schedule requires timeOfDay and dayOfWeek");
+    throw new ValidationError("WEEKLY schedule requires timeOfDay and dayOfWeek");
   }
 
   if (
     input.scheduleType === "MONTHLY" &&
     (!input.timeOfDay || !input.dayOfMonth)
   ) {
-    throw new Error("MONTHLY schedule requires timeOfDay and dayOfMonth");
+    throw new ValidationError("MONTHLY schedule requires timeOfDay and dayOfMonth");
   }
 
   if (input.scheduleType === "CRON" && !input.cronExpression) {
-    throw new Error("CRON schedule requires cronExpression");
+    throw new ValidationError("CRON schedule requires cronExpression");
   }
 
   // Generate cron expression if not provided
@@ -536,21 +738,21 @@ export async function updateAutomationSchedule(
 
   // Business validation: Check schedule type requirements if being updated
   if (input.scheduleType === "DAILY" && input.timeOfDay === null) {
-    throw new Error("DAILY schedule requires timeOfDay");
+    throw new ValidationError("DAILY schedule requires timeOfDay");
   }
 
   if (
     input.scheduleType === "WEEKLY" &&
     (input.timeOfDay === null || input.dayOfWeek === null)
   ) {
-    throw new Error("WEEKLY schedule requires timeOfDay and dayOfWeek");
+    throw new ValidationError("WEEKLY schedule requires timeOfDay and dayOfWeek");
   }
 
   if (
     input.scheduleType === "MONTHLY" &&
     (input.timeOfDay === null || input.dayOfMonth === null)
   ) {
-    throw new Error("MONTHLY schedule requires timeOfDay and dayOfMonth");
+    throw new ValidationError("MONTHLY schedule requires timeOfDay and dayOfMonth");
   }
 
   // Delegate to repository (it handles cron regeneration)
@@ -675,7 +877,7 @@ export async function getAutomationLogs(
 /**
  * Transform schedule from database (BigInt) to API (string)
  */
-function transformScheduleToApi(schedule: any): AutomationSchedule {
+function transformScheduleToApi(schedule: DbAutomationSchedule): AutomationSchedule {
   return {
     id: schedule.id.toString(),
     name: schedule.name,
@@ -690,16 +892,14 @@ function transformScheduleToApi(schedule: any): AutomationSchedule {
     timeOfDay: schedule.timeOfDay,
     dayOfWeek: schedule.dayOfWeek,
     dayOfMonth: schedule.dayOfMonth,
-    ficheSelection: schedule.ficheSelection,
+    ficheSelection: schedule.ficheSelection as unknown as FicheSelection,
     runTranscription: schedule.runTranscription,
     skipIfTranscribed: schedule.skipIfTranscribed,
-    transcriptionPriority: schedule.transcriptionPriority,
+    transcriptionPriority: toTranscriptionPriority(schedule.transcriptionPriority),
     runAudits: schedule.runAudits,
     useAutomaticAudits: schedule.useAutomaticAudits,
     specificAuditConfigs: schedule.specificAuditConfigs
-      ? schedule.specificAuditConfigs.map((id: any) =>
-          typeof id === "bigint" ? id.toString() : String(id)
-        )
+      ? schedule.specificAuditConfigs.map((id) => id.toString())
       : [],
     continueOnError: schedule.continueOnError,
     retryFailed: schedule.retryFailed,
@@ -721,33 +921,31 @@ function transformScheduleToApi(schedule: any): AutomationSchedule {
  * Transform schedule with runs from database to API
  */
 function transformScheduleWithRunsToApi(
-  schedule: any
+  schedule: DbAutomationSchedule & { runs: DbAutomationRun[] }
 ): AutomationScheduleWithRuns {
   return {
     ...transformScheduleToApi(schedule),
-    runs: schedule.runs
-      ? schedule.runs.map((run: any) => ({
-          id: run.id.toString(),
-          status: run.status,
-          startedAt: run.startedAt,
-          completedAt: run.completedAt,
-          durationMs: run.durationMs,
-          totalFiches: run.totalFiches,
-          successfulFiches: run.successfulFiches,
-          failedFiches: run.failedFiches,
-        }))
-      : [],
+    runs: schedule.runs.map((run) => ({
+      id: run.id.toString(),
+      status: toAutomationRunStatus(run.status),
+      startedAt: run.startedAt,
+      completedAt: run.completedAt,
+      durationMs: run.durationMs,
+      totalFiches: run.totalFiches,
+      successfulFiches: run.successfulFiches,
+      failedFiches: run.failedFiches,
+    })),
   };
 }
 
 /**
  * Transform run from database to API
  */
-function transformRunToApi(run: any): AutomationRun {
+function transformRunToApi(run: DbAutomationRun): AutomationRun {
   return {
     id: run.id.toString(),
     scheduleId: run.scheduleId.toString(),
-    status: run.status,
+    status: toAutomationRunStatus(run.status),
     startedAt: run.startedAt,
     completedAt: run.completedAt,
     durationMs: run.durationMs,
@@ -766,29 +964,29 @@ function transformRunToApi(run: any): AutomationRun {
 /**
  * Transform run with logs from database to API
  */
-function transformRunWithLogsToApi(run: any): AutomationRunWithLogs {
+function transformRunWithLogsToApi(
+  run: DbAutomationRun & { logs: DbAutomationLog[] }
+): AutomationRunWithLogs {
   return {
     ...transformRunToApi(run),
-    logs: run.logs
-      ? run.logs.map((log: any) => ({
-          id: log.id.toString(),
-          level: log.level,
-          message: log.message,
-          timestamp: log.timestamp,
-          metadata: log.metadata,
-        }))
-      : [],
+    logs: run.logs.map((log) => ({
+      id: log.id.toString(),
+      level: toAutomationLogLevel(log.level),
+      message: log.message,
+      timestamp: log.timestamp,
+      metadata: log.metadata,
+    })),
   };
 }
 
 /**
  * Transform log from database to API
  */
-function transformLogToApi(log: any): AutomationLog {
+function transformLogToApi(log: DbAutomationLog): AutomationLog {
   return {
     id: log.id.toString(),
     runId: log.runId.toString(),
-    level: log.level,
+    level: toAutomationLogLevel(log.level),
     message: log.message,
     timestamp: log.timestamp,
     metadata: log.metadata,

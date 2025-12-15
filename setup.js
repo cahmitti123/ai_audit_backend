@@ -1,5 +1,12 @@
 /**
- * Setup - Copie les fichiers nécessaires depuis le dossier parent
+ * Setup
+ * =====
+ * Minimal, safe bootstrap for local development.
+ *
+ * - Creates required folders (`config/`, `data/`)
+ * - Creates `.env` from `.env.example` if missing
+ *
+ * NOTE: Never copy real secrets from outside this repo.
  */
 
 import { copyFileSync, mkdirSync, existsSync } from "fs";
@@ -7,33 +14,31 @@ import { resolve } from "path";
 
 console.log("\n🔧 Setup AI Audit System...\n");
 
-// Créer dossiers
-const dirs = ["./config", "./data"];
-dirs.forEach((dir) => {
+// Ensure folders exist
+for (const dir of ["./config", "./data"]) {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
-    console.log(`✓ Créé: ${dir}`);
+    console.log(`✓ Created: ${dir}`);
   }
-});
+}
 
-// Copier fichiers de config depuis parent
-const files = [
-  ["../audit_config_18_points.json", "./config/audit_config_18_points.json"],
-  [
-    "../ressources/ventes/Fiche N°1762209 - Christine BADIN - 26-09-2025/api-response-recordings.json",
-    "./config/api-response-recordings.json",
-  ],
-  ["../.env", "./.env"],
-];
-
-files.forEach(([src, dest]) => {
+// Create .env from example if missing
+if (!existsSync("./.env")) {
+  const src = "./.env.example";
+  const dest = "./.env";
   try {
     copyFileSync(resolve(src), resolve(dest));
-    console.log(`✓ Copié: ${src} → ${dest}`);
+    console.log(`✓ Created: ${dest} (from ${src})`);
+    console.log("  → Please edit .env and set your credentials/API keys.");
   } catch (e) {
-    console.error(`❌ Erreur copie ${src}:`, e.message);
+    console.error("❌ Failed to create .env from .env.example:", e.message);
   }
-});
+} else {
+  console.log("✓ .env already exists (skipping)");
+}
 
-console.log("\n✅ Setup terminé!\n");
-console.log("Lancez maintenant: npm run pipeline\n");
+console.log("\n✅ Setup complete.\n");
+console.log("Next steps:");
+console.log("  - npm install");
+console.log("  - npx prisma migrate dev");
+console.log("  - npm run dev\n");

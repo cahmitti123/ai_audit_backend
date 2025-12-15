@@ -9,10 +9,151 @@ import { NonRetriableError } from "inngest";
 import * as automationRepository from "./automation.repository.js";
 import * as automationService from "./automation.service.js";
 import * as automationApi from "./automation.api.js";
+import { validateFicheSelection } from "./automation.schemas.js";
 import { TIMEOUTS } from "../../shared/constants.js";
 import { runAuditFunction } from "../audits/audits.workflows.js";
 import { fetchFicheFunction } from "../fiches/fiches.workflows.js";
 import { transcribeFicheFunction } from "../transcriptions/transcriptions.workflows.js";
+import type {
+  AutomationLogLevel,
+  FicheSelection,
+  ScheduleType,
+  TranscriptionPriority,
+} from "./automation.schemas.js";
+import type { RecordingLike } from "../../utils/recording-parser.js";
+
+type WorkflowSchedule = {
+  id: string;
+  name: string;
+  scheduleType: ScheduleType;
+  ficheSelection: FicheSelection;
+  externalApiKey: string | null;
+  runTranscription: boolean;
+  skipIfTranscribed: boolean;
+  transcriptionPriority: TranscriptionPriority;
+  runAudits: boolean;
+  useAutomaticAudits: boolean;
+  specificAuditConfigs: number[];
+  continueOnError: boolean;
+  retryFailed: boolean;
+  maxRetries: number;
+  notifyOnComplete: boolean;
+  notifyOnError: boolean;
+  webhookUrl: string | null;
+  notifyEmails: string[];
+};
+
+type ActiveScheduleSerializable = {
+  id: string;
+  name: string;
+  scheduleType: ScheduleType;
+  cronExpression: string | null;
+  timezone: string;
+  timeOfDay: string | null;
+  dayOfWeek: number | null;
+  dayOfMonth: number | null;
+  lastRunAt: string | null;
+};
+
+type DueSchedule = {
+  id: string;
+  name: string;
+  scheduleType: ScheduleType;
+  cronExpression: string;
+  dueAt: string;
+  lastRun: string;
+};
+
+type TriggerResult =
+  | { schedule_id: string; name: string; status: "triggered"; dueAt: string }
+  | { schedule_id: string; name: string; status: "failed"; dueAt: string; error: string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function toTranscriptionPriority(value: unknown): TranscriptionPriority {
+  return value === "low" || value === "normal" || value === "high" ? value : "normal";
+}
+
+function toScheduleType(value: unknown): ScheduleType {
+  return value === "MANUAL" ||
+    value === "DAILY" ||
+    value === "WEEKLY" ||
+    value === "MONTHLY" ||
+    value === "CRON"
+    ? value
+    : "MANUAL";
+}
+
+function toBigIntId(value: number | string): bigint {
+  const raw = String(value).trim();
+  if (!raw) throw new NonRetriableError("Missing schedule_id");
+  try {
+    return BigInt(raw);
+  } catch {
+    throw new NonRetriableError(`Invalid schedule_id: ${raw}`);
+  }
+}
+
+function getStringField(obj: Record<string, unknown>, key: string): string | null {
+  const v = obj[key];
+  return typeof v === "string" ? v : null;
+}
+
+function getFicheId(value: unknown): string | null {
+  if (!isRecord(value)) return null;
+  const a = getStringField(value, "ficheId");
+  if (a) return a;
+  const b = getStringField(value, "fiche_id");
+  if (b) return b;
+  const c = getStringField(value, "id");
+  if (c) return c;
+  const n = value.id;
+  if (typeof n === "number" && Number.isFinite(n)) return String(n);
+  return null;
+}
+
+function toSalesSummaryCacheInput(value: unknown): {
+  id: string;
+  cle: string;
+  nom: string;
+  prenom: string;
+  email: string;
+  telephone: string;
+  recordings?: RecordingLike[];
+} | null {
+  if (!isRecord(value)) return null;
+
+  const id = getFicheId(value);
+  const cle = getStringField(value, "cle");
+  if (!id || !cle) return null;
+
+  const recordingsRaw = value.recordings;
+  const recordings = Array.isArray(recordingsRaw)
+    ? recordingsRaw.filter(isRecord).map((r) => r as RecordingLike)
+    : undefined;
+
+  return {
+    id,
+    cle,
+    nom: getStringField(value, "nom") || "",
+    prenom: getStringField(value, "prenom") || "",
+    email: getStringField(value, "email") || "",
+    telephone: getStringField(value, "telephone") || "",
+    ...(recordings ? { recordings } : {}),
+  };
+}
+
+function toLogContext(metadata: unknown): Record<string, unknown> | undefined {
+  if (metadata === undefined) return undefined;
+  if (isRecord(metadata)) return metadata;
+  return { metadata };
+}
 
 /**
  * Run Automation Function
@@ -35,6 +176,7 @@ export const runAutomationFunction = inngest.createFunction(
   { event: "automation/run" },
   async ({ event, step, logger }) => {
     const { schedule_id, override_fiche_selection } = event.data;
+    const scheduleId = toBigIntId(schedule_id);
 
     // Capture start time in a step to persist it across Inngest checkpoints
     const startTime = await step.run(
@@ -47,10 +189,9 @@ export const runAutomationFunction = inngest.createFunction(
     logger.info("Starting automation run", { schedule_id });
 
     // Step 1: Load schedule configuration
-    const schedule = await step.run("load-schedule", async () => {
-      const scheduleData = await automationRepository.getAutomationScheduleById(
-        BigInt(schedule_id)
-      );
+    const schedule = await step.run("load-schedule", async (): Promise<WorkflowSchedule> => {
+      const scheduleData =
+        await automationRepository.getAutomationScheduleById(scheduleId);
       if (!scheduleData) {
         throw new NonRetriableError(`Schedule ${schedule_id} not found`);
       }
@@ -58,14 +199,39 @@ export const runAutomationFunction = inngest.createFunction(
         throw new NonRetriableError(`Schedule ${schedule_id} is not active`);
       }
 
-      // Convert BigInt values to numbers for JSON serialization
-      // Inngest steps can't return BigInts as they're not JSON-serializable
+      const ficheSelection = validateFicheSelection(scheduleData.ficheSelection);
+
+      // Inngest step results must be JSON-serializable.
+      // Convert BigInt values explicitly.
+      const specificAuditConfigs = (scheduleData.specificAuditConfigs || [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0);
+
       return {
-        ...scheduleData,
-        specificAuditConfigs:
-          scheduleData.specificAuditConfigs?.map((id: any) =>
-            typeof id === "bigint" ? Number(id) : id
-          ) || [],
+        id: String(scheduleData.id),
+        name: scheduleData.name,
+        scheduleType: toScheduleType(scheduleData.scheduleType),
+        ficheSelection,
+        externalApiKey: scheduleData.externalApiKey,
+
+        runTranscription: Boolean(scheduleData.runTranscription),
+        skipIfTranscribed: Boolean(scheduleData.skipIfTranscribed),
+        transcriptionPriority: toTranscriptionPriority(scheduleData.transcriptionPriority),
+
+        runAudits: Boolean(scheduleData.runAudits),
+        useAutomaticAudits: Boolean(scheduleData.useAutomaticAudits),
+        specificAuditConfigs,
+
+        continueOnError: Boolean(scheduleData.continueOnError),
+        retryFailed: Boolean(scheduleData.retryFailed),
+        maxRetries: Number(scheduleData.maxRetries || 0),
+
+        notifyOnComplete: Boolean(scheduleData.notifyOnComplete),
+        notifyOnError: Boolean(scheduleData.notifyOnError),
+        webhookUrl: scheduleData.webhookUrl,
+        notifyEmails: Array.isArray(scheduleData.notifyEmails)
+          ? scheduleData.notifyEmails
+          : [],
       };
     });
 
@@ -93,29 +259,36 @@ export const runAutomationFunction = inngest.createFunction(
     logger.info("Run record created", { run_id: runIdString });
 
     // Helper to add logs
-    const log = async (level: string, message: string, metadata?: any) => {
+    const log = async (
+      level: AutomationLogLevel,
+      message: string,
+      metadata?: unknown
+    ) => {
       await automationRepository.addAutomationLog(
         runId,
         level,
         message,
         metadata
       );
-      logger.info(message, metadata);
+      const ctx = toLogContext(metadata);
+      if (level === "debug") logger.debug(message, ctx);
+      else if (level === "warning") logger.warn(message, ctx);
+      else if (level === "error") logger.error(message, ctx);
+      else logger.info(message, ctx);
     };
 
     try {
       // Step 3: Calculate dates to query
-      const selection =
-        override_fiche_selection || (schedule.ficheSelection as any);
+      const selection = override_fiche_selection ?? schedule.ficheSelection;
       const apiKey = schedule.externalApiKey || undefined;
 
       // Declare variables that will be set in either manual or API mode
       let ficheIds: string[] = [];
-      let fichesData: any[] = [];
-      let fichesCles: Record<string, string> = {};
 
       // Step 3a: Handle manual mode
       if (selection.mode === "manual" && selection.ficheIds) {
+        const rawFicheIds = selection.ficheIds;
+        const maxFiches = selection.maxFiches;
         const manualResult = await step.run(
           "process-manual-fiches",
           async () => {
@@ -123,27 +296,25 @@ export const runAutomationFunction = inngest.createFunction(
 
             // Parse fiche IDs - handle various separators (spaces, commas, mixed)
             // Split on any combination of commas, spaces, tabs, newlines
-            const allIds = selection.ficheIds
+            const allIds = rawFicheIds
               .flatMap((id: string) => id.trim().split(/[\s,]+/))
               .filter(Boolean) // Remove empty strings
               .map((id: string) => id.trim()); // Trim each ID
 
             const limitedIds = allIds.slice(
               0,
-              selection.maxFiches || allIds.length
+              maxFiches || allIds.length
             );
             await log(
               "info",
               `Using ${limitedIds.length} manually selected fiches`,
               { ficheIds: limitedIds }
             );
-            return { ficheIds: limitedIds, fichesData: [], cles: {} };
+            return { ficheIds: limitedIds };
           }
         );
 
         ficheIds = manualResult.ficheIds;
-        fichesData = manualResult.fichesData;
-        fichesCles = manualResult.cles;
 
         if (ficheIds.length === 0) {
           await log("warning", "No fiches in manual selection");
@@ -218,7 +389,7 @@ export const runAutomationFunction = inngest.createFunction(
         }
 
         // Step 3c: Fetch fiches (DB-first, then API for missing with max 3 concurrent)
-        const allFiches = await step.run("fetch-all-fiches", async () => {
+        const allFiches = await step.run("fetch-all-fiches", async (): Promise<unknown[]> => {
           const { getFichesByDateRangeWithStatus } = await import("../fiches/fiches.service.js");
           const { hasDataForDate } = await import("../fiches/fiches.repository.js");
           
@@ -256,7 +427,7 @@ export const runAutomationFunction = inngest.createFunction(
           await log("info", `Loaded ${dbResult.fiches.length} fiches from DB`);
           
           // Fetch missing dates from API (max 3 concurrent)
-          const apiFiches: any[] = [];
+          const apiFiches: unknown[] = [];
           if (datesMissing.length > 0) {
             await log("info", `Fetching ${datesMissing.length} missing dates from API (max 3 concurrent)`);
             
@@ -269,24 +440,18 @@ export const runAutomationFunction = inngest.createFunction(
                     await log("info", `Fetched ${fiches.length} fiches for ${date} from API`);
                     
                     // Cache them
+                    const { cacheFicheSalesSummary } = await import("../fiches/fiches.cache.js");
                     for (const fiche of fiches) {
-                      if (fiche.cle) {
-                        const { cacheFicheSalesSummary } = await import("../fiches/fiches.cache.js");
-                        await cacheFicheSalesSummary({
-                          id: fiche.id,
-                          cle: fiche.cle,
-                          nom: fiche.nom,
-                          prenom: fiche.prenom,
-                          email: fiche.email,
-                          telephone: fiche.telephone,
-                          recordings: fiche.recordings,
-                        }, { salesDate: convertDate(date) });
-                      }
+                      const cacheInput = toSalesSummaryCacheInput(fiche);
+                      if (!cacheInput) continue;
+                      await cacheFicheSalesSummary(cacheInput, {
+                        salesDate: convertDate(date),
+                      });
                     }
                     
                     return fiches;
-                  } catch (error: any) {
-                    await log("error", `Failed to fetch ${date}: ${error.message}`);
+                  } catch (error: unknown) {
+                    await log("error", `Failed to fetch ${date}: ${errorMessage(error)}`);
                     return [];
                   }
                 })
@@ -309,17 +474,16 @@ export const runAutomationFunction = inngest.createFunction(
         // Process fiches (extract IDs)
         await log("info", `Processing ${allFiches.length} fiches from DB+API`);
         
-        // Extract all IDs
-        const allIds = allFiches.map(f => f.ficheId || f.fiche_id || f.id).filter(Boolean);
-        
-        // Apply recording filter if needed
-        let filteredFiches = allFiches;
+        // NOTE: Do NOT filter by recordings here.
+        // Date-range lists are often "sales list only" until we fetch fiche details.
+        // We'll fetch fiche details in the next step and then determine which fiches truly have recordings.
+        let filteredFiches: unknown[] = allFiches;
         if (selection.onlyWithRecordings) {
-          filteredFiches = allFiches.filter(f => {
-            const recCount = f.transcription?.total || f.recordingsCount || (f.recordings?.length || 0);
-            return recCount > 0;
-          });
-          await log("info", `Filtered to ${filteredFiches.length}/${allFiches.length} fiches with recordings`);
+          await log(
+            "info",
+            "onlyWithRecordings is enabled - will filter AFTER fetching fiche details",
+            { totalCandidates: allFiches.length }
+          );
         }
         
         // Apply max limit
@@ -329,9 +493,9 @@ export const runAutomationFunction = inngest.createFunction(
         }
         
         // Extract final IDs
-        ficheIds = filteredFiches.map(f => f.ficheId || f.fiche_id || f.id).filter(Boolean);
-        fichesData = filteredFiches;
-        fichesCles = {};
+        ficheIds = filteredFiches
+          .map(getFicheId)
+          .filter((id): id is string => typeof id === "string" && id.length > 0);
         
         await log("info", `Final: ${ficheIds.length} fiches to process`);
       }
@@ -384,63 +548,147 @@ export const runAutomationFunction = inngest.createFunction(
         audits: 0,
       };
 
-      // STEP 1: Ensure all fiches cached (in batches to avoid API overload)
-      const {
-        withRecordings: fichesWithRecordings,
-        withoutRecordings: fichesWithoutRecordings,
-      } = await step.run("ensure-all-fiches-cached", async () => {
-        const { getFicheWithCache } = await import("../fiches/fiches.cache.js");
+      // STEP 1: Ensure all fiches have FULL details cached (distributed across replicas)
+      await log(
+        "info",
+        `Ensuring fiche details via distributed 'fiche/fetch' fan-out (${ficheIds.length} fiches)`
+      );
 
-        // Process in batches of 50 to avoid overwhelming the API
-        const FETCH_BATCH_SIZE = 50;
-        const allResults = [];
+      await step.sendEvent(
+        "fan-out-fiche-fetches",
+        ficheIds.map((ficheId, idx) => ({
+          name: "fiche/fetch",
+          data: {
+            fiche_id: ficheId,
+            force_refresh: false,
+          },
+          // Deterministic id: retries won't dispatch duplicate fetches for the same run+fiche
+          id: `automation-${runIdString}-fetch-${ficheId}`,
+        }))
+      );
 
-        for (let i = 0; i < ficheIds.length; i += FETCH_BATCH_SIZE) {
-          const batchIds = ficheIds.slice(i, i + FETCH_BATCH_SIZE);
-          await log(
-            "info",
-            `Fetching batch ${Math.floor(i / FETCH_BATCH_SIZE) + 1}/${Math.ceil(
-              ficheIds.length / FETCH_BATCH_SIZE
-            )} (${batchIds.length} fiches)`
-          );
+      // Durable wait (no in-step busy polling): poll DB snapshot with `step.run` + `step.sleep`.
+      const ficheDetailsMaxWaitMs = Math.max(
+        60_000,
+        Number(
+          process.env.AUTOMATION_FICHE_DETAILS_MAX_WAIT_MS || 10 * 60 * 1000
+        )
+      );
+      const ficheDetailsPollIntervalSeconds = Math.max(
+        5,
+        Number(process.env.AUTOMATION_FICHE_DETAILS_POLL_INTERVAL_SECONDS || 20)
+      );
 
-          const batchResults = await Promise.allSettled(
-            batchIds.map(async (ficheId) => {
-              const ficheData = await getFicheWithCache(ficheId);
+      const ficheDetailsStarted = Date.now();
+      let lastReady = 0;
+      let stableCount = 0;
+      let lastSnapshot: Array<{
+        ficheId: string;
+        exists: boolean;
+        recordingsCount: number | null;
+        hasRecordings: boolean;
+        isSalesListOnly: boolean;
+      }> = [];
+
+      let ficheDetailsPollAttempt = 0;
+      while (Date.now() - ficheDetailsStarted < ficheDetailsMaxWaitMs) {
+        lastSnapshot = await step.run(
+          `poll-fiche-details-${runIdString}-${ficheDetailsPollAttempt}`,
+          async () => {
+            const { prisma } = await import("../../shared/prisma.js");
+
+            const rows = await prisma.ficheCache.findMany({
+              where: { ficheId: { in: ficheIds } },
+              select: {
+                ficheId: true,
+                recordingsCount: true,
+                hasRecordings: true,
+                rawData: true,
+              },
+            });
+
+            const byId = new Map(rows.map((r) => [r.ficheId, r]));
+
+            return ficheIds.map((id) => {
+              const r = byId.get(id);
+              if (!r) {
+                return {
+                  ficheId: id,
+                  exists: false,
+                  recordingsCount: null,
+                  hasRecordings: false,
+                  isSalesListOnly: true,
+                };
+              }
+              const raw = r.rawData ?? null;
+              const isSalesListOnly = isRecord(raw) && raw._salesListOnly === true;
               return {
-                ficheId,
-                recordingsCount: (ficheData as any).recordings?.length || 0,
+                ficheId: id,
+                exists: true,
+                recordingsCount: r.recordingsCount ?? null,
+                hasRecordings: Boolean(r.hasRecordings),
+                isSalesListOnly,
               };
-            })
-          );
-
-          allResults.push(...batchResults);
-
-          // Small delay between batches
-          if (i + FETCH_BATCH_SIZE < ficheIds.length) {
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-          }
-        }
-
-        const fetchResults = allResults;
-
-        const withRecordings: string[] = [];
-        const withoutRecordings: string[] = [];
-
-        for (let i = 0; i < fetchResults.length; i++) {
-          if (fetchResults[i].status === "fulfilled") {
-            const { ficheId, recordingsCount } = (fetchResults[i] as any).value;
-            if (recordingsCount > 0) withRecordings.push(ficheId);
-            else withoutRecordings.push(ficheId);
-          } else {
-            results.failed.push({
-              ficheId: ficheIds[i],
-              error: (fetchResults[i] as any).reason?.message,
             });
           }
+        );
+
+        const ready = lastSnapshot.filter(
+          (r) => r.exists && r.isSalesListOnly === false
+        ).length;
+
+        await log(
+          "info",
+          `Fiche details progress: ${ready}/${ficheIds.length}`
+        );
+
+        if (ready === ficheIds.length) break;
+
+        if (ready === lastReady) {
+          stableCount++;
+          if (stableCount >= 3) break; // likely some failed; proceed with what we have
+        } else {
+          stableCount = 0;
+          lastReady = ready;
         }
 
-        return { withRecordings, withoutRecordings };
+        ficheDetailsPollAttempt++;
+        await step.sleep(
+          `sleep-fiche-details-${runIdString}-${ficheDetailsPollAttempt}`,
+          `${ficheDetailsPollIntervalSeconds}s`
+        );
+      }
+
+      const ficheFetchFailures: Array<{ ficheId: string; error: string }> = [];
+      const fichesWithRecordings: string[] = [];
+      const fichesWithoutRecordings: string[] = [];
+
+      for (const snap of lastSnapshot) {
+        if (!snap.exists || snap.isSalesListOnly) {
+          ficheFetchFailures.push({
+            ficheId: snap.ficheId,
+            error: snap.exists
+              ? "Fiche details not fetched (still sales-list-only cache)"
+              : "Fiche not found in cache",
+          });
+          continue;
+        }
+
+        if ((snap.recordingsCount ?? 0) > 0 || snap.hasRecordings) {
+          fichesWithRecordings.push(snap.ficheId);
+        } else {
+          fichesWithoutRecordings.push(snap.ficheId);
+        }
+      }
+
+      // Merge failures into run results
+      results.failed.push(...ficheFetchFailures);
+
+      await log("info", "Fiche detail fetch complete (distributed)", {
+        total: ficheIds.length,
+        withRecordings: fichesWithRecordings.length,
+        withoutRecordings: fichesWithoutRecordings.length,
+        failed: results.failed.length,
       });
 
       // STEP 2: Fan out ALL transcriptions at once
@@ -459,93 +707,141 @@ export const runAutomationFunction = inngest.createFunction(
               priority:
                 (schedule.transcriptionPriority as "normal" | "high" | "low") ||
                 "normal",
+              // Automation doesn't need each fiche-level transcription orchestrator to block;
+              // we wait/poll at the automation level (and audits also ensure transcription when needed).
+              wait_for_completion: false,
             },
-            id: `transcribe-${ficheId}-${Date.now()}-${idx}`,
+            // Deterministic id: avoid duplicate transcription dispatch on retries
+            id: `automation-${runIdString}-transcribe-${ficheId}`,
           }))
         );
 
-        // Wait for transcriptions with smart completion detection
-        await step.run("wait-for-transcriptions", async () => {
-          const { getFicheTranscriptionStatus } = await import(
-            "../transcriptions/transcriptions.service.js"
+        // Durable wait (no in-step busy polling): poll status with `step.run` + `step.sleep`.
+        const transcriptionMaxWaitMs = Math.max(
+          60_000,
+          Number(process.env.AUTOMATION_TRANSCRIPTION_MAX_WAIT_MS || 15 * 60 * 1000)
+        );
+        const transcriptionPollIntervalSeconds = Math.max(
+          5,
+          Number(process.env.AUTOMATION_TRANSCRIPTION_POLL_INTERVAL_SECONDS || 30)
+        );
+
+        const transcriptionStarted = Date.now();
+        let lastCompleted = 0;
+        let stableCount = 0;
+        let transcriptionPollAttempt = 0;
+
+        while (Date.now() - transcriptionStarted < transcriptionMaxWaitMs) {
+          const completed = await step.run(
+            `poll-transcriptions-${runIdString}-${transcriptionPollAttempt}`,
+            async () => {
+              const { getFicheTranscriptionStatus } = await import(
+                "../transcriptions/transcriptions.service.js"
+              );
+
+              const statuses = await Promise.all(
+                fichesWithRecordings.map((id) => getFicheTranscriptionStatus(id))
+              );
+              return statuses.filter((s) => s.total && s.transcribed === s.total).length;
+            }
           );
 
-          const maxWait = 15 * 60 * 1000; // 15 min max
-          const pollInterval = 30000; // 30 seconds
-          const startTime = Date.now();
-          let lastCompleted = 0;
-          let stableCount = 0;
+          await log(
+            "info",
+            `Transcription progress: ${completed}/${fichesWithRecordings.length}`
+          );
 
-          while (Date.now() - startTime < maxWait) {
-            const statuses = await Promise.all(
-              fichesWithRecordings.map((id) => getFicheTranscriptionStatus(id))
-            );
-            const completed = statuses.filter(
-              (s) => s.total && s.transcribed === s.total
-            ).length;
-
+          if (completed === fichesWithRecordings.length) {
+            results.transcriptions = completed;
             await log(
               "info",
-              `Transcription progress: ${completed}/${fichesWithRecordings.length}`
+              `All transcriptions complete in ${Math.round(
+                (Date.now() - transcriptionStarted) / 1000
+              )}s!`
             );
+            break;
+          }
 
-            // Exit if all complete
-            if (completed === fichesWithRecordings.length) {
+          if (completed === lastCompleted) {
+            stableCount++;
+            if (stableCount >= 3) {
               results.transcriptions = completed;
               await log(
                 "info",
-                `All transcriptions complete in ${Math.round(
-                  (Date.now() - startTime) / 1000
-                )}s!`
+                `Transcriptions stable at ${completed}/${fichesWithRecordings.length} - continuing`
               );
-              return { completed };
+              break;
             }
-
-            // Exit if progress has stalled for 3 polls (likely some failed)
-            if (completed === lastCompleted) {
-              stableCount++;
-              if (stableCount >= 3) {
-                results.transcriptions = completed;
-                await log(
-                  "info",
-                  `Transcriptions stable at ${completed}/${fichesWithRecordings.length} - continuing`
-                );
-                return { completed };
-              }
-            } else {
-              stableCount = 0;
-              lastCompleted = completed;
-            }
-
-            await new Promise((resolve) => setTimeout(resolve, pollInterval));
+          } else {
+            stableCount = 0;
+            lastCompleted = completed;
           }
 
-          // Timeout - use whatever we have
+          transcriptionPollAttempt++;
+          await step.sleep(
+            `sleep-transcriptions-${runIdString}-${transcriptionPollAttempt}`,
+            `${transcriptionPollIntervalSeconds}s`
+          );
+        }
+
+        if (results.transcriptions === 0 && lastCompleted > 0) {
           results.transcriptions = lastCompleted;
-          await log("warning", `Transcription timeout - completed ${lastCompleted}/${fichesWithRecordings.length}`);
-          return { completed: lastCompleted };
-        });
+        }
+
+        if (results.transcriptions < fichesWithRecordings.length) {
+          await log(
+            "warning",
+            `Transcription timeout/stall - completed ${results.transcriptions}/${fichesWithRecordings.length}`
+          );
+
+          // Mark remaining fiches as failed to avoid reporting a false "completed" run.
+          const incomplete = await step.run(
+            `find-incomplete-transcriptions-${runIdString}`,
+            async () => {
+              const { getFicheTranscriptionStatus } = await import(
+                "../transcriptions/transcriptions.service.js"
+              );
+              const statuses = await Promise.all(
+                fichesWithRecordings.map((id) => getFicheTranscriptionStatus(id))
+              );
+              return statuses
+                .filter((s) => !(s.total && s.transcribed === s.total))
+                .map((s) => s.ficheId);
+            }
+          );
+
+          for (const ficheId of incomplete) {
+            results.failed.push({
+              ficheId,
+              error: "Transcription incomplete (timeout/stall)",
+            });
+          }
+        }
       }
 
       // STEP 3: Fan out ALL audits at once
       if (schedule.runAudits && fichesWithRecordings.length > 0) {
         const auditConfigIds = await step.run(
           "resolve-all-audit-configs",
-          async () => {
+          async (): Promise<number[]> => {
             let configIds: number[] = [];
 
-            if (schedule.specificAuditConfigs?.length > 0) {
+            if (schedule.specificAuditConfigs.length > 0) {
               configIds.push(
-                ...schedule.specificAuditConfigs
-                  .filter((id) => id && id !== 0)
-                  .map((id) => Number(id))
+                ...schedule.specificAuditConfigs.filter(
+                  (id) => Number.isFinite(id) && id > 0
+                )
               );
             }
 
             if (schedule.useAutomaticAudits) {
               const automaticConfigs =
                 await automationRepository.getAutomaticAuditConfigs();
-              configIds.push(...automaticConfigs.map((c) => Number(c.id)));
+              configIds.push(
+                ...automaticConfigs
+                  .map((c) => Number(c.id))
+                  .filter((id) => Number.isFinite(id) && id > 0)
+              );
             }
 
             configIds = [...new Set(configIds)];
@@ -561,8 +857,16 @@ export const runAutomationFunction = inngest.createFunction(
           }
         );
 
+        // Inngest JSONifies step outputs; be defensive and normalize to numbers
+        const auditConfigIdsClean = (auditConfigIds || []).filter(
+          (id) => Number.isFinite(id) && id > 0
+        );
+
         const auditTasks = fichesWithRecordings.flatMap((ficheId) =>
-          auditConfigIds.map((configId) => ({ ficheId, configId }))
+          auditConfigIdsClean.map((configId) => ({
+            ficheId,
+            configId: Number(configId),
+          }))
         );
 
         if (auditTasks.length > 0) {
@@ -575,71 +879,221 @@ export const runAutomationFunction = inngest.createFunction(
             "fan-out-all-audits",
             auditTasks.map(({ ficheId, configId }, idx) => ({
               name: "audit/run",
-              data: { fiche_id: ficheId, audit_config_id: configId },
-              id: `audit-${ficheId}-${configId}-${Date.now()}-${idx}`,
+              data: { fiche_id: ficheId, audit_config_id: Number(configId) },
+              // Deterministic id: avoid duplicate audit dispatch on retries
+              id: `automation-${runIdString}-audit-${ficheId}-${configId}`,
             }))
           );
 
-            // Poll for audits with smart completion detection
-            await step.run("wait-for-audits", async () => {
-              const { prisma } = await import("../../shared/prisma.js");
+          // Durable wait (no in-step busy polling): poll audit table with `step.run` + `step.sleep`.
+          const auditMaxWaitMs = Math.max(
+            60_000,
+            Number(process.env.AUTOMATION_AUDIT_MAX_WAIT_MS || 30 * 60 * 1000)
+          );
+          const auditPollIntervalSeconds = Math.max(
+            5,
+            Number(process.env.AUTOMATION_AUDIT_POLL_INTERVAL_SECONDS || 60)
+          );
 
-              const maxWait = 30 * 60 * 1000; // 30 min max
-              const pollInterval = 60000; // 60 seconds
-              const startTime = Date.now();
-              let lastCompleted = 0;
-              let stableCount = 0;
+          const auditWaitStarted = Date.now();
+          let lastDone = 0;
+          let stableCount = 0;
+          let auditPollAttempt = 0;
 
-              while (Date.now() - startTime < maxWait) {
-                const completed = await prisma.audit.count({
-                  where: {
-                    ficheCache: { ficheId: { in: fichesWithRecordings } },
-                    auditConfigId: { in: auditConfigIds.map((id) => BigInt(id)) },
-                    status: "completed",
-                  },
-                });
+          let completedAudits = 0;
+          let failedAudits = 0;
+          let doneAudits = 0;
 
+          while (Date.now() - auditWaitStarted < auditMaxWaitMs) {
+            const counts = await step.run(
+              `poll-audits-${runIdString}-${auditPollAttempt}`,
+              async () => {
+                const { prisma } = await import("../../shared/prisma.js");
+                const startedAt = new Date(
+                  typeof startTime === "number" && Number.isFinite(startTime)
+                    ? startTime
+                    : Date.now()
+                );
+                const configIds = auditConfigIdsClean.map((id) => BigInt(Number(id)));
+
+                const baseWhere = {
+                  ficheCache: { ficheId: { in: fichesWithRecordings } },
+                  auditConfigId: { in: configIds },
+                  createdAt: { gte: startedAt },
+                } as const;
+
+                const [completed, failed] = await Promise.all([
+                  prisma.audit.count({ where: { ...baseWhere, status: "completed" } }),
+                  prisma.audit.count({ where: { ...baseWhere, status: "failed" } }),
+                ]);
+
+                return { completed, failed };
+              }
+            );
+
+            completedAudits =
+              isRecord(counts) && typeof counts.completed === "number"
+                ? counts.completed
+                : 0;
+            failedAudits =
+              isRecord(counts) && typeof counts.failed === "number"
+                ? counts.failed
+                : 0;
+            doneAudits = completedAudits + failedAudits;
+
+            await log(
+              "info",
+              `Audit progress: ${doneAudits}/${auditTasks.length} (completed=${completedAudits}, failed=${failedAudits})`
+            );
+
+            if (doneAudits >= auditTasks.length) {
+              results.audits = doneAudits;
+              await log(
+                "info",
+                `All audits finished in ${Math.round(
+                  (Date.now() - auditWaitStarted) / 1000
+                )}s!`
+              );
+              break;
+            }
+
+            if (doneAudits === lastDone) {
+              stableCount++;
+              if (stableCount >= 3) {
+                results.audits = doneAudits;
                 await log(
                   "info",
-                  `Audit progress: ${completed}/${auditTasks.length}`
+                  `Audits stable at ${doneAudits}/${auditTasks.length} - continuing`
                 );
-
-                // Exit if all complete
-                if (completed === auditTasks.length) {
-                  results.audits = completed;
-                  results.successful = [...fichesWithRecordings];
-                  await log("info", `All audits complete in ${Math.round((Date.now() - startTime)/1000)}s!`);
-                  return { completed };
-                }
-
-                // Exit if progress has stalled for 3 polls (some may have failed)
-                if (completed === lastCompleted) {
-                  stableCount++;
-                  if (stableCount >= 3) {
-                    results.audits = completed;
-                    results.successful = [...fichesWithRecordings];
-                    await log("info", `Audits stable at ${completed}/${auditTasks.length} - continuing`);
-                    return { completed };
-                  }
-                } else {
-                  stableCount = 0;
-                  lastCompleted = completed;
-                }
-
-                await new Promise((resolve) => setTimeout(resolve, pollInterval));
+                break;
               }
+            } else {
+              stableCount = 0;
+              lastDone = doneAudits;
+            }
 
-              // Timeout - use whatever we have
-              results.audits = lastCompleted;
-              results.successful = [...fichesWithRecordings];
-              await log("warning", `Audit timeout - completed ${lastCompleted}/${auditTasks.length}`);
-              return { completed: lastCompleted };
-            });
+            auditPollAttempt++;
+            await step.sleep(
+              `sleep-audits-${runIdString}-${auditPollAttempt}`,
+              `${auditPollIntervalSeconds}s`
+            );
+          }
+
+          if (results.audits === 0 && doneAudits > 0) {
+            results.audits = doneAudits;
+          }
+
+          if (results.audits < auditTasks.length) {
+            await log(
+              "warning",
+              `Audit timeout/stall - finished ${results.audits}/${auditTasks.length} (completed=${completedAudits}, failed=${failedAudits})`
+            );
+          }
+
+          // Attribute failures/incomplete work to fiches so run status is accurate.
+          const auditFicheOutcomes = await step.run(
+            `summarize-audit-outcomes-${runIdString}`,
+            async () => {
+              const { prisma } = await import("../../shared/prisma.js");
+              const startedAt = new Date(
+                typeof startTime === "number" && Number.isFinite(startTime)
+                  ? startTime
+                  : Date.now()
+              );
+              const configIds = auditConfigIdsClean.map((id) => BigInt(Number(id)));
+
+              const rows = await prisma.audit.findMany({
+                where: {
+                  ficheCache: { ficheId: { in: fichesWithRecordings } },
+                  auditConfigId: { in: configIds },
+                  createdAt: { gte: startedAt },
+                },
+                select: {
+                  status: true,
+                  errorMessage: true,
+                  auditConfigId: true,
+                  ficheCache: { select: { ficheId: true } },
+                },
+              });
+
+              return rows.map((r) => ({
+                ficheId: r.ficheCache.ficheId,
+                status: r.status,
+                audit_config_id: r.auditConfigId.toString(),
+                error: r.errorMessage || null,
+              }));
+            }
+          );
+
+          const expectedConfigs = auditConfigIdsClean.map((id) => String(id));
+          const expectedCount = expectedConfigs.length;
+
+          const perFiche = new Map<
+            string,
+            { completed: Set<string>; failed: Set<string>; errors: string[] }
+          >();
+          for (const row of auditFicheOutcomes) {
+            const ficheId = isRecord(row) && typeof row.ficheId === "string" ? row.ficheId : null;
+            const status = isRecord(row) && typeof row.status === "string" ? row.status : null;
+            const cfg = isRecord(row) && typeof row.audit_config_id === "string" ? row.audit_config_id : null;
+            const err = isRecord(row) && typeof row.error === "string" ? row.error : null;
+            if (!ficheId || !status || !cfg) continue;
+
+            let agg = perFiche.get(ficheId);
+            if (!agg) {
+              agg = { completed: new Set(), failed: new Set(), errors: [] };
+              perFiche.set(ficheId, agg);
+            }
+
+            if (status === "completed") agg.completed.add(cfg);
+            if (status === "failed") {
+              agg.failed.add(cfg);
+              if (err) agg.errors.push(err);
+            }
+          }
+
+          for (const ficheId of fichesWithRecordings) {
+            const agg = perFiche.get(ficheId) || {
+              completed: new Set<string>(),
+              failed: new Set<string>(),
+              errors: [],
+            };
+
+            if (agg.failed.size > 0) {
+              results.failed.push({
+                ficheId,
+                error:
+                  agg.errors[0] ||
+                  `Audit failed (${agg.failed.size}/${expectedCount} config(s))`,
+              });
+              continue;
+            }
+
+            if (expectedCount > 0 && agg.completed.size < expectedCount) {
+              results.failed.push({
+                ficheId,
+                error: "Audit incomplete (timeout/stall)",
+              });
+            }
+          }
         }
       }
 
       // Step 6: Finalize run
       const durationMs = Date.now() - startTime!;
+
+      // Deduplicate failures (same fiche can fail multiple stages) and compute successful list.
+      const failedByFiche = new Map<string, { ficheId: string; error: string }>();
+      for (const f of results.failed) {
+        if (!f || typeof f.ficheId !== "string" || f.ficheId.length === 0) continue;
+        if (!failedByFiche.has(f.ficheId)) {
+          failedByFiche.set(f.ficheId, f);
+        }
+      }
+      results.failed = Array.from(failedByFiche.values());
+      const failedSet = new Set(results.failed.map((f) => f.ficheId));
+      results.successful = ficheIds.filter((id) => !failedSet.has(id));
+
       const finalStatus =
         results.failed.length === 0
           ? "completed"
@@ -750,28 +1204,29 @@ ${
         audits_run: results.audits,
         duration_ms: durationMs,
       };
-    } catch (error: any) {
+    } catch (error: unknown) {
       // Handle catastrophic failure
-      const durationMs = Date.now() - startTime!;
+      const durationMs = Date.now() - startTime;
+      const msg = errorMessage(error);
 
       await step.run("handle-failure", async () => {
         await automationRepository.updateAutomationRun(runId, {
           status: "failed",
           completedAt: new Date(),
           durationMs,
-          errorMessage: error.message,
-          errorDetails: {
-            stack: error.stack,
-            name: error.name,
-          },
+          errorMessage: msg,
+          errorDetails:
+            error instanceof Error
+              ? { stack: error.stack, name: error.name }
+              : { error: msg },
         });
 
         await automationRepository.updateScheduleStats(
-          BigInt(schedule_id),
+          scheduleId,
           "failed"
         );
-        await log("error", `Automation failed: ${error.message}`, {
-          error: error.stack,
+        await log("error", `Automation failed: ${msg}`, {
+          error: msg,
         });
       });
 
@@ -783,7 +1238,7 @@ ${
             schedule_name: schedule.name,
             run_id: String(runId),
             status: "failed",
-            error: error.message,
+            error: msg,
             duration_seconds: Math.round(durationMs / 1000),
           };
 
@@ -798,13 +1253,13 @@ ${
             await automationApi.sendEmailNotification(
               schedule.notifyEmails,
               `Automation ${schedule.name} - FAILED`,
-              `Automation failed with error: ${error.message}`
+              `Automation failed with error: ${msg}`
             );
           }
         });
       }
 
-      throw error;
+      throw error instanceof Error ? error : new Error(msg);
     }
   }
 );
@@ -816,7 +1271,7 @@ ${
  */
 
 /**
- * Check for scheduled automations (runs every 15 minutes)
+ * Check for scheduled automations (default: every minute; configurable)
  * Finds schedules that should run based on their schedule type and triggers them
  */
 export const scheduledAutomationCheck = inngest.createFunction(
@@ -824,22 +1279,48 @@ export const scheduledAutomationCheck = inngest.createFunction(
     id: "scheduled-automation-check",
     name: "Check Scheduled Automations",
     retries: 1,
+    // Prevent overlapping scheduler ticks (cron runs every minute by default)
+    concurrency: [{ limit: 1 }],
   },
-  { cron: "*/15 * * * *" }, // Every 15 minutes
+  // Default: every minute for near-real-time schedules.
+  // Override with AUTOMATION_SCHEDULER_CRON (e.g. "*/15 * * * *") if you prefer less frequent checks.
+  { cron: process.env.AUTOMATION_SCHEDULER_CRON || "*/1 * * * *" },
   async ({ step, logger }) => {
     logger.info("Checking for scheduled automations to run");
 
     // Get all active schedules
-    const schedules = await step.run("get-active-schedules", async () => {
-      return await automationRepository.getAllAutomationSchedules(false); // Only active
-    });
+    const schedules = await step.run(
+      "get-active-schedules",
+      async (): Promise<ActiveScheduleSerializable[]> => {
+      // IMPORTANT: Inngest step results must be JSON-serializable.
+      // Prisma returns BigInt IDs; serialize them explicitly or they'll become unusable (e.g. `undefined`).
+      const raw = await automationRepository.getAllAutomationSchedules(false); // Only active
+      return raw.map((s) => ({
+        id: String(s.id),
+        name: s.name,
+        scheduleType: toScheduleType(s.scheduleType),
+        cronExpression: s.cronExpression,
+        timezone: s.timezone,
+        timeOfDay: s.timeOfDay,
+        dayOfWeek: s.dayOfWeek,
+        dayOfMonth: s.dayOfMonth,
+        lastRunAt: s.lastRunAt ? new Date(s.lastRunAt).toISOString() : null,
+      }));
+    }
+    );
 
     logger.info(`Found ${schedules.length} active schedules`);
 
     // Filter schedules that should run now
-    const schedulesToRun = await step.run("filter-schedules", async () => {
+    const schedulesToRun = await step.run(
+      "filter-schedules",
+      async (): Promise<DueSchedule[]> => {
       const now = new Date();
-      const toRun = [];
+      const windowMinutes = Math.max(
+        5,
+        Number(process.env.AUTOMATION_SCHEDULER_WINDOW_MINUTES || 20)
+      );
+      const toRun: DueSchedule[] = [];
 
       for (const schedule of schedules) {
         // Skip MANUAL schedules
@@ -873,38 +1354,46 @@ export const scheduledAutomationCheck = inngest.createFunction(
           continue;
         }
 
-        // Calculate next run time
-        const nextRun = automationService.getNextRunTime(
-          schedule.scheduleType,
-          schedule.cronExpression || undefined,
-          schedule.timeOfDay || undefined,
-          schedule.dayOfWeek !== null ? schedule.dayOfWeek : undefined,
-          schedule.dayOfMonth || undefined,
-          schedule.timezone
-        );
+        const cronExpression = automationService.getCronExpressionForSchedule({
+          scheduleType: schedule.scheduleType,
+          cronExpression: schedule.cronExpression,
+          timeOfDay: schedule.timeOfDay,
+          dayOfWeek: schedule.dayOfWeek,
+          dayOfMonth: schedule.dayOfMonth,
+        });
 
-        if (!nextRun) {
+        if (!cronExpression) continue;
+
+        // Find due time within window using cron matching (timezone aware)
+        let dueAt: Date | null = null;
+        try {
+          dueAt = automationService.getMostRecentScheduledTimeWithinWindow({
+            cronExpression,
+            now,
+            windowMinutes,
+            timezone: schedule.timezone || "UTC",
+          });
+        } catch (err: unknown) {
+          logger.warn("Invalid cron expression for schedule", {
+            schedule_id: String(schedule.id),
+            cronExpression,
+            error: errorMessage(err),
+          });
           continue;
         }
 
-        // Check if it should run now (within last 15 minutes to current time)
-        const fifteenMinutesAgo = new Date(now.getTime() - 15 * 60 * 1000);
+        if (!dueAt) continue;
 
-        // Should run if:
-        // 1. Next run time is in the past (missed run)
-        // 2. Or next run time is within the last 15 minutes
-        // 3. And hasn't run in the last 15 minutes (to avoid duplicate runs)
-        const shouldRun =
-          nextRun <= now &&
-          (!schedule.lastRunAt ||
-            new Date(schedule.lastRunAt) <= fifteenMinutesAgo);
+        const lastRunAt = schedule.lastRunAt ? new Date(schedule.lastRunAt) : null;
+        const shouldRun = !lastRunAt || lastRunAt < dueAt;
 
         if (shouldRun) {
           toRun.push({
             id: String(schedule.id),
             name: schedule.name,
             scheduleType: schedule.scheduleType,
-            nextRun: nextRun.toISOString(),
+            cronExpression,
+            dueAt: dueAt.toISOString(),
             lastRun: schedule.lastRunAt
               ? new Date(schedule.lastRunAt).toISOString()
               : "never",
@@ -913,53 +1402,93 @@ export const scheduledAutomationCheck = inngest.createFunction(
       }
 
       return toRun;
-    });
+    }
+    );
 
     logger.info(`${schedulesToRun.length} schedules should run now`);
 
-    // Trigger each schedule
-    const results = await step.run("trigger-schedules", async () => {
-      const triggered = [];
-
-      for (const schedule of schedulesToRun) {
-        try {
-          // Send automation/run event
-          await step.sendEvent(`trigger-schedule-${schedule.id}`, {
-            name: "automation/run",
-            data: {
-              schedule_id: parseInt(schedule.id),
-            },
-          });
-
-          triggered.push({
+    // Trigger due schedules (IMPORTANT: don't nest step.* tooling inside step.run)
+    let results: TriggerResult[] = [];
+    if (schedulesToRun.length > 0) {
+      const events = schedulesToRun.map((schedule, idx) => {
+        const dueAtMs = Date.parse(schedule.dueAt);
+        const stableDueAtMs = Number.isFinite(dueAtMs) ? dueAtMs : Date.now();
+        return {
+          name: "automation/run" as const,
+          data: {
             schedule_id: schedule.id,
-            name: schedule.name,
-            status: "triggered",
-          });
+          },
+          // Idempotent per schedule + due time (safe chars only)
+          id: Number.isFinite(dueAtMs)
+            ? `automation-schedule-${schedule.id}-${stableDueAtMs}`
+            : `automation-schedule-${schedule.id}-${stableDueAtMs}-${idx}`,
+        } as const;
+      });
 
-          logger.info(`Triggered schedule ${schedule.id} (${schedule.name})`);
-        } catch (error: any) {
-          logger.error(`Failed to trigger schedule ${schedule.id}`, {
-            error: error.message,
-          });
+      try {
+        const sendResult = await step.sendEvent("trigger-schedules", events);
 
-          triggered.push({
-            schedule_id: schedule.id,
-            name: schedule.name,
-            status: "failed",
-            error: error.message,
-          });
-        }
+        // Mark schedules as triggered at their dueAt time (prevents re-dispatch)
+        await step.run("mark-schedules-triggered", async () => {
+          for (const schedule of schedulesToRun) {
+            const dueAtDate = new Date(schedule.dueAt);
+            const idStr = String(schedule.id).trim();
+            if (!/^\d+$/.test(idStr)) {
+              logger.warn("Skipping schedule mark (invalid id)", {
+                schedule_id: schedule.id,
+                name: schedule.name,
+              });
+              continue;
+            }
+            try {
+              await automationRepository.markAutomationScheduleTriggered(
+                BigInt(idStr),
+                isNaN(dueAtDate.getTime()) ? new Date() : dueAtDate
+              );
+            } catch (err: unknown) {
+              logger.warn("Failed to mark schedule as triggered", {
+                schedule_id: idStr,
+                error: errorMessage(err),
+              });
+            }
+          }
+          return { marked: schedulesToRun.length };
+        });
+
+        results = schedulesToRun.map((schedule) => ({
+          schedule_id: schedule.id,
+          name: schedule.name,
+          status: "triggered",
+          dueAt: schedule.dueAt,
+        }));
+
+        const event_ids =
+          isRecord(sendResult) && Array.isArray(sendResult.ids)
+            ? (sendResult.ids as unknown[])
+            : null;
+
+        logger.info("Triggered schedules successfully", {
+          count: schedulesToRun.length,
+          ...(event_ids ? { event_ids } : {}),
+        });
+      } catch (error: unknown) {
+        logger.error("Failed to trigger schedules", { error: errorMessage(error) });
+        const msg = errorMessage(error);
+        results = schedulesToRun.map((schedule) => ({
+          schedule_id: schedule.id,
+          name: schedule.name,
+          status: "failed",
+          error: msg,
+          dueAt: schedule.dueAt,
+        }));
       }
-
-      return triggered;
-    });
+    }
 
     return {
       success: true,
       checked: schedules.length,
-      triggered: results.length,
-      results,
+      triggered: results.filter((r) => r.status === "triggered").length,
+      results: results,
     };
   }
 );

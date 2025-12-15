@@ -37,7 +37,7 @@ services:
     restart: always
     ports:
       # Bind to localhost; put host Nginx/HTTPS in front of this port.
-      - "127.0.0.1:${SERVER_PORT:-3002}:3002"
+      - "0.0.0.0:${SERVER_PORT:-3002}:3002"
     environment:
       - NODE_ENV=production
       - PORT=3002
@@ -120,8 +120,8 @@ services:
     restart: always
     ports:
       # Bind to localhost; access UI via SSH tunnel.
-      - "127.0.0.1:${INNGEST_PORT:-8288}:8288"
-      - "127.0.0.1:${INNGEST_CONNECT_PORT:-8289}:8289"
+      - "0.0.0.0:${INNGEST_PORT:-8288}:8288"
+      - "0.0.0.0:${INNGEST_CONNECT_PORT:-8289}:8289"
     environment:
       - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
       - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}

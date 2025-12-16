@@ -84,6 +84,7 @@ services:
       # - INNGEST_SERVER_REPLICAS: how many `server` containers you scaled to (ex: --scale server=6)
       - INNGEST_PARALLELISM_PER_SERVER=${INNGEST_PARALLELISM_PER_SERVER:-10}
       - INNGEST_SERVER_REPLICAS=${SERVER_REPLICAS:-6}
+      - FICHE_SALES_INCLUDE_RECORDINGS=${FICHE_SALES_INCLUDE_RECORDINGS:-1}
     volumes:
       - audit-data:/app/data
     networks:

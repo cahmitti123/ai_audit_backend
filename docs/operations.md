@@ -26,11 +26,7 @@ npm run inngest
 
 ## Webhooks
 
-### Central sender
-
-Webhook delivery is centralized in `src/shared/webhook.ts`.
-
-If `FRONTEND_WEBHOOK_URL` is not configured, the system will still publish the event to realtime/SSE topics (so local UI can still work via SSE).
+The backend still supports **per-request webhooks** for progressive fetch jobs (optional).
 
 ### SSRF protection (user-provided webhook URLs)
 
@@ -43,12 +39,12 @@ For user-provided webhook URLs (notably progressive fetch), URLs are validated w
 
 Webhook failures log **axios `code`**, **HTTP `status`**, and **URL path** (without leaking secrets).
 
-## Realtime (SSE)
+## Realtime (Pusher)
 
-SSE endpoints live under `/api/realtime/*` and are backed by Redis Streams when `REDIS_URL` is configured.
+Realtime domain events are published via **Pusher Channels**.
 
-- Supports resume via `Last-Event-ID` (Redis mode)
-- Sends periodic heartbeats to keep connections alive behind proxies
+- Endpoints: `POST /api/realtime/pusher/auth`, `POST /api/realtime/pusher/test`
+- Event catalog + payloads: `docs/FRONTEND_PUSHER_EVENTS.md`
 
 
 

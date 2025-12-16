@@ -1,24 +1,14 @@
 # Frontend Integration
 
-## Webhooks vs SSE
+## Realtime (Pusher)
 
-You typically have two options to build a realtime UI:
+Realtime domain events are delivered via **Pusher Channels**.
 
-- **Webhooks**: backend pushes events to `FRONTEND_WEBHOOK_URL` (central sender: `src/shared/webhook.ts`)
-- **SSE**: frontend subscribes directly to `/api/realtime/*`
-
-In practice, many deployments use **both**:
-
-- Webhooks for “push when complete”
-- SSE for “live progress stream” + reconnection support
-
-## SSE endpoints
-
-- `GET /api/realtime/fiches/:ficheId`
-- `GET /api/realtime/audits/:auditId`
-- `GET /api/realtime/jobs/:jobId`
-
-Redis mode supports resume with `Last-Event-ID`.
+- Pusher endpoints:
+  - `POST /api/realtime/pusher/auth`
+  - `POST /api/realtime/pusher/test`
+- Channel/event catalog:
+  - `docs/FRONTEND_PUSHER_EVENTS.md`
 
 ## Shared frontend types
 

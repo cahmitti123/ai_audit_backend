@@ -47,8 +47,9 @@ if (!runIntegration) {
 // Disable any outbound network side-effects by default in unit tests.
 // Integration tests may explicitly rely on Redis/webhooks, so we don't override there.
 if (!runIntegration) {
-  process.env.FRONTEND_WEBHOOK_URL = "";
   process.env.REDIS_URL = "";
+  // Ensure realtime publishing never triggers outbound requests in unit tests.
+  process.env.PUSHER_DRY_RUN = process.env.PUSHER_DRY_RUN || "1";
 }
 
 

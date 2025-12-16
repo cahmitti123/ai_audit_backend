@@ -23,7 +23,7 @@ import {
   getInngestParallelismPerServer,
 } from "../../shared/inngest-concurrency.js";
 import { prisma } from "../../shared/prisma.js";
-import { publishRealtimeEvent, topicForJob } from "../../shared/realtime.js";
+import { publishPusherEvent } from "../../shared/pusher.js";
 import type {
   FicheDetailsResponse,
   Recording,
@@ -1198,11 +1198,9 @@ export const progressiveFetchUpdateJobFunction = inngest.createFunction(
     });
 
     // Realtime progress event (best-effort)
-    publishRealtimeEvent({
-      topic: topicForJob(jobId),
-      type: "fiches.progressive_fetch.progress",
-      source: "fiches-job-updater",
-      data: {
+    publishPusherEvent({
+      event: "fiches.progressive_fetch.progress",
+      payload: {
         jobId,
         status: "processing",
         startDate: job.startDate,
@@ -1288,14 +1286,12 @@ export const progressiveFetchUpdateJobFunction = inngest.createFunction(
         return { finalized: true };
       });
 
-      publishRealtimeEvent({
-        topic: topicForJob(jobId),
-        type:
+      publishPusherEvent({
+        event:
           finalStatus === "complete"
             ? "fiches.progressive_fetch.complete"
             : "fiches.progressive_fetch.failed",
-        source: "fiches-job-updater",
-        data: {
+        payload: {
           jobId,
           status: finalStatus,
           startDate: job.startDate,

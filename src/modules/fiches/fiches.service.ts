@@ -26,7 +26,7 @@ import * as fichesCache from "./fiches.cache.js";
 import * as fichesRevalidation from "./fiches.revalidation.js";
 import { logger } from "../../shared/logger.js";
 import { prisma } from "../../shared/prisma.js";
-import { publishRealtimeEvent, topicForJob } from "../../shared/realtime.js";
+import { publishPusherEvent } from "../../shared/pusher.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UTILITY HELPERS
@@ -619,11 +619,9 @@ export async function getFichesByDateRangeProgressive(
     });
 
     // Realtime: job created (best-effort)
-    publishRealtimeEvent({
-      topic: topicForJob(job.id),
-      type: "fiches.progressive_fetch.created",
-      source: "fiches-service",
-      data: {
+    publishPusherEvent({
+      event: "fiches.progressive_fetch.created",
+      payload: {
         jobId: job.id,
         status: job.status,
         startDate,

@@ -4,15 +4,15 @@
 - **Express + TypeScript** API (`src/app.ts`, `src/server.ts`)
 - **Prisma/Postgres** for persistence (`src/shared/prisma.ts`, `prisma/schema.prisma`)
 - **Inngest** for background workflows (`src/inngest/*`, `src/modules/*/*.workflows.ts`)
-- **Redis** for cross-replica coordination + realtime streams (`src/shared/redis.ts`, `src/shared/realtime.ts`, `src/shared/redis-lock.ts`)
+- **Redis** for cross-replica coordination (`src/shared/redis.ts`, `src/shared/redis-lock.ts`)
 
 ### Domain modules
 - `src/modules/fiches`: CRM fiche caching, progressive fetch jobs
 - `src/modules/transcriptions`: ElevenLabs transcription + DB storage
 - `src/modules/audits`: LLM audits, step results, finalization
 - `src/modules/automation`: schedules + automation runs
-- `src/modules/realtime`: SSE endpoints (`/api/realtime/*`)
-- `src/shared/webhook.ts`: centralized webhook sender (SSRF guard + signature)
+- `src/modules/realtime`: Pusher endpoints (`/api/realtime/pusher/*`)
+- `src/shared/webhook.ts`: centralized realtime event publisher (Pusher)
 
 ### Inngest workflow design (critical)
 - Prefer **orchestrator → fan‑out workers → aggregator/finalizer**.
@@ -33,8 +33,8 @@
   - Fan-out: `fiche/fetch` (details), `fiche/transcribe`, `audit/run`
 
 ### Realtime pattern
-- Publish events to `topicForJob(...)`, `topicForAudit(...)`, `topicForFiche(...)`
-- SSE consumers subscribe via `/api/realtime/jobs/:jobId`, `/api/realtime/audits/:auditId`, `/api/realtime/fiches/:ficheId`
+- Publish domain events via Pusher (see `src/shared/webhook.ts` and `src/shared/pusher.ts`)
+- Clients subscribe to entity channels: `private-job-*`, `private-audit-*`, `private-fiche-*`, plus `private-global`
 
 
 

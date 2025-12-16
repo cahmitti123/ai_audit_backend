@@ -1,145 +1,105 @@
-/**
- * Realtime Routes (SSE)
- * ====================
- * Server-Sent Events endpoints backed by Redis Streams when available.
- *
- * - Supports resume via `Last-Event-ID` header (Redis mode).
- * - Sends periodic heartbeats to keep connections alive behind proxies.
- */
-
 import { Router, type Request, type Response } from "express";
-import { logger } from "../../shared/logger.js";
 import { asyncHandler } from "../../middleware/async-handler.js";
+import { ValidationError } from "../../shared/errors.js";
 import {
-  createRealtimeRedisStreamReader,
-  subscribeLocal,
-  topicForAudit,
-  topicForFiche,
-  topicForJob,
-  type RealtimeEvent,
-} from "../../shared/realtime.js";
+  getPusherClient,
+  isAllowedAuthChannel,
+  isValidPusherChannelName,
+  isValidPusherEventName,
+  triggerPusher,
+  usePrivatePusherChannels,
+} from "../../shared/pusher.js";
+import { validatePusherAuthInput, validatePusherTestInput } from "./realtime.schemas.js";
 
 export const realtimeRouter = Router();
 
-function setSseHeaders(res: Response) {
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
-}
+/**
+ * Pusher auth endpoint for private/presence channels.
+ *
+ * IMPORTANT: This backend currently has no auth middleware, so this endpoint
+ * only enforces channel naming rules. For real security, you must add auth
+ * (JWT/session/org membership) or proxy this endpoint through a trusted
+ * Next.js API route.
+ */
+realtimeRouter.post(
+  "/pusher/auth",
+  asyncHandler(async (req: Request, res: Response) => {
+    const input = validatePusherAuthInput(req.body);
 
-function writeSseEvent(res: Response, evt: RealtimeEvent) {
-  if (evt.id) res.write(`id: ${evt.id}\n`);
-  res.write(`event: ${evt.type}\n`);
-  res.write(`data: ${JSON.stringify(evt)}\n\n`);
-}
-
-async function streamTopic(req: Request, res: Response, topic: string) {
-  setSseHeaders(res);
-  // Immediately flush headers
-  const flush = (res as { flushHeaders?: unknown }).flushHeaders;
-  if (typeof flush === "function") {
-    (flush as () => void).call(res);
-  }
-
-  res.write(`: connected topic=${topic}\n\n`);
-
-  let closed = false;
-  req.on("close", () => {
-    closed = true;
-  });
-
-  const heartbeat = setInterval(() => {
-    if (!closed && !res.writableEnded) {
-      res.write(`: heartbeat ${Date.now()}\n\n`);
-    }
-  }, 15000);
-
-  // Resume support (Redis mode)
-  const headerLastId = req.header("Last-Event-ID");
-  const queryLastId =
-    typeof req.query.lastEventId === "string" ? req.query.lastEventId : undefined;
-  let lastId = headerLastId || queryLastId || "$";
-
-  const reader = await createRealtimeRedisStreamReader(topic);
-
-  if (reader) {
-    try {
-      while (!closed && !res.writableEnded) {
-        const { events, lastId: newLastId } = await reader.read({
-          lastId,
-          blockMs: 15000,
-          count: 100,
-        });
-
-        if (events.length === 0) continue;
-
-        for (const evt of events) {
-          if (closed || res.writableEnded) break;
-          writeSseEvent(res, evt);
-        }
-        lastId = newLastId;
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      // Client disconnects are normal for SSE (navigation, refresh, tab close).
-      // Redis readers will often surface this as "The client is closed".
-      const isClientClosed =
-        closed ||
-        res.writableEnded ||
-        /client is closed/i.test(message) ||
-        /The client is closed/i.test(message);
-
-      if (!isClientClosed) {
-        logger.error("Realtime SSE error", {
-          topic,
-          error: message,
-        });
-      }
-    } finally {
-      clearInterval(heartbeat);
-      await reader.close();
-      if (!res.writableEnded) res.end();
+    const channelCheck = isValidPusherChannelName(input.channel_name);
+    if (!channelCheck.ok) {
+      throw new ValidationError(channelCheck.error);
     }
 
-    return;
-  }
+    if (!isAllowedAuthChannel(input.channel_name)) {
+      return res.status(403).json({
+        success: false,
+        error: "Channel not allowed",
+      });
+    }
 
-  // Fallback: in-process emitter only (no resume across reconnects)
-  const unsubscribe = subscribeLocal(topic, (evt) => {
-    if (closed || res.writableEnded) return;
-    writeSseEvent(res, evt);
-  });
+    const pusher = getPusherClient();
+    if (!pusher) {
+      return res.status(503).json({
+        success: false,
+        error: "Pusher not configured",
+      });
+    }
 
-  req.on("close", () => {
-    clearInterval(heartbeat);
-    unsubscribe();
-  });
-}
+    const isPresence = input.channel_name.startsWith("presence-");
+    if (isPresence && !input.user_id) {
+      throw new ValidationError("user_id is required for presence channels");
+    }
 
-realtimeRouter.get(
-  "/audits/:auditId",
-  asyncHandler(async (req: Request, res: Response) => {
-    const { auditId } = req.params;
-    await streamTopic(req, res, topicForAudit(auditId));
+    // Pusher expects the raw auth response (not wrapped in {success:true}).
+    const auth = pusher.authorizeChannel(
+      input.socket_id,
+      input.channel_name,
+      isPresence
+        ? {
+            user_id: input.user_id!,
+            user_info: input.user_info || {},
+          }
+        : undefined
+    );
+
+    return res.json(auth);
   })
 );
 
-realtimeRouter.get(
-  "/fiches/:ficheId",
+/**
+ * Pusher test endpoint - publishes a simple event so the frontend can validate setup quickly.
+ */
+realtimeRouter.post(
+  "/pusher/test",
   asyncHandler(async (req: Request, res: Response) => {
-    const { ficheId } = req.params;
-    await streamTopic(req, res, topicForFiche(ficheId));
+    const input = validatePusherTestInput(req.body);
+
+    const channel =
+      input.channel ||
+      (usePrivatePusherChannels() ? "private-realtime-test" : "realtime-test");
+    const event = input.event || "realtime.test";
+    const payload =
+      input.payload ?? { message: "hello from backend", ts: new Date().toISOString() };
+
+    const channelCheck = isValidPusherChannelName(channel);
+    if (!channelCheck.ok) throw new ValidationError(channelCheck.error);
+
+    const eventCheck = isValidPusherEventName(event);
+    if (!eventCheck.ok) throw new ValidationError(eventCheck.error);
+
+    const result = await triggerPusher({ channels: [channel], event, payload });
+    if (!result.ok) {
+      return res.status(500).json({ success: false, error: result.error });
+    }
+
+    return res.json({
+      success: true,
+      channel,
+      event,
+      payload,
+    });
   })
 );
-
-realtimeRouter.get(
-  "/jobs/:jobId",
-  asyncHandler(async (req: Request, res: Response) => {
-    const { jobId } = req.params;
-    await streamTopic(req, res, topicForJob(jobId));
-  })
-);
-
 
 

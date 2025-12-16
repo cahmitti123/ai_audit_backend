@@ -818,66 +818,58 @@ Important: chat uses **DB-only** transcription data (multi-replica safe).
 
 ## Realtime SSE API (`/api/realtime/*`)
 
-### GET `/api/realtime/audits/:auditId`
-### GET `/api/realtime/fiches/:ficheId`
-### GET `/api/realtime/jobs/:jobId`
+Legacy SSE realtime endpoints have been **removed**. Use Pusher Channels instead:
 
-- **Purpose**: realtime event stream backed by Redis Streams when `REDIS_URL` is configured; falls back to in-process emitter if not.
-- **Headers**:
-  - Response sets:
-    - `Content-Type: text/event-stream; charset=utf-8`
-    - `Cache-Control: no-cache, no-transform`
-    - `Connection: keep-alive`
-    - `X-Accel-Buffering: no`
-- **Reconnect / resume**:
-  - Send `Last-Event-ID: <redis-stream-id>` header **OR** query `?lastEventId=<id>`.
-  - If omitted, server uses `$` (new events only).
-- **Heartbeat**:
-  - Comment line every 15s: `: heartbeat <epochMs>`
-- **Event framing**:
-  - `event: <evt.type>`
-  - `data: <JSON.stringify(evt)>`
-  - where `evt` matches `RealtimeEvent` in `src/shared/realtime.ts`.
+- `POST /api/realtime/pusher/auth`
+- `POST /api/realtime/pusher/test`
+- Subscribe to entity channels (`private-audit-*`, `private-fiche-*`, `private-job-*`, `private-global`)
+
+---
+
+## Realtime Pusher API (`/api/realtime/pusher/*`)
+
+This backend can publish realtime events via **Pusher Channels**.
+
+- **Docs**:
+  - Setup + overview: `docs/REALTIME.md`
+  - Frontend event catalog: `docs/FRONTEND_PUSHER_EVENTS.md`
+- **Channels**:
+  - `private-audit-{auditId}`
+  - `private-fiche-{ficheId}`
+  - `private-job-{jobId}`
+  - `private-global` (batch + notification + any unscoped events)
+- **Event names**: identical to existing webhook/SSE event names (e.g. `audit.progress`, `transcription.completed`, `fiches.progressive_fetch.progress`)
+- **Payloads**: Pusher publishes the existing **domain payload object** (the same object that used to live under `.data` in system webhook payloads / SSE envelopes). No additional wrapper is added.
+
+### POST `/api/realtime/pusher/auth`
+
+- **Purpose**: sign subscriptions for **private/presence** channels (Pusher JS `authEndpoint`).
+- **Auth**: **no auth enforced today** (backend is public). The endpoint only validates channel naming.
+- **Body**:
+
+```json
+{ "socket_id": "123.456", "channel_name": "private-audit-audit-123" }
+```
+
+- **Response 200**: Pusher auth payload (raw, not wrapped)
+
+```json
+{ "auth": "PUSHER_KEY:signature" }
+```
+
+### POST `/api/realtime/pusher/test`
+
+- **Purpose**: publish a simple event for quick end-to-end verification.
+- **Body** (optional):
+  - `channel` (default: `private-realtime-test` or `realtime-test`)
+  - `event` (default: `realtime.test`)
+  - `payload` (default: `{ message, ts }`)
 
 ---
 
 ## Webhooks (backend → frontend)
 
-There are **two** webhook mechanisms in this backend:
-
-### 1) Global “system webhook” (configured by env)
-
-- **Destination**: `process.env.FRONTEND_WEBHOOK_URL`
-- **Secret**: `process.env.WEBHOOK_SECRET` (optional)
-- **Payload** (`src/shared/webhook.ts`):
-
-```json
-{
-  "event": "audit.progress",
-  "timestamp": "2025-12-14T12:34:56.789Z",
-  "source": "audit-service",
-  "data": { "..." : "..." }
-}
-```
-
-- **Headers**:
-  - `Content-Type: application/json`
-  - `User-Agent: AI-Audit-Webhook/1.0`
-  - `X-Webhook-Event: <eventType>`
-  - `X-Webhook-Delivery-Id: <uuid>`
-  - `X-Webhook-Attempt: <n>`
-  - `X-Webhook-Timestamp: <payload.timestamp>`
-  - `X-Webhook-Source: <source>`
-  - If `WEBHOOK_SECRET` set:
-    - `X-Webhook-Signature: sha256=<hex>` where hex is HMAC-SHA256(body)
-    - `X-Webhook-Signature-V2: sha256=<hex>` where hex is HMAC-SHA256(`${timestamp}.${body}`)
-- **Retries**:
-  - Non-`.progress` events: `WEBHOOK_MAX_ATTEMPTS` (default 3) with backoff (2s,4s,8s,... capped 30s)
-  - `.progress` events: `maxAttempts = 1` (no retries)
-- **Event names**:
-  - See `WebhookEventType` union in `src/shared/webhook.ts` (audit.*, transcription.*, batch.*, notification).
-
-### 2) Progressive fetch job webhooks (per-request URL)
+### Progressive fetch job webhooks (per-request URL)
 
 - **Triggered by**: `/api/fiches/status/by-date-range?webhookUrl=...`
 - **Destination**: `webhookUrl` stored on `ProgressiveFetchJob`
@@ -962,28 +954,22 @@ export type HealthResponse = {
 };
 
 // --------------------------------------------
-// Realtime SSE event envelope (/api/realtime/*)
+// Realtime (Pusher Channels)
 // --------------------------------------------
-
-export type RealtimeEvent<T = unknown> = {
-  id?: string; // Redis stream id (present when Redis is enabled)
-  topic: string; // audit:{auditId} | fiche:{ficheId} | job:{jobId}
-  type: string; // event name
-  timestamp: ISODateTimeString;
-  source: string;
-  data: T;
-};
-
-export type RealtimeTopics =
-  | { kind: "audit"; topic: `audit:${string}` }
-  | { kind: "fiche"; topic: `fiche:${string}` }
-  | { kind: "job"; topic: `job:${string}` };
-
-// --------------------------------------------
-// Global system webhooks (env FRONTEND_WEBHOOK_URL)
-// --------------------------------------------
-
-export type SystemWebhookEventType =
+//
+// Legacy realtime (SSE under `/api/realtime/*` + backend→frontend “system webhooks”) has been removed.
+// Pusher publishes the domain payload object (no wrapper).
+//
+// Channels:
+// - private-audit-{auditId}
+// - private-fiche-{ficheId}
+// - private-job-{jobId}
+// - private-global
+//
+// Full event catalog + payload fields: see `docs/FRONTEND_PUSHER_EVENTS.md`
+//
+// Optional: union of the main event names:
+export type RealtimeEventName =
   | "audit.started"
   | "audit.fiche_fetch_started"
   | "audit.fiche_fetch_completed"
@@ -1008,14 +994,11 @@ export type SystemWebhookEventType =
   | "transcription.failed"
   | "batch.progress"
   | "batch.completed"
-  | "notification";
-
-export type SystemWebhookPayload = {
-  event: SystemWebhookEventType;
-  timestamp: ISODateTimeString;
-  source: string;
-  data: Record<string, unknown>;
-};
+  | "notification"
+  | "fiches.progressive_fetch.created"
+  | "fiches.progressive_fetch.progress"
+  | "fiches.progressive_fetch.complete"
+  | "fiches.progressive_fetch.failed";
 
 // --------------------------------------------
 // Progressive fetch webhooks (/api/fiches/status/by-date-range?webhookUrl=...)
@@ -1048,7 +1031,7 @@ export type ProgressiveFetchWebhookPayload = {
   };
 };
 
-export type ProgressiveFetchRealtimeCreated = RealtimeEvent<{
+export type ProgressiveFetchPusherCreatedPayload = {
   jobId: string;
   status: "processing" | string;
   startDate: ISODateString;
@@ -1060,9 +1043,9 @@ export type ProgressiveFetchRealtimeCreated = RealtimeEvent<{
   datesCompleted: ISODateString[];
   datesRemaining: ISODateString[];
   datesFailed: ISODateString[];
-}>;
+};
 
-export type ProgressiveFetchRealtimeProgress = RealtimeEvent<{
+export type ProgressiveFetchPusherProgressPayload = {
   jobId: string;
   status: "processing";
   startDate: ISODateString;
@@ -1075,9 +1058,9 @@ export type ProgressiveFetchRealtimeProgress = RealtimeEvent<{
   datesRemaining: ISODateString[];
   datesFailed: ISODateString[];
   latestDate: ISODateString;
-}>;
+};
 
-export type ProgressiveFetchRealtimeTerminal = RealtimeEvent<{
+export type ProgressiveFetchPusherTerminalPayload = {
   jobId: string;
   status: "complete" | "failed";
   startDate: ISODateString;
@@ -1089,7 +1072,7 @@ export type ProgressiveFetchRealtimeTerminal = RealtimeEvent<{
   datesCompleted: ISODateString[];
   datesRemaining: [];
   datesFailed: ISODateString[];
-}>;
+};
 
 // --------------------------------------------
 // Chat streaming citations (from src/schemas.ts)
@@ -1126,15 +1109,12 @@ export type ChatCitation = {
 - **Progressive fetch**:
   - Call `GET /api/fiches/status/by-date-range?...`
   - If `meta.backgroundJobId` exists, either:
-    - subscribe to `GET /api/realtime/jobs/:jobId` and listen for `fiches.progressive_fetch.*` events, **or**
+    - subscribe via **Pusher** to channel `private-job-{jobId}` and listen for `fiches.progressive_fetch.*` events, **or**
     - poll `GET /api/fiches/webhooks/fiches?jobId=...`
 - **Realtime audit/transcription progress**:
-  - subscribe to `GET /api/realtime/fiches/:ficheId` and/or `GET /api/realtime/audits/:auditId`
-  - handle `RealtimeEvent` envelopes and resume with `Last-Event-ID`.
+  - subscribe via **Pusher** to `private-fiche-{ficheId}` and/or `private-audit-{auditId}`
+  - listen for `audit.*`, `transcription.*`, `batch.*`, `notification` events (see `docs/FRONTEND_PUSHER_EVENTS.md`)
 - **Chat streaming**:
   - treat response as SSE and parse `data:` lines; stop on `[DONE]`.
-- **Webhook verification (recommended)**:
-  - verify `X-Webhook-Signature-V2` using HMAC-SHA256 of `${X-Webhook-Timestamp}.${rawBody}` with your shared secret.
-  - dedupe by `X-Webhook-Delivery-Id`.
 
 

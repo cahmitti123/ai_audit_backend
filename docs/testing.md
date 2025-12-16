@@ -59,14 +59,13 @@ Notes:
   - automation trigger body validation
 - DB-free utility endpoints:
   - `GET /api/automation/diagnostic`
-  - webhook test endpoint input validation
-  - realtime SSE headers (`/api/realtime/jobs/:jobId`)
+  - Pusher auth/test endpoint validation (`/api/realtime/pusher/*`)
+  - legacy routes removed (`/api/webhooks/*`, `/api/realtime/*`)
 
 ### Safety (no accidental external calls)
 
 The global test setup (`tests/setup.ts`) forces:
-- `FRONTEND_WEBHOOK_URL=""` (disables outbound webhooks)
-- `REDIS_URL=""` (forces realtime to use in-memory mode)
+- `REDIS_URL=""` (avoids requiring Redis for DB-free unit tests)
 
 ### Next: DB-backed integration tests (optional)
 

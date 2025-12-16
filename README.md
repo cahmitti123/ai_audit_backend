@@ -102,13 +102,14 @@ src/
 - `GET /api/audits/by-fiche/:fiche_id` - Get audit history
 - `GET /api/audits/:audit_id` - Get audit details
 
-### Realtime (SSE)
+### Realtime (Pusher)
 
-These endpoints stream backend events in realtime (Redis-backed when `REDIS_URL` is configured) and support resume via the `Last-Event-ID` header:
+Realtime domain events are delivered via **Pusher Channels**.
 
-- `GET /api/realtime/fiches/:ficheId` - Audit + transcription events for a fiche
-- `GET /api/realtime/audits/:auditId` - Audit-specific events
-- `GET /api/realtime/jobs/:jobId` - Progressive fetch job events
+- `POST /api/realtime/pusher/auth` - Authenticate private/presence channel subscriptions
+- `POST /api/realtime/pusher/test` - Trigger a test event
+
+Channel/event catalog: `docs/FRONTEND_PUSHER_EVENTS.md`
 
 **Interactive docs:** http://localhost:3002/api-docs
 

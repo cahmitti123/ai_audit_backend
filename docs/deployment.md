@@ -91,7 +91,7 @@ Fill in at least:
 - `OPENAI_API_KEY` (and/or `ANTHROPIC_API_KEY`, `ELEVENLABS_API_KEY`)
 - `FICHE_API_*`
 - `INNGEST_EVENT_KEY`, `INNGEST_SIGNING_KEY`
-- `FRONTEND_WEBHOOK_URL`, `WEBHOOK_SECRET`
+- `PUSHER_APP_ID`, `PUSHER_KEY`, `PUSHER_SECRET`, `PUSHER_CLUSTER`
 - `WEBHOOK_ALLOWED_ORIGINS` (recommended allowlist for SSRF protection)
 
 ### 3) Start the Docker stack (scaled-ready)
@@ -121,7 +121,7 @@ This will:
 - Install **nginx + certbot**
 - Configure nginx to proxy to `127.0.0.1:${SERVER_PORT:-3002}`
 - Enable HTTPS + redirect (Let’s Encrypt)
-- Disable nginx buffering for `/api/realtime/*` (SSE) and `/api/inngest` (large bodies/long responses)
+- Disable nginx buffering for chat streaming endpoints (`/api/*/chat`) and `/api/inngest` (large bodies/long responses)
 
 ### 5) Accessing the Inngest UI safely
 

@@ -86,11 +86,10 @@ The API exposes REST endpoints under `/api/*` and publishes OpenAPI docs at `/ap
 - `GET|POST /api/products/formules`
 - `GET|PUT|DELETE /api/products/formules/:id`
 
-### Realtime / SSE (`/api/realtime`)
+### Realtime (Pusher) (`/api/realtime/pusher`)
 
-- `GET /api/realtime/fiches/:ficheId`
-- `GET /api/realtime/audits/:auditId`
-- `GET /api/realtime/jobs/:jobId`
+- `POST /api/realtime/pusher/auth`
+- `POST /api/realtime/pusher/test`
 
 ### Chat (mounted under `/api`)
 
@@ -99,11 +98,9 @@ The API exposes REST endpoints under `/api/*` and publishes OpenAPI docs at `/ap
 - `GET /api/fiches/:fiche_id/chat/history`
 - `POST /api/fiches/:fiche_id/chat` (streaming)
 
-### Webhooks (testing) (`/api/webhooks`)
+### Webhooks
 
-- `POST /api/webhooks/test`
-- `POST /api/webhooks/test/workflow`
-- `POST /api/webhooks/test/custom`
+- Progressive fetch supports an optional **per-request webhookUrl** (see `docs/BACKEND_FRONTEND_CONTRACT.md`).
 
 
 

@@ -78,7 +78,7 @@ export async function revalidateFichesForDateSync(date: string) {
 
   try {
     // Fetch sales list from external API
-    const salesResponse = await fichesApi.fetchSalesWithCalls(date, date);
+    const salesResponse = await fichesApi.fetchSalesWithCalls(date, date, { includeRecordings: process.env.FICHE_SALES_INCLUDE_RECORDINGS === "1" });
 
     logger.info("Fetched sales from API", {
       date,

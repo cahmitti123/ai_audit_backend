@@ -599,7 +599,7 @@ export const cacheSalesListFunction = inngest.createFunction(
       logger.info("Fetching sales with calls from API", { startDate, endDate });
 
       try {
-        const data = await fichesApi.fetchSalesWithCalls(startDate, endDate);
+        const data = await fichesApi.fetchSalesWithCalls(startDate, endDate, { includeRecordings: process.env.FICHE_SALES_INCLUDE_RECORDINGS === "1" });
         logger.info("Sales with calls fetched successfully", {
           startDate,
           endDate,
@@ -663,7 +663,8 @@ export const cacheSalesListFunction = inngest.createFunction(
           try {
             const chunkSales = await fichesApi.fetchSalesWithCalls(
               range.start,
-              range.end
+              range.end,
+              { includeRecordings: process.env.FICHE_SALES_INCLUDE_RECORDINGS === "1" }
             );
             allFiches.push(...chunkSales.fiches);
             successfulChunks++;

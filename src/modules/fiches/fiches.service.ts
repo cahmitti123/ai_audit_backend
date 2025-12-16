@@ -471,7 +471,7 @@ export async function getSalesByDateRange(
   endDate: string,
   includeStatus = true
 ): Promise<SalesWithCallsResponse | SalesResponseWithStatus> {
-  const sales = await fichesApi.fetchSalesWithCalls(startDate, endDate);
+  const sales = await fichesApi.fetchSalesWithCalls(startDate, endDate, { includeRecordings: process.env.FICHE_SALES_INCLUDE_RECORDINGS === "1" });
 
   if (!includeStatus) {
     return sales;
@@ -709,7 +709,8 @@ export async function getFichesByDateRangeWithSmartCache(
       // Fetch sales with recordings (single API call for entire range!)
       const salesWithCalls = await fichesApi.fetchSalesWithCalls(
         startDate,
-        endDate
+        endDate,
+        { includeRecordings: process.env.FICHE_SALES_INCLUDE_RECORDINGS === "1" }
       );
 
       logger.info("Sales with calls fetched from API", {

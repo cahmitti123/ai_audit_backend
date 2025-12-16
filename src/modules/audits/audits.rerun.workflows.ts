@@ -73,8 +73,8 @@ export const rerunAuditStepFunction = inngest.createFunction(
       data: {
         audit_id,
         step_position,
-        original_score: result.comparison.originalScore,
-        new_score: result.comparison.newScore,
+        original_score: result.comparison.originalScore ?? 0,
+        new_score: result.comparison.newScore ?? 0,
         score_changed: result.comparison.scoreChanged,
         conforme_changed: result.comparison.conformeChanged,
       },

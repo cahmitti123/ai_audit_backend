@@ -57,7 +57,7 @@ export async function fetchSalesWithCalls(
     includeRecordings?: boolean;
   }
 ): Promise<SalesWithCallsResponse> {
-  // DEFAULT to FALSE - recordings fetched only on fiche details request
+  // DEFAULT to TRUE - recordings fetched only on fiche details request
   const includeRecordings = options?.includeRecordings ?? true;
 
   // Convert startDate from YYYY-MM-DD to DD/MM/YYYY for CRM API

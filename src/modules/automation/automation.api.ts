@@ -58,6 +58,7 @@ export async function fetchFichesForDate(
   const params = new URLSearchParams({
     date: date,
     criteria_type: "1",
+    include_recordings: "true",
     force_new_session: "false",
   });
 

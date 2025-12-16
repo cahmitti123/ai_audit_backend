@@ -27,7 +27,7 @@ services:
     restart: always
     ports:
       # Bind to localhost; put your public Nginx in front for :80/:443.
-      - "127.0.0.1:${SERVER_PORT:-3002}:80"
+      - "0.0.0.0:${SERVER_PORT:-3002}:80"
     volumes:
       - ./deploy/nginx-lb.conf:/etc/nginx/conf.d/default.conf:ro
     networks:
@@ -117,8 +117,8 @@ services:
     restart: always
     ports:
       # Bind to localhost (access UI via SSH tunnel in prod).
-      - "127.0.0.1:${INNGEST_PORT:-8288}:8288"
-      - "127.0.0.1:${INNGEST_CONNECT_PORT:-8289}:8289"
+      - "0.0.0.0:${INNGEST_PORT:-8288}:8288"
+      - "0.0.0.0:${INNGEST_CONNECT_PORT:-8289}:8289"
     environment:
       - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
       - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}

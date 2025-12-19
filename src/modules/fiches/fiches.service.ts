@@ -495,6 +495,7 @@ export async function getFichesByDateRangeProgressive(
   options?: {
     webhookUrl?: string;
     webhookSecret?: string;
+    forceRefresh?: boolean;
     triggerBackgroundFetch?: (
       jobId: string,
       remainingDates: string[],
@@ -508,6 +509,7 @@ export async function getFichesByDateRangeProgressive(
   const end = new Date(endDate + "T23:59:59.999Z");
 
   logger.info("Starting progressive fetch", { startDate, endDate });
+  const forceRefresh = options?.forceRefresh === true;
 
   // STEP 0: Check for existing recent job (deduplication)
   // Check for any job (pending, processing, or recently completed) within last 5 minutes
@@ -521,7 +523,7 @@ export async function getFichesByDateRangeProgressive(
     orderBy: { createdAt: "desc" }, // Most recent first
   });
 
-  if (existingJob) {
+  if (existingJob && !forceRefresh) {
     logger.info("Found existing in-progress job, reusing", {
       jobId: existingJob.id,
       status: existingJob.status,
@@ -582,8 +584,8 @@ export async function getFichesByDateRangeProgressive(
 
   // All fiches we have right now (cached only)
   const allFiches = cachedFiches;
-  const daysFetched = datesWithData.length;
-  const remainingDates = datesMissing; // All missing dates go to background
+  const daysFetched = forceRefresh ? 0 : datesWithData.length;
+  const remainingDates = forceRefresh ? allDates : datesMissing; // Missing (or forced refresh) dates go to background
 
   // STEP 4: Create job record if there are missing dates
   let jobId: string | undefined = undefined;
@@ -596,7 +598,7 @@ export async function getFichesByDateRangeProgressive(
         status: "processing",
         totalDays: allDates.length,
         completedDays: daysFetched,
-        datesAlreadyFetched: datesWithData,
+        datesAlreadyFetched: forceRefresh ? [] : datesWithData,
         datesRemaining: remainingDates,
         datesFailed: [],
         webhookUrl: options?.webhookUrl,
@@ -604,7 +606,7 @@ export async function getFichesByDateRangeProgressive(
         webhookEvents: options?.webhookUrl
           ? ["progress", "complete", "failed"]
           : [],
-        progress: Math.round((daysFetched / allDates.length) * 100),
+        progress: forceRefresh ? 0 : Math.round((daysFetched / allDates.length) * 100),
         totalFiches: allFiches.length,
         resultFicheIds: allFiches.map((f) => f.ficheId),
       },

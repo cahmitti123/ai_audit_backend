@@ -306,6 +306,12 @@ fichesRouter.get(
  *         schema:
  *           type: string
  *         description: Secret for webhook HMAC signature
+ *       - in: query
+ *         name: refresh
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Set to "true" to force refetch sales from CRM and revalidate cache for the entire requested range (runs in background).
  *     responses:
  *       200:
  *         description: Progressive response with partial/complete data
@@ -317,6 +323,7 @@ fichesRouter.get(
     const endDate = req.query.endDate;
     const webhookUrl = req.query.webhookUrl;
     const webhookSecret = req.query.webhookSecret;
+    const refresh = req.query.refresh;
 
     if (typeof startDate !== "string") {
       throw new ValidationError(
@@ -332,6 +339,7 @@ fichesRouter.get(
     const webhookUrlStr = typeof webhookUrl === "string" ? webhookUrl : undefined;
     const webhookSecretStr =
       typeof webhookSecret === "string" ? webhookSecret : undefined;
+    const shouldRefresh = refresh === "true";
 
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
     if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
@@ -373,6 +381,7 @@ fichesRouter.get(
             datesAlreadyFetched: [], // Background will fetch ALL remaining dates
             webhookUrl: webhookUrlStr,
             webhookSecret: webhookSecretStr,
+            force_refresh: shouldRefresh,
           },
           // Idempotency key prevents duplicate jobs for same job ID
           id: `progressive-fetch-${jobId}`,
@@ -394,6 +403,7 @@ fichesRouter.get(
         webhookUrl: webhookUrlStr,
         webhookSecret: webhookSecretStr,
         triggerBackgroundFetch,
+        forceRefresh: shouldRefresh,
       }
     );
 

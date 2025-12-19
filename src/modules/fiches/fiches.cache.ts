@@ -277,30 +277,73 @@ export async function cacheFicheSalesSummary(
   // Enrich recordings
   const enrichedRecordings = ficheData.recordings?.map(enrichRecording) || [];
 
+  // IMPORTANT: Sales-list caching must be additive.
+  // If full fiche details already exist in the DB, do NOT overwrite them with sales-list-only rawData
+  // (that would effectively "remove" previously cached details).
+  const existing = await prisma.ficheCache.findUnique({
+    where: { ficheId: ficheData.id },
+    select: {
+      id: true,
+      rawData: true,
+      groupe: true,
+      agenceNom: true,
+      prospectNom: true,
+      prospectPrenom: true,
+      prospectEmail: true,
+      prospectTel: true,
+      salesDate: true,
+    },
+  });
+
+  const existingRaw = existing?.rawData as unknown;
+  const existingIsSalesListOnly =
+    isRecord(existingRaw) && existingRaw._salesListOnly === true;
+
+  const summaryRawData = {
+    id: ficheData.id,
+    cle: ficheData.cle, // ← IMPORTANT: Store cle for later detail fetching
+    nom: ficheData.nom,
+    prenom: ficheData.prenom,
+    telephone: ficheData.telephone,
+    telephone_2: ficheData.telephone_2 ?? null,
+    email: ficheData.email,
+    statut: ficheData.statut ?? null,
+    date_insertion: ficheData.date_insertion ?? null,
+    date_modification: ficheData.date_modification ?? null,
+    recordings: enrichedRecordings,
+    _salesListOnly: true as const,
+  };
+
+  // Decide what rawData to persist:
+  // - If we only ever had sales-list-only data, keep it sales-list-only (update it).
+  // - If full details exist, preserve full details rawData and only patch `cle` (and optionally keep a small marker).
+  const nextRawData: unknown =
+    existing && !existingIsSalesListOnly && isRecord(existingRaw)
+      ? (() => {
+          // Preserve existing full details.
+          const merged: Record<string, unknown> = { ...existingRaw };
+          merged.cle = ficheData.cle;
+          const info = merged.information;
+          if (isRecord(info)) {
+            info.cle = ficheData.cle;
+          }
+          return merged;
+        })()
+      : summaryRawData;
+
   const ficheCache = await fichesRepository.upsertFicheCache({
     ficheId: ficheData.id,
-    groupe: "", // Will be populated when full details fetched
-    agenceNom: "",
-    prospectNom: ficheData.nom,
-    prospectPrenom: ficheData.prenom,
-    prospectEmail: ficheData.email,
-    prospectTel: ficheData.telephone,
-    salesDate: options?.salesDate, // Track which CRM sales date this fiche belongs to
-    rawData: {
-      // Store COMPLETE sales data from API
-      id: ficheData.id,
-      cle: ficheData.cle, // ← IMPORTANT: Store cle for later detail fetching
-      nom: ficheData.nom,
-      prenom: ficheData.prenom,
-      telephone: ficheData.telephone,
-      telephone_2: ficheData.telephone_2 ?? null,
-      email: ficheData.email,
-      statut: ficheData.statut ?? null,
-      date_insertion: ficheData.date_insertion ?? null,
-      date_modification: ficheData.date_modification ?? null,
-      recordings: enrichedRecordings,
-      _salesListOnly: true, // Flag to indicate this is minimal data (no full details yet)
-    },
+    // Never overwrite existing groupe/agence with empty strings.
+    // If they exist, keep them; otherwise leave null.
+    groupe: existing?.groupe ?? undefined,
+    agenceNom: existing?.agenceNom ?? undefined,
+    prospectNom: ficheData.nom || existing?.prospectNom || undefined,
+    prospectPrenom: ficheData.prenom || existing?.prospectPrenom || undefined,
+    prospectEmail: ficheData.email || existing?.prospectEmail || undefined,
+    prospectTel: ficheData.telephone || existing?.prospectTel || undefined,
+    // Track which CRM sales date this fiche belongs to (used by date-range queries)
+    salesDate: options?.salesDate ?? existing?.salesDate ?? undefined,
+    rawData: nextRawData,
     hasRecordings: enrichedRecordings.length > 0,
     recordingsCount: enrichedRecordings.length,
     expiresAt,

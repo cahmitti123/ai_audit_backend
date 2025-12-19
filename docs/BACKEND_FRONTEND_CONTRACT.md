@@ -284,6 +284,7 @@ Below is the **full list** of routes defined in `src/modules/*/*.routes.ts` plus
   - `endDate` (required, `YYYY-MM-DD`)
   - `webhookUrl` (optional, URL) — per-job webhook destination (SSRF-guarded)
   - `webhookSecret` (optional, string) — stored per job and used to sign webhook requests (HMAC)
+  - `refresh=true` (optional) — forces a CRM refetch + cache revalidation for **all** dates in the range (runs in background; response still returns immediately with cached data)
 - **Response 200** (note: this endpoint is *not* wrapped under `data`):
 
 ```json
@@ -311,8 +312,9 @@ Below is the **full list** of routes defined in `src/modules/*/*.routes.ts` plus
 
 - **Background behavior**:
   - Creates `ProgressiveFetchJob` (DB) when there are missing dates.
+    - If `refresh=true`, a job is created even when the range is already fully cached (so the cache can be revalidated).
   - Emits Inngest event `fiches/progressive-fetch-continue` (idempotent per job).
-  - Realtime SSE emits:
+  - Realtime emits (Pusher):
     - `fiches.progressive_fetch.created`
     - `fiches.progressive_fetch.progress`
     - `fiches.progressive_fetch.complete`

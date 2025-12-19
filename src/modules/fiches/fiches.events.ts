@@ -85,6 +85,7 @@ export type FichesProgressiveFetchEvent = {
     startDate: string; // YYYY-MM-DD format
     endDate: string; // YYYY-MM-DD format
     datesAlreadyFetched: string[]; // Dates already returned to user
+    force_refresh?: boolean; // When true, refetch from CRM even if a date is already cached
     webhookUrl?: string; // Optional webhook for completion notification
     webhookSecret?: string; // Optional secret for webhook signature
   };
@@ -99,6 +100,7 @@ export type FichesProgressiveFetchDayEvent = {
   data: {
     jobId: string;
     date: string; // YYYY-MM-DD
+    force_refresh?: boolean; // When true, refetch from CRM even if already cached
   };
 };
 

@@ -387,7 +387,39 @@ export const transcribeFicheFunction = inngest.createFunction(
       }
 
       // Fallback: poll DB until all targeted recordings are transcribed (or timeout).
-      const ficheCacheIdStr = String((plan as any).ficheCacheId || "");
+      const rawFicheCacheId = (plan as any).ficheCacheId as unknown;
+      const parseFicheCacheId = (value: unknown): bigint | null => {
+        if (typeof value === "bigint") return value;
+        if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+          return BigInt(value);
+        }
+        if (typeof value === "string") {
+          const trimmed = value.trim();
+          if (!trimmed) return null;
+          try {
+            return BigInt(trimmed);
+          } catch {
+            return null;
+          }
+        }
+        return null;
+      };
+
+      // `plan.ficheCacheId` should normally be present, but guard against empty/invalid values
+      // so the polling loop never crashes with BigInt("") / RangeError.
+      let ficheCacheId: bigint | null = parseFicheCacheId(rawFicheCacheId);
+      if (!ficheCacheId && targetCallIds.length > 0) {
+        const resolved = await step.run(`resolve-fiche-cache-id-${fiche_id}`, async () => {
+          const row = await prisma.ficheCache.findUnique({
+            where: { ficheId: fiche_id },
+            select: { id: true },
+          });
+          return row?.id ?? null;
+        });
+        ficheCacheId = typeof resolved === "bigint" ? resolved : null;
+      }
+
+      const pollByCallIdOnly = !ficheCacheId;
       const pollIntervalSeconds = Math.max(
         2,
         Number(process.env.TRANSCRIPTION_POLL_INTERVAL_SECONDS || 5)
@@ -411,7 +443,9 @@ export const transcribeFicheFunction = inngest.createFunction(
               // Query only the targeted recordings for this run.
               const rows = await prisma.recording.findMany({
                 where: {
-                  ficheCacheId: BigInt(ficheCacheIdStr),
+                  ...(pollByCallIdOnly
+                    ? {}
+                    : { ficheCacheId: ficheCacheId as bigint }),
                   callId: { in: targetCallIds },
                 },
                 select: { hasTranscription: true },

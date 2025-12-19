@@ -210,8 +210,8 @@ export async function getFichesByDateRange(startDate: Date, endDate: Date) {
  */
 export async function upsertFicheCache(data: {
   ficheId: string;
-  groupe: string;
-  agenceNom: string;
+  groupe?: string | null;
+  agenceNom?: string | null;
   prospectNom?: string;
   prospectPrenom?: string;
   prospectEmail?: string;
@@ -227,8 +227,8 @@ export async function upsertFicheCache(data: {
     where: { ficheId: data.ficheId },
     create: {
       ficheId: data.ficheId,
-      groupe: data.groupe,
-      agenceNom: data.agenceNom,
+      ...(data.groupe !== undefined ? { groupe: data.groupe } : {}),
+      ...(data.agenceNom !== undefined ? { agenceNom: data.agenceNom } : {}),
       prospectNom: data.prospectNom,
       prospectPrenom: data.prospectPrenom,
       prospectEmail: data.prospectEmail,
@@ -241,8 +241,8 @@ export async function upsertFicheCache(data: {
       lastRevalidatedAt: data.lastRevalidatedAt,
     },
     update: {
-      groupe: data.groupe,
-      agenceNom: data.agenceNom,
+      ...(data.groupe !== undefined ? { groupe: data.groupe } : {}),
+      ...(data.agenceNom !== undefined ? { agenceNom: data.agenceNom } : {}),
       prospectNom: data.prospectNom,
       prospectPrenom: data.prospectPrenom,
       prospectEmail: data.prospectEmail,

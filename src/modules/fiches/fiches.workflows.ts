@@ -877,6 +877,7 @@ export const progressiveFetchContinueFunction = inngest.createFunction(
   { event: "fiches/progressive-fetch-continue" },
   async ({ event, step, logger }) => {
     const { jobId } = event.data;
+    const forceRefresh = event.data.force_refresh === true;
 
     const job = await step.run("load-job", async () => {
       return await prisma.progressiveFetchJob.findUnique({
@@ -916,13 +917,14 @@ export const progressiveFetchContinueFunction = inngest.createFunction(
     logger.info("Fanning out progressive fetch day workers", {
       jobId,
       remaining: remainingDates.length,
+      force_refresh: forceRefresh,
     });
 
     await step.sendEvent(
       "fan-out-days",
       remainingDates.map((date) => ({
         name: "fiches/progressive-fetch-day",
-        data: { jobId, date },
+        data: { jobId, date, force_refresh: forceRefresh },
         id: `pf-day-${jobId}-${date}`,
       }))
     );
@@ -992,12 +994,19 @@ export const progressiveFetchDayFunction = inngest.createFunction(
   { event: "fiches/progressive-fetch-day" },
   async ({ event, step, logger }) => {
     const { jobId, date } = event.data;
+    const forceRefresh = event.data.force_refresh === true;
 
     const alreadyCached = await step.run("check-date-cached", async () => {
       return await fichesRepository.hasDataForDate(date);
     });
 
-    if (!alreadyCached) {
+    if (!alreadyCached || forceRefresh) {
+      if (alreadyCached && forceRefresh) {
+        logger.info("Force refresh enabled; refetching date from CRM even though cached", {
+          jobId,
+          date,
+        });
+      }
       const includeRecordings = process.env.FICHE_SALES_INCLUDE_RECORDINGS === "1";
 
       const salesData = await step.run("fetch-sales", async () => {

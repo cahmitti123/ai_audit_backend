@@ -19,6 +19,7 @@ import {
   parseListAuditsQuery,
   type ListAuditsQuery,
   validateReviewAuditStepResultInput,
+  validateUpdateAuditInput,
 } from "./audits.schemas.js";
 import { jsonResponse } from "../../shared/bigint-serializer.js";
 import { logger } from "../../shared/logger.js";
@@ -152,6 +153,74 @@ auditsRouter.get(
         total_pages: totalPages,
         has_next_page: hasNextPage,
         has_prev_page: hasPrevPage,
+      },
+    });
+  })
+);
+
+/**
+ * Create/queue an audit (CRUD "create" convenience endpoint).
+ *
+ * This is an alias of POST /api/audits/run (kept for backwards compatibility),
+ * but uses a more REST-friendly path.
+ */
+auditsRouter.post(
+  "/",
+  asyncHandler(async (req: Request, res: Response) => {
+    const body: unknown = req.body;
+    const data =
+      typeof body === "object" && body !== null
+        ? (body as Record<string, unknown>)
+        : {};
+
+    // Backwards-compatible: accept either `audit_id` (legacy) or `audit_config_id` (preferred)
+    const auditConfigRaw = data.audit_config_id ?? data.audit_id;
+    const fiche_id = data.fiche_id;
+    const user_id = data.user_id;
+    const automation_schedule_id = data.automation_schedule_id;
+    const automation_run_id = data.automation_run_id;
+    const trigger_source = data.trigger_source;
+
+    const auditConfigId = Number.parseInt(String(auditConfigRaw ?? ""), 10);
+    const ficheIdStr = typeof fiche_id === "string" ? fiche_id : String(fiche_id ?? "");
+
+    if (!Number.isFinite(auditConfigId) || auditConfigId <= 0 || !ficheIdStr) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing required parameters",
+        message: "Both audit_config_id (or audit_id) and fiche_id are required",
+      });
+    }
+
+    const eventId = `audit-${ficheIdStr}-${auditConfigId}-${Date.now()}`;
+    const { ids } = await inngest.send({
+      name: "audit/run",
+      data: {
+        fiche_id: ficheIdStr,
+        audit_config_id: auditConfigId,
+        ...(typeof user_id === "string" && user_id ? { user_id } : {}),
+        ...(typeof automation_schedule_id === "string" && automation_schedule_id.trim()
+          ? { automation_schedule_id: automation_schedule_id.trim() }
+          : {}),
+        ...(typeof automation_run_id === "string" && automation_run_id.trim()
+          ? { automation_run_id: automation_run_id.trim() }
+          : {}),
+        ...(typeof trigger_source === "string" && trigger_source.trim()
+          ? { trigger_source: trigger_source.trim() }
+          : { trigger_source: "api" }),
+      },
+      id: eventId,
+    });
+
+    return res.json({
+      success: true,
+      message: "Audit queued for processing",
+      event_id: ids[0],
+      fiche_id: ficheIdStr,
+      audit_config_id: auditConfigId,
+      metadata: {
+        timestamp: new Date().toISOString(),
+        status: "queued",
       },
     });
   })
@@ -321,6 +390,62 @@ auditsRouter.get(
 );
 
 /**
+ * Flexible grouped/aggregated audits endpoint.
+ *
+ * Examples:
+ * - `/api/audits/grouped?group_by=automation_schedule`
+ * - `/api/audits/grouped?group_by=fiche&groupes=NCA%20R1`
+ * - `/api/audits/grouped?group_by=created_day&date_from=2025-12-01&date_to=2025-12-31`
+ * - `/api/audits/grouped?group_by=score_bucket&bucket_size=10`
+ */
+auditsRouter.get(
+  "/grouped",
+  asyncHandler(async (req: Request, res: Response) => {
+    const groupByRaw = typeof req.query.group_by === "string" ? req.query.group_by.trim() : "";
+    if (!groupByRaw) {
+      throw new ValidationError("group_by is required");
+    }
+
+    const allowed = [
+      "fiche",
+      "audit_config",
+      "status",
+      "niveau",
+      "automation_schedule",
+      "automation_run",
+      "groupe",
+      "created_day",
+      "score_bucket",
+    ] as const;
+    if (!allowed.includes(groupByRaw as (typeof allowed)[number])) {
+      throw new ValidationError(
+        `Invalid group_by. Allowed: ${allowed.join(", ")}`
+      );
+    }
+
+    const bucketSizeRaw = req.query.bucket_size;
+    const bucketSize =
+      typeof bucketSizeRaw === "string" && bucketSizeRaw.trim()
+        ? Number.parseInt(bucketSizeRaw, 10)
+        : undefined;
+
+    const filters = parseListAuditsQuery(req.query as unknown as ListAuditsQuery);
+    const result = await auditsService.groupAudits({
+      filters,
+      groupBy: groupByRaw as any,
+      bucketSize,
+    });
+
+    return res.json({
+      success: true,
+      data: result.groups,
+      pagination: result.pagination,
+      meta: result.meta,
+    });
+  })
+);
+
+/**
  * @swagger
  * /api/audits/run:
  *   post:
@@ -423,6 +548,7 @@ auditsRouter.post(
         fiche_id: ficheIdStr,
         audit_config_id: auditConfigId,
         ...(typeof user_id === "string" && user_id ? { user_id } : {}),
+        trigger_source: "api",
       },
       id: eventId,
     });
@@ -514,7 +640,8 @@ auditsRouter.post(
       data: {
         fiche_id: fiche_id.toString(),
         audit_config_id: Number(latestConfig.id),
-        user_id,
+        ...(typeof user_id === "string" && user_id ? { user_id } : {}),
+        trigger_source: "api",
       },
       id: eventId,
     });
@@ -730,6 +857,54 @@ auditsRouter.patch(
       stepPosition,
       input
     );
+
+    return jsonResponse(res, {
+      success: true,
+      data: updated,
+    });
+  })
+);
+
+/**
+ * Update audit metadata (CRUD "update" + soft delete/restore).
+ */
+auditsRouter.patch(
+  "/:audit_id",
+  asyncHandler(async (req: Request, res: Response) => {
+    const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
+    const input = validateUpdateAuditInput(req.body);
+
+    const updated = await auditsService.updateAuditMetadata(auditId, input);
+    if (!updated) {
+      return res.status(404).json({
+        success: false,
+        error: "Audit not found",
+      });
+    }
+
+    return jsonResponse(res, {
+      success: true,
+      data: updated,
+    });
+  })
+);
+
+/**
+ * Soft-delete an audit (CRUD "delete").
+ * This does NOT remove DB rows; it sets `deletedAt` and hides the audit from list endpoints by default.
+ */
+auditsRouter.delete(
+  "/:audit_id",
+  asyncHandler(async (req: Request, res: Response) => {
+    const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
+
+    const updated = await auditsService.updateAuditMetadata(auditId, { deleted: true });
+    if (!updated) {
+      return res.status(404).json({
+        success: false,
+        error: "Audit not found",
+      });
+    }
 
     return jsonResponse(res, {
       success: true,

@@ -95,6 +95,12 @@ export const auditSchema = z.object({
   id: z.string(),
   ficheCacheId: z.string(),
   auditConfigId: z.string(),
+  automationScheduleId: z.string().nullable().optional(),
+  automationRunId: z.string().nullable().optional(),
+  triggerSource: z.string().nullable().optional(),
+  triggerUserId: z.string().nullable().optional(),
+  notes: z.string().nullable().optional(),
+  deletedAt: z.date().nullable().optional(),
   overallScore: z.string(), // Decimal as string
   scorePercentage: z.string(), // Decimal as string
   niveau: auditNiveauEnum,
@@ -165,6 +171,23 @@ export const auditDetailSchema = auditSchema.extend({
     prospectTel: z.string().nullable(),
   }),
   stepResults: z.array(auditStepResultSchema),
+  automationSchedule: z
+    .object({
+      id: z.string(),
+      name: z.string(),
+    })
+    .nullable()
+    .optional(),
+  automationRun: z
+    .object({
+      id: z.string(),
+      status: z.string(),
+      startedAt: z.date(),
+      completedAt: z.date().nullable(),
+      scheduleId: z.string(),
+    })
+    .nullable()
+    .optional(),
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -178,6 +201,29 @@ export const listAuditsFiltersSchema = z.object({
   dateFrom: z.date().optional(),
   dateTo: z.date().optional(),
   auditConfigIds: z.array(z.string()).optional(),
+  // Fiche-level filters
+  groupes: z.array(z.string()).optional(),
+  groupeQuery: z.string().optional(),
+  agenceQuery: z.string().optional(),
+  prospectQuery: z.string().optional(),
+  // Audit-level filters
+  niveau: z.array(auditNiveauEnum).optional(),
+  scoreMin: z.number().optional(),
+  scoreMax: z.number().optional(),
+  durationMinMs: z.number().int().min(0).optional(),
+  durationMaxMs: z.number().int().min(0).optional(),
+  tokensMin: z.number().int().min(0).optional(),
+  tokensMax: z.number().int().min(0).optional(),
+  hasFailedSteps: z.boolean().optional(),
+  // Automation linkage
+  automationScheduleIds: z.array(z.string()).optional(),
+  automationRunIds: z.array(z.string()).optional(),
+  triggerSources: z.array(z.string()).optional(),
+  // Search
+  q: z.string().optional(),
+  // Visibility
+  latestOnly: z.boolean().optional().default(true),
+  includeDeleted: z.boolean().optional().default(false),
   sortBy: sortByEnum.optional().default("created_at"),
   sortOrder: sortOrderEnum.optional().default("desc"),
   limit: z.number().int().min(1).max(500).optional().default(100),
@@ -191,6 +237,24 @@ export const listAuditsQuerySchema = z.object({
   date_from: z.string().optional(),
   date_to: z.string().optional(),
   audit_config_ids: z.string().optional(),
+  groupes: z.string().optional(),
+  groupe_query: z.string().optional(),
+  agence_query: z.string().optional(),
+  prospect_query: z.string().optional(),
+  niveau: z.string().optional(),
+  score_min: z.string().optional(),
+  score_max: z.string().optional(),
+  duration_min_ms: z.string().optional(),
+  duration_max_ms: z.string().optional(),
+  tokens_min: z.string().optional(),
+  tokens_max: z.string().optional(),
+  has_failed_steps: z.string().optional(),
+  automation_schedule_ids: z.string().optional(),
+  automation_run_ids: z.string().optional(),
+  trigger_source: z.string().optional(),
+  q: z.string().optional(),
+  latest_only: z.string().optional(),
+  include_deleted: z.string().optional(),
   sort_by: z.string().optional(),
   sort_order: z.string().optional(),
   limit: z.string().optional(),
@@ -235,6 +299,22 @@ export const reviewAuditStepResultInputSchema = z.object({
   // Optional metadata (stored in rawResult human_review)
   reviewer: z.string().min(1).max(200).optional(),
   reason: z.string().min(1).max(5000).optional(),
+});
+
+/**
+ * Update an audit record metadata (soft-delete, notes, and optional linkage fields).
+ *
+ * IMPORTANT:
+ * - This is NOT intended to edit the AI results (use step review endpoint for that).
+ * - `deleted=true` performs a soft-delete (sets `deletedAt`).
+ */
+export const updateAuditInputSchema = z.object({
+  notes: z.string().max(20000).nullable().optional(),
+  deleted: z.boolean().optional(),
+  automation_schedule_id: z.string().trim().regex(/^\d+$/, "automation_schedule_id must be a positive integer string").nullable().optional(),
+  automation_run_id: z.string().trim().regex(/^\d+$/, "automation_run_id must be a positive integer string").nullable().optional(),
+  trigger_source: z.string().trim().max(50).nullable().optional(),
+  trigger_user_id: z.string().trim().max(200).nullable().optional(),
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -376,6 +456,7 @@ export type BatchAuditInput = z.infer<typeof batchAuditInputSchema>;
 export type ReviewAuditStepResultInput = z.infer<
   typeof reviewAuditStepResultInputSchema
 >;
+export type UpdateAuditInput = z.infer<typeof updateAuditInputSchema>;
 
 // Response Types
 export type AuditListResponse = z.infer<typeof auditListResponseSchema>;
@@ -422,6 +503,15 @@ export const validateReviewAuditStepResultInput = (
   }
 };
 
+export const validateUpdateAuditInput = (data: unknown): UpdateAuditInput => {
+  try {
+    return updateAuditInputSchema.parse(data);
+  } catch (error) {
+    logger.error("Update audit input validation failed", { error });
+    throw new ValidationError("Invalid update audit input", error);
+  }
+};
+
 export const validateListAuditsFilters = (data: unknown): ListAuditsFilters => {
   try {
     return listAuditsFiltersSchema.parse(data);
@@ -440,14 +530,20 @@ export const parseListAuditsQuery = (
   try {
     const filters: Partial<ListAuditsFilters> = {};
 
+    const splitCsv = (value: string): string[] =>
+      value
+        .split(",")
+        .map((v) => v.trim())
+        .filter(Boolean);
+
     // Parse fiche_ids
     if (query.fiche_ids) {
-      filters.ficheIds = query.fiche_ids.split(",").map((id) => id.trim());
+      filters.ficheIds = splitCsv(query.fiche_ids);
     }
 
     // Parse status
     if (query.status) {
-      const statuses = query.status.split(",").map((s) => s.trim());
+      const statuses = splitCsv(query.status);
       filters.status = statuses.filter((s) =>
         ["pending", "running", "completed", "failed"].includes(s)
       ) as AuditStatus[];
@@ -468,9 +564,80 @@ export const parseListAuditsQuery = (
 
     // Parse audit_config_ids
     if (query.audit_config_ids) {
-      filters.auditConfigIds = query.audit_config_ids
-        .split(",")
-        .map((id) => id.trim());
+      filters.auditConfigIds = splitCsv(query.audit_config_ids);
+    }
+
+    // Fiche-level filters
+    if (query.groupes) {
+      filters.groupes = splitCsv(query.groupes);
+    }
+    if (typeof query.groupe_query === "string" && query.groupe_query.trim()) {
+      filters.groupeQuery = query.groupe_query.trim();
+    }
+    if (typeof query.agence_query === "string" && query.agence_query.trim()) {
+      filters.agenceQuery = query.agence_query.trim();
+    }
+    if (typeof query.prospect_query === "string" && query.prospect_query.trim()) {
+      filters.prospectQuery = query.prospect_query.trim();
+    }
+
+    // Audit-level filters
+    if (query.niveau) {
+      const niveaux = splitCsv(query.niveau);
+      filters.niveau = niveaux.filter((n) =>
+        ["EXCELLENT", "BON", "ACCEPTABLE", "INSUFFISANT", "REJET", "PENDING"].includes(n)
+      ) as AuditNiveau[];
+    }
+    if (query.score_min) {
+      const n = Number.parseFloat(query.score_min);
+      if (Number.isFinite(n)) filters.scoreMin = n;
+    }
+    if (query.score_max) {
+      const n = Number.parseFloat(query.score_max);
+      if (Number.isFinite(n)) filters.scoreMax = n;
+    }
+    if (query.duration_min_ms) {
+      const n = Number.parseInt(query.duration_min_ms, 10);
+      if (Number.isFinite(n)) filters.durationMinMs = n;
+    }
+    if (query.duration_max_ms) {
+      const n = Number.parseInt(query.duration_max_ms, 10);
+      if (Number.isFinite(n)) filters.durationMaxMs = n;
+    }
+    if (query.tokens_min) {
+      const n = Number.parseInt(query.tokens_min, 10);
+      if (Number.isFinite(n)) filters.tokensMin = n;
+    }
+    if (query.tokens_max) {
+      const n = Number.parseInt(query.tokens_max, 10);
+      if (Number.isFinite(n)) filters.tokensMax = n;
+    }
+    if (query.has_failed_steps !== undefined) {
+      filters.hasFailedSteps = query.has_failed_steps === "true";
+    }
+
+    // Automation linkage
+    if (query.automation_schedule_ids) {
+      filters.automationScheduleIds = splitCsv(query.automation_schedule_ids);
+    }
+    if (query.automation_run_ids) {
+      filters.automationRunIds = splitCsv(query.automation_run_ids);
+    }
+    if (query.trigger_source) {
+      filters.triggerSources = splitCsv(query.trigger_source);
+    }
+
+    // Search
+    if (typeof query.q === "string" && query.q.trim()) {
+      filters.q = query.q.trim();
+    }
+
+    // Visibility
+    if (query.latest_only !== undefined) {
+      filters.latestOnly = query.latest_only === "true";
+    }
+    if (query.include_deleted !== undefined) {
+      filters.includeDeleted = query.include_deleted === "true";
     }
 
     // Parse sort_by
@@ -506,7 +673,7 @@ export const parseListAuditsQuery = (
     return validateListAuditsFilters(filters);
   } catch (error) {
     logger.error("Query parsing failed", { error, query });
-    throw new Error("Invalid query parameters");
+    throw new ValidationError("Invalid query parameters", error);
   }
 };
 

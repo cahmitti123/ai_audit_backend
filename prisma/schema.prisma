@@ -137,6 +137,18 @@ model Audit {
     auditConfigId BigInt      @map("audit_config_id")
     auditConfig   AuditConfig @relation(fields: [auditConfigId], references: [id])
 
+    // Optional linkage when an audit was triggered by an automation run/schedule
+    automationScheduleId BigInt?             @map("automation_schedule_id")
+    automationSchedule   AutomationSchedule? @relation(fields: [automationScheduleId], references: [id])
+    automationRunId      BigInt?             @map("automation_run_id")
+    automationRun        AutomationRun?      @relation(fields: [automationRunId], references: [id])
+
+    // Optional origin metadata (no auth system yet, but useful for observability/search)
+    triggerSource String? @map("trigger_source") // e.g. "automation" | "api"
+    triggerUserId String? @map("trigger_user_id")
+    notes         String? @map("notes") @db.Text
+    deletedAt     DateTime? @map("deleted_at")
+
     overallScore    Decimal @map("overall_score") @db.Decimal(5, 2)
     scorePercentage Decimal @map("score_percentage") @db.Decimal(5, 2)
     niveau          String
@@ -171,6 +183,9 @@ model Audit {
     @@index([isCompliant])
     @@index([createdAt])
     @@index([isLatest])
+    @@index([automationScheduleId])
+    @@index([automationRunId])
+    @@index([deletedAt])
     @@map("audits")
 }
 
@@ -304,6 +319,7 @@ model AutomationSchedule {
 
     // Execution History
     runs           AutomationRun[]
+    audits         Audit[]
     lastRunAt      DateTime?       @map("last_run_at")
     lastRunStatus  String?         @map("last_run_status") // success, partial, failed
     totalRuns      Int             @default(0) @map("total_runs")
@@ -362,6 +378,7 @@ model AutomationRun {
 
     // Execution Logs
     logs AutomationLog[]
+    audits Audit[]
 
     @@index([scheduleId])
     @@index([status])

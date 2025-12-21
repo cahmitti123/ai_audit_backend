@@ -238,6 +238,19 @@ export async function analyzeAllSteps(
   // Track progress based on actual completion order (not step index)
   let completedSteps = 0;
   let failedSteps = 0;
+  let progressQueue: Promise<void> = Promise.resolve();
+
+  const enqueueProgress = (fn: () => Promise<void>) => {
+    progressQueue = progressQueue
+      .then(fn)
+      .catch((err: unknown) => {
+        logger.warn("Audit progress update failed (non-fatal)", {
+          audit_id: auditId,
+          fiche_id: ficheId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+  };
 
   const stepResults = await mapWithConcurrency(
     auditConfig.auditSteps,
@@ -254,41 +267,42 @@ export async function analyzeAllSteps(
           options
         );
 
-        completedSteps++;
-
-        // Send progress webhook after each step completes
-        await auditWebhooks.progress(
-          auditId,
-          ficheId,
-          completedSteps,
-          totalSteps,
-          failedSteps,
-          "analysis"
-        );
+        enqueueProgress(async () => {
+          completedSteps += 1;
+          await auditWebhooks.progress(
+            auditId,
+            ficheId,
+            completedSteps,
+            totalSteps,
+            failedSteps,
+            "analysis"
+          );
+        });
 
         return { success: true as const, result };
       } catch (error) {
-        failedSteps++;
-        completedSteps++;
+        // Serialize failure + progress updates so counts are consistent and monotonic.
+        enqueueProgress(async () => {
+          failedSteps += 1;
+          completedSteps += 1;
 
-        // Send step failed webhook
-        await auditWebhooks.stepFailed(
-          auditId,
-          ficheId,
-          step.position,
-          step.name,
-          String(error)
-        );
+          await auditWebhooks.stepFailed(
+            auditId,
+            ficheId,
+            step.position,
+            step.name,
+            String(error)
+          );
 
-        // Still send progress webhook
-        await auditWebhooks.progress(
-          auditId,
-          ficheId,
-          completedSteps,
-          totalSteps,
-          failedSteps,
-          "analysis"
-        );
+          await auditWebhooks.progress(
+            auditId,
+            ficheId,
+            completedSteps,
+            totalSteps,
+            failedSteps,
+            "analysis"
+          );
+        });
 
         return {
           success: false as const,
@@ -304,6 +318,9 @@ export async function analyzeAllSteps(
       }
     }
   );
+
+  // Ensure all queued progress events are flushed before returning.
+  await progressQueue;
 
   const elapsed = (Date.now() - startTime) / 1000;
 

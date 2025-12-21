@@ -555,10 +555,25 @@ Important: This handler is **DB-only** (no local file cache fallback), which is 
 - **Purpose**: list audits with filtering + pagination.
 - **Query**:
   - `fiche_ids` (optional CSV)
+  - `groupes` (optional CSV) — filter by `fiche_cache.groupe`
+  - `groupe_query` (optional string) — case-insensitive contains on `fiche_cache.groupe`
+  - `agence_query` (optional string) — case-insensitive contains on `fiche_cache.agence_nom`
+  - `prospect_query` (optional string) — searches `prospect_nom|prospect_prenom|prospect_email|prospect_tel|ficheId`
   - `status` (optional CSV: pending,running,completed,failed)
   - `is_compliant` (optional `"true"|"false"`)
   - `date_from` / `date_to` (optional strings; passed to `new Date(...)`)
   - `audit_config_ids` (optional CSV)
+  - `niveau` (optional CSV: EXCELLENT,BON,ACCEPTABLE,INSUFFISANT,REJET,PENDING)
+  - `score_min` / `score_max` (optional numbers) — filters `scorePercentage`
+  - `duration_min_ms` / `duration_max_ms` (optional ints)
+  - `tokens_min` / `tokens_max` (optional ints)
+  - `has_failed_steps` (optional `"true"|"false"`) — based on `failedSteps`
+  - `automation_schedule_ids` (optional CSV) — audits triggered by an automation schedule
+  - `automation_run_ids` (optional CSV) — audits triggered by an automation run
+  - `trigger_source` (optional CSV) — e.g. `api,batch,automation`
+  - `q` (optional string) — free-text search across fiche id / prospect name / config name / error message
+  - `latest_only` (optional `"true"|"false"`, default true)
+  - `include_deleted` (optional `"true"|"false"`, default false)
   - `sort_by` (optional: `created_at|completed_at|score_percentage|duration_ms`)
   - `sort_order` (optional: `asc|desc`)
   - `limit` (optional string → int; clamped 1..500)
@@ -566,7 +581,7 @@ Important: This handler is **DB-only** (no local file cache fallback), which is 
 - **Response 200**:
   - `{ success:true, data: AuditWithFiche[], pagination: { total, limit, offset, current_page, total_pages, has_next_page, has_prev_page } }`
 - **Errors**:
-  - `500` with `{ success:false, error:"Invalid query parameters" }` if parsing fails.
+  - `400` (`code=VALIDATION_ERROR`) if query parsing/validation fails.
 
 ### GET `/api/audits/grouped-by-fiches`
 
@@ -574,6 +589,18 @@ Important: This handler is **DB-only** (no local file cache fallback), which is 
 - **Query**: same as `/api/audits`.
 - **Response 200**:
   - `{ success:true, data: FicheWithAudits[], pagination: {...} }`
+
+### GET `/api/audits/grouped`
+
+- **Purpose**: grouped/aggregated audits for dashboards.
+- **Query**:
+  - All filters supported by `GET /api/audits` (above)
+  - `group_by` (**required**): one of:
+    - `fiche` | `groupe` | `audit_config` | `status` | `niveau` | `automation_schedule` | `automation_run` | `created_day` | `score_bucket`
+  - `bucket_size` (optional int) — only used when `group_by=score_bucket` (default 10)
+  - Pagination uses `limit`/`offset` over **groups** (not audits)
+- **Response 200**:
+  - `{ success:true, data: Group[], pagination: {...}, meta: { group_by, bucket_size, truncated } }`
 
 ### POST `/api/audits/run`
 
@@ -600,6 +627,14 @@ Important: This handler is **DB-only** (no local file cache fallback), which is 
   - `400`: `{ success:false, error:"Missing required parameters", message:"Both audit_config_id (or audit_id) and fiche_id are required" }`
 
 Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwards compatibility.
+
+### POST `/api/audits`
+
+- **Purpose**: CRUD-friendly alias for `POST /api/audits/run` (same behavior).
+- **Body**: same as `/api/audits/run`, plus optional:
+  - `automation_schedule_id` (string) — if you want to tag the audit as coming from a schedule
+  - `automation_run_id` (string)
+  - `trigger_source` (string; default `"api"`)
 
 ### POST `/api/audits/run-latest`
 
@@ -640,6 +675,21 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
   - `{ success:true, data: AuditDetail }`
 - **Errors**:
   - `404`: `{ success:false, error:"Audit not found" }`
+
+### PATCH `/api/audits/:audit_id`
+
+- **Purpose**: update audit metadata (notes / soft delete / optional linkage fields).
+- **Body**:
+  - `notes` (optional string|null)
+  - `deleted` (optional boolean) — soft-delete (`true`) or restore (`false`)
+  - `automation_schedule_id` (optional string|null)
+  - `automation_run_id` (optional string|null)
+  - `trigger_source` (optional string|null)
+  - `trigger_user_id` (optional string|null)
+
+### DELETE `/api/audits/:audit_id`
+
+- **Purpose**: soft-delete an audit (sets `deletedAt`; does not remove DB rows).
 
 ### POST `/api/audits/:audit_id/steps/:step_position/rerun`
 

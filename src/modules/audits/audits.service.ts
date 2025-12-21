@@ -21,6 +21,7 @@ import type {
   RunAuditInput,
   AuditFunctionResult,
   ReviewAuditStepResultInput,
+  UpdateAuditInput,
 } from "./audits.schemas.js";
 import {
   auditNiveauEnum,
@@ -132,6 +133,14 @@ export async function getAuditById(
     id: audit.id.toString(),
     ficheCacheId: audit.ficheCacheId.toString(),
     auditConfigId: audit.auditConfigId.toString(),
+    automationScheduleId: audit.automationScheduleId
+      ? audit.automationScheduleId.toString()
+      : null,
+    automationRunId: audit.automationRunId ? audit.automationRunId.toString() : null,
+    triggerSource: audit.triggerSource ?? null,
+    triggerUserId: audit.triggerUserId ?? null,
+    notes: audit.notes ?? null,
+    deletedAt: audit.deletedAt ?? null,
     overallScore: audit.overallScore.toString(),
     scorePercentage: audit.scorePercentage.toString(),
     niveau: toAuditNiveau(audit.niveau),
@@ -168,6 +177,21 @@ export async function getAuditById(
       prospectTel: audit.ficheCache.prospectTel,
     },
     stepResults: audit.stepResults.map((step) => toAuditStepResult(step)),
+    automationSchedule: audit.automationSchedule
+      ? {
+          id: audit.automationSchedule.id.toString(),
+          name: audit.automationSchedule.name,
+        }
+      : null,
+    automationRun: audit.automationRun
+      ? {
+          id: audit.automationRun.id.toString(),
+          status: audit.automationRun.status,
+          startedAt: audit.automationRun.startedAt,
+          completedAt: audit.automationRun.completedAt,
+          scheduleId: audit.automationRun.scheduleId.toString(),
+        }
+      : null,
   };
 }
 
@@ -184,6 +208,14 @@ export async function getAuditsByFiche(
     id: audit.id.toString(),
     ficheCacheId: audit.ficheCacheId.toString(),
     auditConfigId: audit.auditConfigId.toString(),
+    automationScheduleId: audit.automationScheduleId
+      ? audit.automationScheduleId.toString()
+      : null,
+    automationRunId: audit.automationRunId ? audit.automationRunId.toString() : null,
+    triggerSource: audit.triggerSource ?? null,
+    triggerUserId: audit.triggerUserId ?? null,
+    notes: audit.notes ?? null,
+    deletedAt: audit.deletedAt ?? null,
     overallScore: audit.overallScore.toString(),
     scorePercentage: audit.scorePercentage.toString(),
     niveau: toAuditNiveau(audit.niveau),
@@ -210,6 +242,21 @@ export async function getAuditsByFiche(
       name: audit.auditConfig.name,
       description: audit.auditConfig.description,
     },
+    automationSchedule: audit.automationSchedule
+      ? {
+          id: audit.automationSchedule.id.toString(),
+          name: audit.automationSchedule.name,
+        }
+      : null,
+    automationRun: audit.automationRun
+      ? {
+          id: audit.automationRun.id.toString(),
+          status: audit.automationRun.status,
+          startedAt: audit.automationRun.startedAt,
+          completedAt: audit.automationRun.completedAt,
+          scheduleId: audit.automationRun.scheduleId.toString(),
+        }
+      : null,
   }));
 }
 
@@ -231,6 +278,14 @@ export async function listAudits(filters: ListAuditsFilters): Promise<{
     id: audit.id.toString(),
     ficheCacheId: audit.ficheCacheId.toString(),
     auditConfigId: audit.auditConfigId.toString(),
+    automationScheduleId: audit.automationScheduleId
+      ? audit.automationScheduleId.toString()
+      : null,
+    automationRunId: audit.automationRunId ? audit.automationRunId.toString() : null,
+    triggerSource: audit.triggerSource ?? null,
+    triggerUserId: audit.triggerUserId ?? null,
+    notes: audit.notes ?? null,
+    deletedAt: audit.deletedAt ?? null,
     overallScore: audit.overallScore.toString(),
     scorePercentage: audit.scorePercentage.toString(),
     niveau: toAuditNiveau(audit.niveau),
@@ -263,6 +318,21 @@ export async function listAudits(filters: ListAuditsFilters): Promise<{
       name: audit.auditConfig.name,
       description: audit.auditConfig.description,
     },
+    automationSchedule: audit.automationSchedule
+      ? {
+          id: audit.automationSchedule.id.toString(),
+          name: audit.automationSchedule.name,
+        }
+      : null,
+    automationRun: audit.automationRun
+      ? {
+          id: audit.automationRun.id.toString(),
+          status: audit.automationRun.status,
+          startedAt: audit.automationRun.startedAt,
+          completedAt: audit.automationRun.completedAt,
+          scheduleId: audit.automationRun.scheduleId.toString(),
+        }
+      : null,
   }));
 
   return {
@@ -273,6 +343,84 @@ export async function listAudits(filters: ListAuditsFilters): Promise<{
       offset: result.offset,
     },
   };
+}
+
+/**
+ * Group/aggregate audits (counts + score stats) for dashboards.
+ */
+export async function groupAudits(params: {
+  filters: ListAuditsFilters;
+  groupBy: auditsRepository.AuditGroupBy;
+  bucketSize?: number;
+}) {
+  const result = await auditsRepository.groupAudits({
+    filters: params.filters,
+    groupBy: params.groupBy,
+    bucketSize: params.bucketSize,
+  });
+
+  const totalPages = Math.ceil(result.totalGroups / result.limit);
+  const currentPage = Math.floor(result.offset / result.limit) + 1;
+
+  return {
+    groups: result.groups,
+    pagination: {
+      total: result.totalGroups,
+      limit: result.limit,
+      offset: result.offset,
+      current_page: currentPage,
+      total_pages: totalPages,
+      has_next_page: currentPage < totalPages,
+      has_prev_page: currentPage > 1,
+    },
+    meta: {
+      group_by: params.groupBy,
+      bucket_size: result.bucketSize,
+      truncated: result.truncated,
+    },
+  };
+}
+
+/**
+ * Update audit metadata (notes / linkage / soft delete).
+ */
+export async function updateAuditMetadata(
+  auditId: string | bigint,
+  input: UpdateAuditInput
+): Promise<AuditDetail | null> {
+  const id = typeof auditId === "string" ? BigInt(auditId) : auditId;
+
+  const parseNullableBigInt = (value: string | null | undefined): bigint | null | undefined => {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (!/^\d+$/.test(trimmed)) return null;
+    try {
+      return BigInt(trimmed);
+    } catch {
+      return null;
+    }
+  };
+
+  await auditsRepository.updateAuditMetadata(id, {
+    ...(Object.prototype.hasOwnProperty.call(input, "notes") ? { notes: input.notes } : {}),
+    ...(typeof input.deleted === "boolean" ? { deleted: input.deleted } : {}),
+    ...(Object.prototype.hasOwnProperty.call(input, "automation_schedule_id")
+      ? { automationScheduleId: parseNullableBigInt(input.automation_schedule_id) ?? null }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(input, "automation_run_id")
+      ? { automationRunId: parseNullableBigInt(input.automation_run_id) ?? null }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(input, "trigger_source")
+      ? { triggerSource: input.trigger_source ?? null }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(input, "trigger_user_id")
+      ? { triggerUserId: input.trigger_user_id ?? null }
+      : {}),
+  });
+
+  return await getAuditById(id);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -382,6 +530,14 @@ export async function getAuditsGroupedByFiches(filters: ListAuditsFilters): Prom
       id: audit.id.toString(),
       ficheCacheId: audit.ficheCacheId.toString(),
       auditConfigId: audit.auditConfigId.toString(),
+      automationScheduleId: audit.automationScheduleId
+        ? audit.automationScheduleId.toString()
+        : null,
+      automationRunId: audit.automationRunId ? audit.automationRunId.toString() : null,
+      triggerSource: audit.triggerSource ?? null,
+      triggerUserId: audit.triggerUserId ?? null,
+      notes: audit.notes ?? null,
+      deletedAt: audit.deletedAt ?? null,
       overallScore: audit.overallScore.toString(),
       scorePercentage: audit.scorePercentage.toString(),
       niveau: toAuditNiveau(audit.niveau),
@@ -408,6 +564,21 @@ export async function getAuditsGroupedByFiches(filters: ListAuditsFilters): Prom
         name: audit.auditConfig.name,
         description: audit.auditConfig.description,
       },
+      automationSchedule: (audit as any).automationSchedule
+        ? {
+            id: String((audit as any).automationSchedule.id),
+            name: String((audit as any).automationSchedule.name),
+          }
+        : null,
+      automationRun: (audit as any).automationRun
+        ? {
+            id: String((audit as any).automationRun.id),
+            status: String((audit as any).automationRun.status),
+            startedAt: (audit as any).automationRun.startedAt as Date,
+            completedAt: ((audit as any).automationRun.completedAt as Date | null) ?? null,
+            scheduleId: String((audit as any).automationRun.scheduleId),
+          }
+        : null,
     }));
 
     // Calculate latest audit date
@@ -596,6 +767,8 @@ export async function getGlobalAuditStatistics(filters?: {
     dateFrom: filters?.dateFrom,
     dateTo: filters?.dateTo,
     auditConfigIds: filters?.auditConfigIds,
+    latestOnly: true,
+    includeDeleted: false,
     limit: 10000, // Get all for stats
     sortBy: "created_at",
     sortOrder: "desc",

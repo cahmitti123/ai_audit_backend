@@ -110,6 +110,18 @@ export async function transcribeFicheRecordings(
   let completedCount = 0;
   let succeededCount = 0;
   let failedCount = 0;
+  let progressQueue: Promise<void> = Promise.resolve();
+
+  const enqueueProgress = (fn: () => Promise<void>) => {
+    progressQueue = progressQueue
+      .then(fn)
+      .catch((err: unknown) => {
+        logger.warn("Transcription progress update failed (non-fatal)", {
+          fiche_id: ficheId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+  };
 
   await mapWithConcurrency(
     untranscribed,
@@ -149,31 +161,33 @@ export async function transcribeFicheRecordings(
             untranscribed.length
           );
 
-          failedCount++;
-          completedCount++;
-          failures.push({ callId: rec.callId, error: errorMsg });
+          enqueueProgress(async () => {
+            failedCount += 1;
+            completedCount += 1;
+            failures.push({ callId: rec.callId, error: errorMsg });
 
-          const currentTranscribed = alreadyTranscribed + succeededCount;
-          const pending = recordings.length - currentTranscribed - failedCount;
+            const currentTranscribed = alreadyTranscribed + succeededCount;
+            const pending = recordings.length - currentTranscribed - failedCount;
 
-          await transcriptionWebhooks.progress(
-            ficheId,
-            recordings.length,
-            currentTranscribed,
-            pending,
-            failedCount
-          );
-
-          if (onProgress) {
-            await onProgress({
+            await transcriptionWebhooks.progress(
               ficheId,
-              currentIndex: completedCount,
-              total: untranscribed.length,
-              totalRecordings: recordings.length,
-              transcribed: currentTranscribed,
+              recordings.length,
+              currentTranscribed,
               pending,
-            });
-          }
+              failedCount
+            );
+
+            if (onProgress) {
+              await onProgress({
+                ficheId,
+                currentIndex: completedCount,
+                total: untranscribed.length,
+                totalRecordings: recordings.length,
+                transcribed: currentTranscribed,
+                pending,
+              });
+            }
+          });
 
           return;
         }
@@ -203,11 +217,35 @@ export async function transcribeFicheRecordings(
           untranscribed.length
         );
 
-        succeededCount++;
-        completedCount++;
-        results.push({
-          callId: rec.callId,
-          transcriptionId: transcription.transcription_id!,
+        enqueueProgress(async () => {
+          succeededCount += 1;
+          completedCount += 1;
+          results.push({
+            callId: rec.callId,
+            transcriptionId: transcription.transcription_id!,
+          });
+
+          const currentTranscribed = alreadyTranscribed + succeededCount;
+          const pending = recordings.length - currentTranscribed - failedCount;
+
+          await transcriptionWebhooks.progress(
+            ficheId,
+            recordings.length,
+            currentTranscribed,
+            pending,
+            failedCount
+          );
+
+          if (onProgress) {
+            await onProgress({
+              ficheId,
+              currentIndex: completedCount,
+              total: untranscribed.length,
+              totalRecordings: recordings.length,
+              transcribed: currentTranscribed,
+              pending,
+            });
+          }
         });
       } catch (error: unknown) {
         const errorMsg = error instanceof Error ? error.message : String(error);
@@ -225,35 +263,39 @@ export async function transcribeFicheRecordings(
           untranscribed.length
         );
 
-        failedCount++;
-        completedCount++;
-        failures.push({ callId: rec.callId, error: errorMsg });
-      }
+        enqueueProgress(async () => {
+          failedCount += 1;
+          completedCount += 1;
+          failures.push({ callId: rec.callId, error: errorMsg });
 
-      // Send progress webhook after each completion (throttling can be added later if needed)
-      const currentTranscribed = alreadyTranscribed + succeededCount;
-      const pending = recordings.length - currentTranscribed - failedCount;
+          const currentTranscribed = alreadyTranscribed + succeededCount;
+          const pending = recordings.length - currentTranscribed - failedCount;
 
-      await transcriptionWebhooks.progress(
-        ficheId,
-        recordings.length,
-        currentTranscribed,
-        pending,
-        failedCount
-      );
+          await transcriptionWebhooks.progress(
+            ficheId,
+            recordings.length,
+            currentTranscribed,
+            pending,
+            failedCount
+          );
 
-      if (onProgress) {
-        await onProgress({
-          ficheId,
-          currentIndex: completedCount,
-          total: untranscribed.length,
-          totalRecordings: recordings.length,
-          transcribed: currentTranscribed,
-          pending,
+          if (onProgress) {
+            await onProgress({
+              ficheId,
+              currentIndex: completedCount,
+              total: untranscribed.length,
+              totalRecordings: recordings.length,
+              transcribed: currentTranscribed,
+              pending,
+            });
+          }
         });
       }
     }
   );
+
+  // Flush queued progress updates before returning final counters/results
+  await progressQueue;
 
   logger.info("Transcription complete", {
     fiche_id: ficheId,

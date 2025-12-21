@@ -879,7 +879,13 @@ export const runAutomationFunction = inngest.createFunction(
             "fan-out-all-audits",
             auditTasks.map(({ ficheId, configId }, idx) => ({
               name: "audit/run",
-              data: { fiche_id: ficheId, audit_config_id: Number(configId) },
+              data: {
+                fiche_id: ficheId,
+                audit_config_id: Number(configId),
+                automation_schedule_id: String(schedule_id),
+                automation_run_id: String(runIdString),
+                trigger_source: "automation",
+              },
               // Deterministic id: avoid duplicate audit dispatch on retries
               id: `automation-${runIdString}-audit-${ficheId}-${configId}`,
             }))

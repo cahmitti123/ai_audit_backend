@@ -12,6 +12,9 @@ export type AuditsEvents = {
     fiche_id: string;
     audit_config_id: number;
     user_id?: string;
+    automation_schedule_id?: string; // BigInt serialized as string
+    automation_run_id?: string; // BigInt serialized as string
+    trigger_source?: string; // e.g. "automation" | "api"
   };
   /**
    * Analyze a single audit step (fan-out worker).

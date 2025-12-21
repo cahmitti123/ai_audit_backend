@@ -419,7 +419,7 @@ export const transcribeFicheFunction = inngest.createFunction(
         ficheCacheId = typeof resolved === "bigint" ? resolved : null;
       }
 
-      const pollByCallIdOnly = !ficheCacheId;
+      const pollByFicheRelation = !ficheCacheId;
       const pollIntervalSeconds = Math.max(
         2,
         Number(process.env.TRANSCRIPTION_POLL_INTERVAL_SECONDS || 5)
@@ -441,12 +441,16 @@ export const transcribeFicheFunction = inngest.createFunction(
               }
 
               // Query only the targeted recordings for this run.
+              // IMPORTANT: Never drop the fiche constraint. `callId` is only unique per fiche
+              // (`(ficheCacheId, callId)` composite key), so filtering by callId alone could
+              // accidentally include recordings from other fiches.
+              const where = pollByFicheRelation
+                ? { ficheCache: { ficheId: fiche_id }, callId: { in: targetCallIds } }
+                : { ficheCacheId: ficheCacheId as bigint, callId: { in: targetCallIds } };
+
               const rows = await prisma.recording.findMany({
                 where: {
-                  ...(pollByCallIdOnly
-                    ? {}
-                    : { ficheCacheId: ficheCacheId as bigint }),
-                  callId: { in: targetCallIds },
+                  ...where,
                 },
                 select: { hasTranscription: true },
               });

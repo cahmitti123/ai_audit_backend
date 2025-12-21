@@ -535,7 +535,39 @@ export const runAuditFunction = inngest.createFunction(
   },
   { event: "audit/run" },
   async ({ event, step, logger }): Promise<AuditFunctionResult> => {
-    const { fiche_id, audit_config_id, user_id } = event.data;
+    const {
+      fiche_id,
+      audit_config_id,
+      user_id,
+      automation_schedule_id,
+      automation_run_id,
+      trigger_source,
+    } = event.data as typeof event.data & {
+      automation_schedule_id?: unknown;
+      automation_run_id?: unknown;
+      trigger_source?: unknown;
+    };
+
+    const parseOptionalBigInt = (value: unknown): bigint | undefined => {
+      if (typeof value === "bigint") return value;
+      const str = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+      if (!str) return undefined;
+      if (!/^\d+$/.test(str)) return undefined;
+      try {
+        return BigInt(str);
+      } catch {
+        return undefined;
+      }
+    };
+
+    const automationScheduleId = parseOptionalBigInt(automation_schedule_id);
+    const automationRunId = parseOptionalBigInt(automation_run_id);
+    const triggerSource =
+      typeof trigger_source === "string" && trigger_source.trim()
+        ? trigger_source.trim()
+        : undefined;
+    const triggerUserId =
+      typeof user_id === "string" && user_id.trim() ? user_id.trim() : undefined;
     // Capture start time in a step to persist it across Inngest checkpoints
     const { startTime, auditId } = await step.run(
       "capture-start-time",
@@ -724,7 +756,13 @@ export const runAuditFunction = inngest.createFunction(
       const createdAudit = await createPendingAudit(
         cached.id,
         BigInt(audit_config_id),
-        auditId
+        auditId,
+        {
+          automationScheduleId,
+          automationRunId,
+          triggerSource: triggerSource ?? "api",
+          triggerUserId,
+        }
       );
 
       logger.info("Audit record created", {
@@ -1729,7 +1767,8 @@ export const batchAuditFunction = inngest.createFunction(
         data: {
           fiche_id,
           audit_config_id: defaultAuditConfigId,
-          user_id,
+          ...(typeof user_id === "string" && user_id ? { user_id } : {}),
+          trigger_source: "batch",
         },
         id: `batch-${batchId}-audit-${fiche_id}-${defaultAuditConfigId}`,
       }))

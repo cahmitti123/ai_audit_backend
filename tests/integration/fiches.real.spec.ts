@@ -123,11 +123,11 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
       {
         id: ficheId,
         cle: ficheCle,
-        nom: typeof firstWithCle.nom === "string" ? firstWithCle.nom : null,
-        prenom: typeof firstWithCle.prenom === "string" ? firstWithCle.prenom : null,
-        email: typeof firstWithCle.email === "string" ? firstWithCle.email : null,
+        nom: typeof firstWithCle.nom === "string" ? firstWithCle.nom : "",
+        prenom: typeof firstWithCle.prenom === "string" ? firstWithCle.prenom : "",
+        email: typeof firstWithCle.email === "string" ? firstWithCle.email : "",
         telephone:
-          typeof firstWithCle.telephone === "string" ? firstWithCle.telephone : null,
+          typeof firstWithCle.telephone === "string" ? firstWithCle.telephone : "",
         telephone_2:
           typeof firstWithCle.telephone_2 === "string"
             ? firstWithCle.telephone_2

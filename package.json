@@ -13,7 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration:hint": "node -e \"console.log('Run integration tests with: $env:RUN_INTEGRATION_TESTS=1; $env:INTEGRATION_SALES_DATE=YYYY-MM-DD; npm test (see docs/testing.md)')\"",
-    "build": "tsc",
+    "build": "tsc && tsc -p tests/tsconfig.json --noEmit",
     "setup": "node setup.js",
     "seed": "tsx seed.ts",
     "export:audit-configs": "tsx scripts/export-audit-configs.ts",

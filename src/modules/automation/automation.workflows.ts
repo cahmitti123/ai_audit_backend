@@ -869,23 +869,24 @@ export const runAutomationFunction = inngest.createFunction(
             let configIds: number[] = [];
 
             if (schedule.specificAuditConfigs.length > 0) {
-              const fromSchedule = schedule.specificAuditConfigs.filter(
-                (id): id is number =>
-                  typeof id === "number" && Number.isFinite(id) && id > 0
-              );
-              configIds.push(...fromSchedule);
+              // Avoid fancy type predicates here — `step.run` serialization and older data
+              // can produce unexpected types; do explicit runtime checks.
+              for (const maybeId of schedule.specificAuditConfigs as unknown[]) {
+                if (typeof maybeId !== "number") continue;
+                if (!Number.isFinite(maybeId) || maybeId <= 0) continue;
+                configIds.push(maybeId);
+              }
             }
 
             if (schedule.useAutomaticAudits) {
               const automaticConfigs =
                 await automationRepository.getAutomaticAuditConfigs();
-              const fromAutomatic = automaticConfigs
-                .map((c) => (c.id === null ? null : Number(c.id)))
-                .filter(
-                  (id): id is number =>
-                    typeof id === "number" && Number.isFinite(id) && id > 0
-                );
-              configIds.push(...fromAutomatic);
+              for (const cfg of automaticConfigs as Array<{ id: unknown }>) {
+                // Prisma returns BigInt IDs; normalize to number for workflow calculations.
+                const n = typeof cfg.id === "bigint" ? Number(cfg.id) : Number(cfg.id);
+                if (!Number.isFinite(n) || n <= 0) continue;
+                configIds.push(n);
+              }
             }
 
             configIds = [...new Set(configIds)];
@@ -902,12 +903,14 @@ export const runAutomationFunction = inngest.createFunction(
         );
 
         // Inngest JSONifies step outputs; be defensive and normalize to numbers
-        const auditConfigIdsClean = Array.isArray(auditConfigIds)
-          ? auditConfigIds.filter(
-              (id): id is number =>
-                typeof id === "number" && Number.isFinite(id) && id > 0
-            )
-          : [];
+        const auditConfigIdsClean: number[] = [];
+        if (Array.isArray(auditConfigIds)) {
+          for (const maybeId of auditConfigIds as unknown[]) {
+            if (typeof maybeId !== "number") continue;
+            if (!Number.isFinite(maybeId) || maybeId <= 0) continue;
+            auditConfigIdsClean.push(maybeId);
+          }
+        }
 
         const auditTasks = fichesWithRecordings.flatMap((ficheId) =>
           auditConfigIdsClean.map((configId) => ({

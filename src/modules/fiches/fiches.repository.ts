@@ -12,6 +12,22 @@
 
 import { prisma } from "../../shared/prisma.js";
 import { logger } from "../../shared/logger.js";
+import { createConcurrencyLimiter } from "../../utils/concurrency.js";
+
+// IMPORTANT: This limiter is **module-scoped** on purpose.
+// It bounds total concurrent recording upserts across all simultaneous workflows in this process,
+// preventing Prisma connection-pool exhaustion (P2024) under load.
+const configuredRecordingsUpsertConcurrency = Number(
+  process.env.FICHE_RECORDINGS_UPSERT_CONCURRENCY ?? 3
+);
+const RECORDINGS_UPSERT_CONCURRENCY =
+  Number.isFinite(configuredRecordingsUpsertConcurrency) &&
+  configuredRecordingsUpsertConcurrency >= 1
+    ? Math.floor(configuredRecordingsUpsertConcurrency)
+    : 3;
+const limitRecordingUpsert = createConcurrencyLimiter(
+  RECORDINGS_UPSERT_CONCURRENCY
+);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // READ OPERATIONS
@@ -282,68 +298,74 @@ export async function upsertRecordings(
     count: recordings.length,
   });
 
-  // Store all recordings in parallel for better performance
-  const upsertPromises = recordings.map((rec) => {
-    const recording = rec as {
-      call_id: string;
-      recording_url?: string;
-      direction?: string;
-      answered?: boolean;
-      start_time?: string;
-      duration_seconds?: number;
-      parsed?: {
-        date?: string;
-        time?: string;
-        from_number?: string;
-        to_number?: string;
-        uuid?: string;
+  const tasks = recordings.map((rec) =>
+    limitRecordingUpsert(async () => {
+      const recording = rec as {
+        call_id: string;
+        recording_url?: string;
+        direction?: string;
+        answered?: boolean;
+        start_time?: string;
+        duration_seconds?: number;
+        parsed?: {
+          date?: string;
+          time?: string;
+          from_number?: string;
+          to_number?: string;
+          uuid?: string;
+        };
       };
-    };
 
-    const parsed = recording.parsed;
+      const parsed = recording.parsed;
 
-    return prisma.recording.upsert({
-      where: {
-        ficheCacheId_callId: {
+      await prisma.recording.upsert({
+        where: {
+          ficheCacheId_callId: {
+            ficheCacheId,
+            callId: recording.call_id,
+          },
+        },
+        create: {
           ficheCacheId,
           callId: recording.call_id,
+          recordingUrl: recording.recording_url || "",
+          recordingDate: parsed?.date || null,
+          recordingTime: parsed?.time || null,
+          fromNumber: parsed?.from_number || null,
+          toNumber: parsed?.to_number || null,
+          uuid: parsed?.uuid || null,
+          direction: recording.direction || null,
+          answered: recording.answered ?? null,
+          startTime: recording.start_time
+            ? new Date(recording.start_time)
+            : null,
+          durationSeconds: recording.duration_seconds ?? null,
+          hasTranscription: false,
         },
-      },
-      create: {
-        ficheCacheId,
-        callId: recording.call_id,
-        recordingUrl: recording.recording_url || "",
-        recordingDate: parsed?.date || null,
-        recordingTime: parsed?.time || null,
-        fromNumber: parsed?.from_number || null,
-        toNumber: parsed?.to_number || null,
-        uuid: parsed?.uuid || null,
-        direction: recording.direction || null,
-        answered: recording.answered || null,
-        startTime: recording.start_time ? new Date(recording.start_time) : null,
-        durationSeconds: recording.duration_seconds || null,
-        hasTranscription: false,
-      },
-      update: {
-        recordingUrl: recording.recording_url || "",
-        recordingDate: parsed?.date || null,
-        recordingTime: parsed?.time || null,
-        fromNumber: parsed?.from_number || null,
-        toNumber: parsed?.to_number || null,
-        uuid: parsed?.uuid || null,
-        direction: recording.direction || null,
-        answered: recording.answered || null,
-        startTime: recording.start_time ? new Date(recording.start_time) : null,
-        durationSeconds: recording.duration_seconds || null,
-      },
-    });
-  });
+        update: {
+          recordingUrl: recording.recording_url || "",
+          recordingDate: parsed?.date || null,
+          recordingTime: parsed?.time || null,
+          fromNumber: parsed?.from_number || null,
+          toNumber: parsed?.to_number || null,
+          uuid: parsed?.uuid || null,
+          direction: recording.direction || null,
+          answered: recording.answered ?? null,
+          startTime: recording.start_time
+            ? new Date(recording.start_time)
+            : null,
+          durationSeconds: recording.duration_seconds ?? null,
+        },
+      });
+    })
+  );
 
-  await Promise.all(upsertPromises);
+  await Promise.all(tasks);
 
-  logger.debug("Recordings stored in parallel", {
+  logger.debug("Recordings stored", {
     fiche_cache_id: String(ficheCacheId),
     count: recordings.length,
+    concurrency: RECORDINGS_UPSERT_CONCURRENCY,
   });
 }
 

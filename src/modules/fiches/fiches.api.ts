@@ -24,6 +24,23 @@ const baseUrl =
   "https://api.devis-mutuelle-pas-cher.com";
 const apiBase = `${baseUrl}/api`;
 
+export class FicheApiError extends Error {
+  status?: number;
+  code?: string;
+  path?: string;
+
+  constructor(
+    message: string,
+    options?: { status?: number; code?: string; path?: string }
+  ) {
+    super(message);
+    this.name = "FicheApiError";
+    this.status = options?.status;
+    this.code = options?.code;
+    this.path = options?.path;
+  }
+}
+
 /**
  * Convert YYYY-MM-DD to DD/MM/YYYY format for CRM API
  */
@@ -189,17 +206,43 @@ export async function fetchFicheDetails(
     });
 
     return validatedData;
-  } catch (error) {
-    const err = error as { response?: { status?: number }; message: string };
+  } catch (error: unknown) {
+    // IMPORTANT: Never rethrow raw Axios errors here.
+    // Inngest (and other runtimes) may log the full AxiosError object, which includes
+    // request URL + query params (e.g. `cle=`). We only surface safe metadata.
+    const path = `/api/fiches/${ficheId}`;
+
+    if (axios.isAxiosError(error)) {
+      const status =
+        typeof error.response?.status === "number" ? error.response.status : undefined;
+      const code = typeof error.code === "string" ? error.code : undefined;
+
+      logger.error("Failed to fetch fiche details", {
+        fiche_id: ficheId,
+        path,
+        status,
+        code,
+        message: error.message,
+      });
+
+      if (status === 404) {
+        throw new FicheApiError(`Fiche ${ficheId} not found`, { status, code, path });
+      }
+
+      throw new FicheApiError(
+        `Failed to fetch fiche details for ${ficheId}: ${error.message}`,
+        { status, code, path }
+      );
+    }
+
+    const msg = error instanceof Error ? error.message : String(error);
     logger.error("Failed to fetch fiche details", {
       fiche_id: ficheId,
-      status: err.response?.status,
-      message: err.message,
+      path,
+      message: msg,
     });
-
-    if (err.response?.status === 404) {
-      throw new Error(`Fiche ${ficheId} not found`);
-    }
-    throw error;
+    throw new FicheApiError(`Failed to fetch fiche details for ${ficheId}: ${msg}`, {
+      path,
+    });
   }
 }

@@ -318,26 +318,42 @@ export const fetchFicheFunction = inngest.createFunction(
           },
         };
       } catch (error: unknown) {
-        const err = error as { response?: { status: number }; message: string };
+        const message = error instanceof Error ? error.message : String(error);
+        const status =
+          error instanceof fichesApi.FicheApiError
+            ? error.status
+            : isRecord(error) &&
+                isRecord((error as { response?: unknown }).response) &&
+                typeof (error as { response?: { status?: unknown } }).response
+                  ?.status === "number"
+              ? (error as { response: { status: number } }).response.status
+              : undefined;
+        const code =
+          error instanceof fichesApi.FicheApiError
+            ? error.code
+            : isRecord(error) && typeof (error as { code?: unknown }).code === "string"
+              ? (error as { code: string }).code
+              : undefined;
 
         logger.error("API fetch failed", {
           fiche_id,
-          status: err.response?.status,
-          message: err.message,
+          status,
+          code,
+          message,
         });
 
         // Non-retriable errors (don't retry)
-        if (err.response?.status === 404) {
+        if (status === 404) {
           throw new NonRetriableError(`Fiche ${fiche_id} not found`);
         }
-        if (err.response?.status === 401 || err.response?.status === 403) {
+        if (status === 401 || status === 403) {
           throw new NonRetriableError(
             `Authentication failed for fiche ${fiche_id}`
           );
         }
 
         // Retriable errors (will auto-retry up to 3 times)
-        throw error;
+        throw error instanceof Error ? error : new Error(message);
       }
     });
 

@@ -379,6 +379,48 @@ export const auditWebhooks = {
       completed_at: new Date().toISOString(),
       status: "rerun_completed",
     }),
+
+  /**
+   * Control point (sub-step) rerun: use the same audit.step_started/audit.step_completed events
+   * for compatibility, but include `rerun_scope` + `control_point_index` so consumers can distinguish.
+   */
+  stepControlPointRerunStarted: (
+    rerunId: string,
+    auditId: string,
+    stepPosition: number,
+    controlPointIndex: number
+  ) =>
+    sendWebhook("audit.step_started", {
+      rerun_id: rerunId,
+      rerun_scope: "control_point",
+      audit_id: auditId,
+      step_position: stepPosition,
+      control_point_index: controlPointIndex,
+      started_at: new Date().toISOString(),
+      status: "rerunning",
+    }),
+
+  stepControlPointRerunCompleted: (
+    rerunId: string,
+    auditId: string,
+    stepPosition: number,
+    controlPointIndex: number,
+    originalControlPoint: unknown,
+    rerunControlPoint: unknown,
+    comparison: unknown
+  ) =>
+    sendWebhook("audit.step_completed", {
+      rerun_id: rerunId,
+      rerun_scope: "control_point",
+      audit_id: auditId,
+      step_position: stepPosition,
+      control_point_index: controlPointIndex,
+      original: originalControlPoint,
+      rerun: rerunControlPoint,
+      comparison,
+      completed_at: new Date().toISOString(),
+      status: "rerun_completed",
+    }),
 };
 
 /**

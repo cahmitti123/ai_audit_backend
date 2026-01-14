@@ -60,6 +60,7 @@ The API exposes REST endpoints under `/api/*` and publishes OpenAPI docs at `/ap
 - `GET /api/audits/by-fiche/:fiche_id`
 - `GET /api/audits/:audit_id`
 - `POST /api/audits/:audit_id/steps/:step_position/rerun`
+- `POST /api/audits/:audit_id/steps/:step_position/control-points/:control_point_index/rerun`
 
 ### Automation (`/api/automation`)
 

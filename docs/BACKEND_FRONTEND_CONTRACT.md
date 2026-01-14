@@ -705,6 +705,23 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
 - **Errors**:
   - `400`: invalid step_position
 
+### POST `/api/audits/:audit_id/steps/:step_position/control-points/:control_point_index/rerun`
+
+- **Purpose**: queue rerun/re-analysis of a **single control point** ("sub-step") inside a step, with optional custom prompt.
+- **Path**:
+  - `audit_id` (string)
+  - `step_position` (int > 0)
+  - `control_point_index` (int > 0, **1-based** index in the step's configured `controlPoints` array)
+- **Body** (optional):
+  - `customPrompt` (string)
+  - `customInstructions` (string; alias)
+- **Response 200**:
+  - `{ success:true, message:"Control point re-run queued", event_id, audit_id, step_position, control_point_index }`
+- **Notes**:
+  - Rebuilds transcript context from DB + includes previous control point result in the rerun prompt for better contextualisation.
+- **Errors**:
+  - `400`: invalid `step_position` or `control_point_index`
+
 ### PATCH `/api/audits/:audit_id/steps/:step_position/review`
 
 - **Purpose**: human QA override of a single step result (accept/reject/partial), even if the AI decided otherwise.

@@ -86,4 +86,25 @@ export type AuditsEvents = {
     score_changed: boolean;
     conforme_changed: boolean;
   };
+
+  /**
+   * Re-run a single control point (sub-step) inside an existing audit step.
+   */
+  "audit/step-control-point-rerun": {
+    audit_id: string; // Audit DB id as string (BigInt serialized)
+    step_position: number;
+    control_point_index: number; // 1-based index in the step's controlPoints config
+    custom_prompt?: string;
+  };
+
+  /**
+   * Emitted when a control point re-run completes (for downstream consumers / observability).
+   */
+  "audit/step-control-point-rerun-completed": {
+    audit_id: string;
+    step_position: number;
+    control_point_index: number;
+    statut_changed: boolean;
+    citations_changed: boolean;
+  };
 };

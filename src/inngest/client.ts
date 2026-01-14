@@ -58,6 +58,12 @@ type Events = {
   "audit/step-rerun-completed": {
     data: AuditsEvents["audit/step-rerun-completed"];
   };
+  "audit/step-control-point-rerun": {
+    data: AuditsEvents["audit/step-control-point-rerun"];
+  };
+  "audit/step-control-point-rerun-completed": {
+    data: AuditsEvents["audit/step-control-point-rerun-completed"];
+  };
 
   // Automation domain events
   "automation/run": { data: AutomationEvents["automation/run"] };

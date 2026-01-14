@@ -6,6 +6,7 @@
 
 import { inngest } from "../../inngest/client.js";
 import { rerunAuditStep } from "./audits.rerun.js";
+import { rerunAuditStepControlPoint } from "./audits.control-point.rerun.js";
 import { auditWebhooks } from "../../shared/webhook.js";
 
 export const rerunAuditStepFunction = inngest.createFunction(
@@ -90,6 +91,94 @@ export const rerunAuditStepFunction = inngest.createFunction(
   }
 );
 
-export const functions = [rerunAuditStepFunction];
+export const rerunAuditStepControlPointFunction = inngest.createFunction(
+  {
+    id: "rerun-audit-step-control-point",
+    name: "Re-Run Audit Step Control Point",
+    retries: 1,
+    timeouts: {
+      finish: "10m",
+    },
+  },
+  { event: "audit/step-control-point-rerun" },
+  async ({ event, step, logger }) => {
+    const { audit_id, step_position, control_point_index, custom_prompt } =
+      event.data as typeof event.data & {
+        control_point_index: number;
+      };
+
+    const rerunId = `rerun-${audit_id}-${step_position}-cp-${control_point_index}-${event.id}`;
+
+    logger.info("Starting control point re-run", {
+      audit_id,
+      step_position,
+      control_point_index,
+      has_custom_prompt: Boolean(custom_prompt),
+    });
+
+    await step.run("send-rerun-started", async () => {
+      await auditWebhooks.stepControlPointRerunStarted(
+        rerunId,
+        audit_id,
+        step_position,
+        control_point_index
+      );
+      return { notified: true };
+    });
+
+    const result = await step.run("execute-rerun", async () => {
+      return await rerunAuditStepControlPoint({
+        auditId: BigInt(audit_id),
+        stepPosition: step_position,
+        controlPointIndex: control_point_index,
+        customPrompt: custom_prompt,
+      });
+    });
+
+    logger.info("Control point re-run completed", {
+      audit_id,
+      step_position,
+      control_point_index,
+      statut_changed: result.comparison.statutChanged,
+      original_statut: result.comparison.originalStatut,
+      new_statut: result.comparison.newStatut,
+    });
+
+    await step.run("send-rerun-completed", async () => {
+      await auditWebhooks.stepControlPointRerunCompleted(
+        rerunId,
+        audit_id,
+        step_position,
+        control_point_index,
+        result.originalControlPoint,
+        result.rerunControlPoint,
+        result.comparison
+      );
+      return { notified: true };
+    });
+
+    await step.sendEvent("emit-control-point-rerun-completion", {
+      name: "audit/step-control-point-rerun-completed",
+      data: {
+        audit_id,
+        step_position,
+        control_point_index,
+        statut_changed: result.comparison.statutChanged,
+        citations_changed: result.comparison.citationsChanged,
+      },
+    });
+
+    return {
+      success: true,
+      audit_id,
+      step_position,
+      control_point_index,
+      comparison: result.comparison,
+      metadata: result.metadata,
+    };
+  }
+);
+
+export const functions = [rerunAuditStepFunction, rerunAuditStepControlPointFunction];
 
 

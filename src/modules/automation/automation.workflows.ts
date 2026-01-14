@@ -279,7 +279,14 @@ export const runAutomationFunction = inngest.createFunction(
 
     try {
       // Step 3: Calculate dates to query
-      const selection = override_fiche_selection ?? schedule.ficheSelection;
+      const rawSelection = override_fiche_selection ?? schedule.ficheSelection;
+      // Be tolerant of older/hand-crafted payloads that may send `maxFiches: null`.
+      // Convert it to `undefined` so Zod can apply defaults and validate.
+      const selection = validateFicheSelection(
+        isRecord(rawSelection) && rawSelection.maxFiches === null
+          ? { ...rawSelection, maxFiches: undefined }
+          : rawSelection
+      );
       const apiKey = schedule.externalApiKey || undefined;
 
       // Declare variables that will be set in either manual or API mode
@@ -388,91 +395,120 @@ export const runAutomationFunction = inngest.createFunction(
           };
         }
 
-        // Step 3c: Fetch fiches (DB-first, then API for missing with max 3 concurrent)
-        const allFiches = await step.run("fetch-all-fiches", async (): Promise<unknown[]> => {
-          const { getFichesByDateRangeWithStatus } = await import("../fiches/fiches.service.js");
-          const { hasDataForDate } = await import("../fiches/fiches.repository.js");
-          
-          // Convert DD/MM/YYYY to YYYY-MM-DD for DB queries
-          const convertDate = (d: string) => {
-            const [day, month, year] = d.split("/");
-            return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
-          };
-          
-          // Check which dates are in DB
-          const dateStatus = await Promise.all(
-            dates.map(async date => ({
-              date,
-              inDB: await hasDataForDate(convertDate(date))
-            }))
-          );
-          
-          const datesInDB = dateStatus.filter(d => d.inDB).map(d => d.date);
-          const datesMissing = dateStatus.filter(d => !d.inDB).map(d => d.date);
-          
-          await log("info", `Dates in DB: ${datesInDB.length}, Missing: ${datesMissing.length}`);
-          
-          // Fetch from DB
-          const sortedDates = dates.sort((a, b) => {
-            const [dayA, monthA, yearA] = a.split("/");
-            const [dayB, monthB, yearB] = b.split("/");
-            return new Date(+yearA, +monthA - 1, +dayA).getTime() - 
-                   new Date(+yearB, +monthB - 1, +dayB).getTime();
-          });
-          
-          const startDate = convertDate(sortedDates[0]);
-          const endDate = convertDate(sortedDates[sortedDates.length - 1]);
-          
-          const dbResult = await getFichesByDateRangeWithStatus(startDate, endDate);
-          await log("info", `Loaded ${dbResult.fiches.length} fiches from DB`);
-          
-          // Fetch missing dates from API (max 3 concurrent)
-          const apiFiches: unknown[] = [];
-          if (datesMissing.length > 0) {
-            await log("info", `Fetching ${datesMissing.length} missing dates from API (max 3 concurrent)`);
-            
-            for (let i = 0; i < datesMissing.length; i += 3) {
-              const batch = datesMissing.slice(i, i + 3);
+        // Step 3c: Fetch fiches (ALWAYS revalidate cache first, then read from DB)
+        const allFiches = await step.run(
+          "fetch-all-fiches",
+          async (): Promise<unknown[]> => {
+            const { getFichesByDateRangeWithStatus } = await import(
+              "../fiches/fiches.service.js"
+            );
+            const { cacheFicheSalesSummary } = await import(
+              "../fiches/fiches.cache.js"
+            );
+
+            // Convert DD/MM/YYYY to YYYY-MM-DD for DB queries
+            const convertDate = (d: string) => {
+              const [day, month, year] = d.split("/");
+              return `${year}-${month.padStart(2, "0")}-${day.padStart(
+                2,
+                "0"
+              )}`;
+            };
+
+            // Compute the encompassing date range (in DB format)
+            const sortedDates = [...dates].sort((a, b) => {
+              const [dayA, monthA, yearA] = a.split("/");
+              const [dayB, monthB, yearB] = b.split("/");
+              return (
+                new Date(+yearA, +monthA - 1, +dayA).getTime() -
+                new Date(+yearB, +monthB - 1, +dayB).getTime()
+              );
+            });
+
+            const startDate = convertDate(sortedDates[0]);
+            const endDate = convertDate(sortedDates[sortedDates.length - 1]);
+
+            // Always revalidate cache for the requested dates before running automation.
+            // This prevents automation from relying solely on potentially stale cached sales lists.
+            const revalidatedAt = new Date();
+            const apiErrors: Array<{ date: string; error: string }> = [];
+
+            await log(
+              "info",
+              `Revalidating fiche cache for ${sortedDates.length} date(s) before automation`,
+              {
+                startDate,
+                endDate,
+                dates: sortedDates.length <= 10 ? sortedDates : undefined,
+              }
+            );
+
+            // Fetch from external API in small batches (max 3 concurrent) to avoid hammering CRM.
+            for (let i = 0; i < sortedDates.length; i += 3) {
+              const batch = sortedDates.slice(i, i + 3);
               const batchResults = await Promise.allSettled(
-                batch.map(async date => {
-                  try {
-                    const fiches = await automationApi.fetchFichesForDate(date, false, apiKey);
-                    await log("info", `Fetched ${fiches.length} fiches for ${date} from API`);
-                    
-                    // Cache them
-                    const { cacheFicheSalesSummary } = await import("../fiches/fiches.cache.js");
-                    for (const fiche of fiches) {
-                      const cacheInput = toSalesSummaryCacheInput(fiche);
-                      if (!cacheInput) continue;
-                      await cacheFicheSalesSummary(cacheInput, {
-                        salesDate: convertDate(date),
-                      });
-                    }
-                    
-                    return fiches;
-                  } catch (error: unknown) {
-                    await log("error", `Failed to fetch ${date}: ${errorMessage(error)}`);
-                    return [];
+                batch.map(async (date) => {
+                  const fiches = await automationApi.fetchFichesForDate(
+                    date,
+                    selection.onlyWithRecordings || false,
+                    apiKey
+                  );
+
+                  // Cache them (sales-list summary)
+                  for (const fiche of fiches) {
+                    const cacheInput = toSalesSummaryCacheInput(fiche);
+                    if (!cacheInput) continue;
+                    await cacheFicheSalesSummary(cacheInput, {
+                      salesDate: convertDate(date),
+                      lastRevalidatedAt: revalidatedAt,
+                    });
                   }
+
+                  await log("info", `Revalidated ${date} (${fiches.length} fiches)`);
+                  return { date, count: fiches.length };
                 })
               );
-              
-              batchResults.forEach(r => {
-                if (r.status === "fulfilled") apiFiches.push(...r.value);
-              });
-              
+
+              for (let j = 0; j < batchResults.length; j++) {
+                const r = batchResults[j];
+                const date = batch[j] || "unknown";
+                if (r.status === "rejected") {
+                  const msg = errorMessage(r.reason);
+                  apiErrors.push({ date, error: msg });
+                  await log(
+                    "error",
+                    `Failed to revalidate ${date}: ${msg} (will fall back to existing cache if present)`
+                  );
+                }
+              }
+
               // Small delay between API batches
-              if (i + 3 < datesMissing.length) {
-                await new Promise(resolve => setTimeout(resolve, 1000));
+              if (i + 3 < sortedDates.length) {
+                await new Promise((resolve) => setTimeout(resolve, 1000));
               }
             }
+
+            // Now read from DB (cache) for the whole range
+            const dbResult = await getFichesByDateRangeWithStatus(
+              startDate,
+              endDate
+            );
+            await log("info", `Loaded ${dbResult.fiches.length} fiches from DB`, {
+              startDate,
+              endDate,
+              cache_revalidated_at: revalidatedAt.toISOString(),
+              api_errors: apiErrors.length,
+            });
+
+            return dbResult.fiches;
           }
-          
-          return [...dbResult.fiches, ...apiFiches];
-        });
+        );
         
         // Process fiches (extract IDs)
-        await log("info", `Processing ${allFiches.length} fiches from DB+API`);
+        await log(
+          "info",
+          `Processing ${allFiches.length} fiches from DB (post-revalidation)`
+        );
         
         // NOTE: Do NOT filter by recordings here.
         // Date-range lists are often "sales list only" until we fetch fiche details.
@@ -492,10 +528,11 @@ export const runAutomationFunction = inngest.createFunction(
           await log("info", `Limited to ${selection.maxFiches} fiches`);
         }
         
-        // Extract final IDs
-        ficheIds = filteredFiches
+        // Extract final IDs (deduped, stable order)
+        const extractedIds = filteredFiches
           .map(getFicheId)
           .filter((id): id is string => typeof id === "string" && id.length > 0);
+        ficheIds = Array.from(new Set(extractedIds));
         
         await log("info", `Final: ${ficheIds.length} fiches to process`);
       }
@@ -732,7 +769,7 @@ export const runAutomationFunction = inngest.createFunction(
         let transcriptionPollAttempt = 0;
 
         while (Date.now() - transcriptionStarted < transcriptionMaxWaitMs) {
-          const completed = await step.run(
+          const completedRaw = await step.run(
             `poll-transcriptions-${runIdString}-${transcriptionPollAttempt}`,
             async () => {
               const { getFicheTranscriptionStatus } = await import(
@@ -742,9 +779,14 @@ export const runAutomationFunction = inngest.createFunction(
               const statuses = await Promise.all(
                 fichesWithRecordings.map((id) => getFicheTranscriptionStatus(id))
               );
-              return statuses.filter((s) => s.total && s.transcribed === s.total).length;
+              return statuses.filter((s) => s.total && s.transcribed === s.total)
+                .length;
             }
           );
+          const completed =
+            typeof completedRaw === "number" && Number.isFinite(completedRaw)
+              ? completedRaw
+              : 0;
 
           await log(
             "info",
@@ -827,21 +869,23 @@ export const runAutomationFunction = inngest.createFunction(
             let configIds: number[] = [];
 
             if (schedule.specificAuditConfigs.length > 0) {
-              configIds.push(
-                ...schedule.specificAuditConfigs.filter(
-                  (id) => Number.isFinite(id) && id > 0
-                )
+              const fromSchedule = schedule.specificAuditConfigs.filter(
+                (id): id is number =>
+                  typeof id === "number" && Number.isFinite(id) && id > 0
               );
+              configIds.push(...fromSchedule);
             }
 
             if (schedule.useAutomaticAudits) {
               const automaticConfigs =
                 await automationRepository.getAutomaticAuditConfigs();
-              configIds.push(
-                ...automaticConfigs
-                  .map((c) => Number(c.id))
-                  .filter((id) => Number.isFinite(id) && id > 0)
-              );
+              const fromAutomatic = automaticConfigs
+                .map((c) => (c.id === null ? null : Number(c.id)))
+                .filter(
+                  (id): id is number =>
+                    typeof id === "number" && Number.isFinite(id) && id > 0
+                );
+              configIds.push(...fromAutomatic);
             }
 
             configIds = [...new Set(configIds)];
@@ -858,9 +902,12 @@ export const runAutomationFunction = inngest.createFunction(
         );
 
         // Inngest JSONifies step outputs; be defensive and normalize to numbers
-        const auditConfigIdsClean = (auditConfigIds || []).filter(
-          (id) => Number.isFinite(id) && id > 0
-        );
+        const auditConfigIdsClean = Array.isArray(auditConfigIds)
+          ? auditConfigIds.filter(
+              (id): id is number =>
+                typeof id === "number" && Number.isFinite(id) && id > 0
+            )
+          : [];
 
         const auditTasks = fichesWithRecordings.flatMap((ficheId) =>
           auditConfigIdsClean.map((configId) => ({
@@ -1212,7 +1259,11 @@ ${
       };
     } catch (error: unknown) {
       // Handle catastrophic failure
-      const durationMs = Date.now() - startTime;
+      const durationMs =
+        Date.now() -
+        (typeof startTime === "number" && Number.isFinite(startTime)
+          ? startTime
+          : Date.now());
       const msg = errorMessage(error);
 
       await step.run("handle-failure", async () => {

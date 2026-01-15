@@ -559,6 +559,12 @@ Important: This handler is **DB-only** (no local file cache fallback), which is 
   - `groupe_query` (optional string) — case-insensitive contains on `fiche_cache.groupe`
   - `agence_query` (optional string) — case-insensitive contains on `fiche_cache.agence_nom`
   - `prospect_query` (optional string) — searches `prospect_nom|prospect_prenom|prospect_email|prospect_tel|ficheId`
+  - `sales_dates` (optional CSV `YYYY-MM-DD`) — filter by `fiche_cache.sales_date`
+  - `sales_date_from` / `sales_date_to` (optional `YYYY-MM-DD`) — range on `fiche_cache.sales_date`
+  - `has_recordings` (optional `"true"|"false"`) — filter by `fiche_cache.has_recordings`
+  - `recordings_count_min` / `recordings_count_max` (optional ints) — range on `fiche_cache.recordings_count`
+  - `fetched_at_from` / `fetched_at_to` (optional ISO datetime) — range on `fiche_cache.fetched_at`
+  - `last_revalidated_from` / `last_revalidated_to` (optional ISO datetime) — range on `fiche_cache.last_revalidated_at`
   - `status` (optional CSV: pending,running,completed,failed)
   - `is_compliant` (optional `"true"|"false"`)
   - `date_from` / `date_to` (optional strings; passed to `new Date(...)`)

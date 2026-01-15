@@ -611,6 +611,16 @@ function buildAuditWhere(filters: Partial<ListAuditsFilters>): Prisma.AuditWhere
     groupeQuery,
     agenceQuery,
     prospectQuery,
+    salesDates,
+    salesDateFrom,
+    salesDateTo,
+    hasRecordings,
+    recordingsCountMin,
+    recordingsCountMax,
+    fetchedAtFrom,
+    fetchedAtTo,
+    lastRevalidatedFrom,
+    lastRevalidatedTo,
     niveau,
     scoreMin,
     scoreMax,
@@ -720,6 +730,7 @@ function buildAuditWhere(filters: Partial<ListAuditsFilters>): Prisma.AuditWhere
 
   // Fiche-level filters (groupe/prospect/etc)
   const ficheWhere: Prisma.FicheCacheWhereInput = {};
+  const ficheAnd: Prisma.FicheCacheWhereInput[] = [];
   if (ficheIds && ficheIds.length > 0) ficheWhere.ficheId = { in: ficheIds };
   if (groupes && groupes.length > 0) ficheWhere.groupe = { in: groupes };
   if (groupeQuery) ficheWhere.groupe = { contains: groupeQuery, mode: "insensitive" };
@@ -734,6 +745,37 @@ function buildAuditWhere(filters: Partial<ListAuditsFilters>): Prisma.AuditWhere
       { ficheId: { contains: prospectQuery, mode: "insensitive" } },
     ];
   }
+  if (salesDates && salesDates.length > 0) {
+    ficheAnd.push({ salesDate: { in: salesDates } });
+  }
+  if (salesDateFrom || salesDateTo) {
+    ficheAnd.push({
+      salesDate: {
+        ...(salesDateFrom ? { gte: salesDateFrom } : {}),
+        ...(salesDateTo ? { lte: salesDateTo } : {}),
+      },
+    });
+  }
+  if (hasRecordings !== undefined) ficheWhere.hasRecordings = hasRecordings;
+  if (recordingsCountMin !== undefined || recordingsCountMax !== undefined) {
+    ficheWhere.recordingsCount = {
+      ...(recordingsCountMin !== undefined ? { gte: recordingsCountMin } : {}),
+      ...(recordingsCountMax !== undefined ? { lte: recordingsCountMax } : {}),
+    };
+  }
+  if (fetchedAtFrom || fetchedAtTo) {
+    ficheWhere.fetchedAt = {
+      ...(fetchedAtFrom ? { gte: fetchedAtFrom } : {}),
+      ...(fetchedAtTo ? { lte: fetchedAtTo } : {}),
+    };
+  }
+  if (lastRevalidatedFrom || lastRevalidatedTo) {
+    ficheWhere.lastRevalidatedAt = {
+      ...(lastRevalidatedFrom ? { gte: lastRevalidatedFrom } : {}),
+      ...(lastRevalidatedTo ? { lte: lastRevalidatedTo } : {}),
+    };
+  }
+  if (ficheAnd.length > 0) ficheWhere.AND = ficheAnd;
   if (Object.keys(ficheWhere).length > 0) and.push({ ficheCache: ficheWhere });
 
   // Free text search (ANDed with other filters)

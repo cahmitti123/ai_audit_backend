@@ -206,6 +206,16 @@ export const listAuditsFiltersSchema = z.object({
   groupeQuery: z.string().optional(),
   agenceQuery: z.string().optional(),
   prospectQuery: z.string().optional(),
+  salesDates: z.array(z.string()).optional(),
+  salesDateFrom: z.string().optional(),
+  salesDateTo: z.string().optional(),
+  hasRecordings: z.boolean().optional(),
+  recordingsCountMin: z.number().int().min(0).optional(),
+  recordingsCountMax: z.number().int().min(0).optional(),
+  fetchedAtFrom: z.date().optional(),
+  fetchedAtTo: z.date().optional(),
+  lastRevalidatedFrom: z.date().optional(),
+  lastRevalidatedTo: z.date().optional(),
   // Audit-level filters
   niveau: z.array(auditNiveauEnum).optional(),
   scoreMin: z.number().optional(),
@@ -241,6 +251,16 @@ export const listAuditsQuerySchema = z.object({
   groupe_query: z.string().optional(),
   agence_query: z.string().optional(),
   prospect_query: z.string().optional(),
+  sales_dates: z.string().optional(),
+  sales_date_from: z.string().optional(),
+  sales_date_to: z.string().optional(),
+  has_recordings: z.string().optional(),
+  recordings_count_min: z.string().optional(),
+  recordings_count_max: z.string().optional(),
+  fetched_at_from: z.string().optional(),
+  fetched_at_to: z.string().optional(),
+  last_revalidated_from: z.string().optional(),
+  last_revalidated_to: z.string().optional(),
   niveau: z.string().optional(),
   score_min: z.string().optional(),
   score_max: z.string().optional(),
@@ -579,6 +599,38 @@ export const parseListAuditsQuery = (
     }
     if (typeof query.prospect_query === "string" && query.prospect_query.trim()) {
       filters.prospectQuery = query.prospect_query.trim();
+    }
+    if (query.sales_dates) {
+      filters.salesDates = splitCsv(query.sales_dates);
+    }
+    if (typeof query.sales_date_from === "string" && query.sales_date_from.trim()) {
+      filters.salesDateFrom = query.sales_date_from.trim();
+    }
+    if (typeof query.sales_date_to === "string" && query.sales_date_to.trim()) {
+      filters.salesDateTo = query.sales_date_to.trim();
+    }
+    if (query.has_recordings !== undefined) {
+      filters.hasRecordings = query.has_recordings === "true";
+    }
+    if (query.recordings_count_min) {
+      const n = Number.parseInt(query.recordings_count_min, 10);
+      if (Number.isFinite(n)) filters.recordingsCountMin = n;
+    }
+    if (query.recordings_count_max) {
+      const n = Number.parseInt(query.recordings_count_max, 10);
+      if (Number.isFinite(n)) filters.recordingsCountMax = n;
+    }
+    if (query.fetched_at_from) {
+      filters.fetchedAtFrom = new Date(query.fetched_at_from);
+    }
+    if (query.fetched_at_to) {
+      filters.fetchedAtTo = new Date(query.fetched_at_to);
+    }
+    if (query.last_revalidated_from) {
+      filters.lastRevalidatedFrom = new Date(query.last_revalidated_from);
+    }
+    if (query.last_revalidated_to) {
+      filters.lastRevalidatedTo = new Date(query.last_revalidated_to);
     }
 
     // Audit-level filters

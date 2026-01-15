@@ -93,6 +93,70 @@ function parsePositiveIntParam(value: string, name = "value"): number {
  *         description: Comma-separated list of audit config IDs
  *         example: "13,11"
  *       - in: query
+ *         name: sales_dates
+ *         schema:
+ *           type: string
+ *         description: Comma-separated list of fiche sales dates (YYYY-MM-DD)
+ *         example: "2025-01-03,2025-01-04"
+ *       - in: query
+ *         name: sales_date_from
+ *         schema:
+ *           type: string
+ *         description: Fiche sales date start (YYYY-MM-DD)
+ *         example: "2025-01-01"
+ *       - in: query
+ *         name: sales_date_to
+ *         schema:
+ *           type: string
+ *         description: Fiche sales date end (YYYY-MM-DD)
+ *         example: "2025-01-31"
+ *       - in: query
+ *         name: has_recordings
+ *         schema:
+ *           type: boolean
+ *         description: Filter by fiche recording presence
+ *         example: true
+ *       - in: query
+ *         name: recordings_count_min
+ *         schema:
+ *           type: integer
+ *         description: Minimum number of recordings on the fiche
+ *         example: 1
+ *       - in: query
+ *         name: recordings_count_max
+ *         schema:
+ *           type: integer
+ *         description: Maximum number of recordings on the fiche
+ *         example: 3
+ *       - in: query
+ *         name: fetched_at_from
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: Fiche fetchedAt start (ISO 8601)
+ *         example: "2025-01-01T00:00:00Z"
+ *       - in: query
+ *         name: fetched_at_to
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: Fiche fetchedAt end (ISO 8601)
+ *         example: "2025-01-31T23:59:59Z"
+ *       - in: query
+ *         name: last_revalidated_from
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: Fiche lastRevalidatedAt start (ISO 8601)
+ *         example: "2025-01-01T00:00:00Z"
+ *       - in: query
+ *         name: last_revalidated_to
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: Fiche lastRevalidatedAt end (ISO 8601)
+ *         example: "2025-01-31T23:59:59Z"
+ *       - in: query
  *         name: sort_by
  *         schema:
  *           type: string

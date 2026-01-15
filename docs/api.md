@@ -53,6 +53,13 @@ The API exposes REST endpoints under `/api/*` and publishes OpenAPI docs at `/ap
 ### Audits (`/api/audits`)
 
 - `GET /api/audits`
+- `GET /api/audits` supports additional fiche filters:
+  - `sales_dates` (CSV `YYYY-MM-DD`)
+  - `sales_date_from` / `sales_date_to` (YYYY-MM-DD range)
+  - `has_recordings` (`true|false`)
+  - `recordings_count_min` / `recordings_count_max` (ints)
+  - `fetched_at_from` / `fetched_at_to` (ISO 8601 datetime)
+  - `last_revalidated_from` / `last_revalidated_to` (ISO 8601 datetime)
 - `GET /api/audits/grouped-by-fiches`
 - `POST /api/audits/run`
 - `POST /api/audits/run-latest`

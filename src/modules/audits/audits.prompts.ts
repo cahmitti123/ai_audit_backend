@@ -31,6 +31,10 @@ STRUCTURE STRICTE:
 - Si statut=ABSENT/NON_APPLICABLE: citations=[]
 - TOUS les champs obligatoires même si vides
 
+FORMAT DE SORTIE (OBLIGATOIRE):
+- Retournez UNIQUEMENT un objet JSON valide correspondant exactement au schéma attendu.
+- Aucun texte hors JSON, aucun markdown, aucun bloc de code (code fence).
+
 ANTI-HALLUCINATION (OBLIGATOIRE):
 - N'inventez jamais une citation. Le champ "texte" doit être un extrait exact présent dans la chronologie.
 - Si vous ne trouvez pas de preuve textuelle dans la chronologie, marquez le checkpoint "ABSENT" (ou "PARTIEL" si mention indirecte) et expliquez pourquoi.
@@ -660,6 +664,10 @@ STRUCTURE STRICTE:
 - Si statut=PRESENT: AU MOINS 1 citation requise
 - Si statut=ABSENT/NON_APPLICABLE: citations=[]
 - TOUS les champs obligatoires même si vides
+
+FORMAT DE SORTIE (OBLIGATOIRE):
+- Retournez UNIQUEMENT un objet JSON valide correspondant exactement au schéma attendu.
+- Aucun texte hors JSON, aucun markdown, aucun bloc de code (code fence).
 
 ANTI-HALLUCINATION (OBLIGATOIRE):
 - N'inventez jamais une citation. Le champ "texte" doit être un extrait EXACT du "full_text"

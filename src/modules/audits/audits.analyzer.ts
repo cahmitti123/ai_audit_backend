@@ -210,7 +210,9 @@ export async function analyzeStep(
       system,
       prompt: toolPrompt,
       tools,
-      toolChoice: "required",
+      // We need at least 1 tool call, but we MUST allow the final step to return plain JSON text.
+      // If toolChoice stays "required" for every step, OpenAI will keep returning tool calls and never a final JSON output.
+      toolChoice: "auto",
       maxSteps: maxToolSteps,
       maxRetries: opts.maxRetries,
       // Reduce creativity to limit hallucinations; output is schema-constrained.
@@ -220,7 +222,23 @@ export async function analyzeStep(
           reasoningEffort: opts.reasoningEffort!,
           textVerbosity: opts.textVerbosity!,
           reasoningSummary: "detailed",
+          strictJsonSchema: true,
         },
+      },
+      experimental_prepareStep: async ({ stepNumber, maxSteps }) => {
+        // stepNumber is 0-based.
+        if (stepNumber === 0) {
+          // Force at least one transcript tool call.
+          return { toolChoice: "required" };
+        }
+
+        // Force the last step to output final JSON (no more tool calls).
+        if (stepNumber >= maxSteps - 1) {
+          return { toolChoice: "none" };
+        }
+
+        // Intermediate steps may call tools as needed.
+        return { toolChoice: "auto" };
       },
       experimental_output: Output.object({ schema: AuditStepSchema }),
     });

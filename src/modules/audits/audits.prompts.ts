@@ -725,8 +725,12 @@ export function buildStepPromptsWithTranscriptTools(params: {
 ${buildAnalysisRulesForTranscriptTools()}
 
 OUTILS DISPONIBLES (TRANSCRIPT):
-- searchTranscript(query): recherche des chunks pertinents et renvoie des références (recording_index, chunk_index) + un aperçu
-- getTranscriptChunks(chunks, includeNeighbors?): renvoie full_text + métadonnées (minutage, recording_date/time/url, etc.)
+- searchTranscript(query, maxResults, minTermLength): recherche des chunks pertinents et renvoie des références (recording_index, chunk_index) + un aperçu
+  - maxResults: nombre (1..50) ou null (par défaut serveur)
+  - minTermLength: nombre (2..8) ou null (par défaut)
+- getTranscriptChunks(chunks, includeNeighbors, maxChars): renvoie full_text + métadonnées (minutage, recording_date/time/url, etc.)
+  - includeNeighbors: nombre (0..2) ou null (par défaut)
+  - maxChars: nombre (1000..80000) ou null (par défaut serveur)
 
 STRATÉGIE RECOMMANDÉE:
 - Faites 1 à 3 appels maximum par étape (batch).

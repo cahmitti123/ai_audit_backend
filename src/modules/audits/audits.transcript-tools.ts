@@ -131,15 +131,17 @@ export function createTranscriptTools(params: {
           .int()
           .min(1)
           .max(50)
-          .optional()
-          .describe("Maximum number of results to return (default is server-configured)."),
+          .nullable()
+          .describe(
+            "Maximum number of results to return. Use null to use the server default."
+          ),
         minTermLength: z
           .number()
           .int()
           .min(2)
           .max(8)
-          .optional()
-          .describe("Minimum term length for tokenization (default 3)."),
+          .nullable()
+          .describe("Minimum term length for tokenization. Use null to use default."),
       }),
       execute: async ({ query, maxResults: maxResArg, minTermLength }) => {
         const maxRes = clampInt(maxResArg ?? maxSearchResults, 1, 50);
@@ -233,15 +235,17 @@ export function createTranscriptTools(params: {
           .int()
           .min(0)
           .max(2)
-          .optional()
-          .describe("Also include N neighbor chunks around each reference (default 0)."),
+          .nullable()
+          .describe("Also include N neighbor chunks around each reference. Use null for default."),
         maxChars: z
           .number()
           .int()
           .min(1_000)
           .max(80_000)
-          .optional()
-          .describe("Max total characters across all returned full_text (default is server-configured)."),
+          .nullable()
+          .describe(
+            "Max total characters across all returned full_text. Use null for server default."
+          ),
       }),
       execute: async ({ chunks, includeNeighbors, maxChars }) => {
         const neighbor = clampInt(includeNeighbors ?? 0, 0, 2);

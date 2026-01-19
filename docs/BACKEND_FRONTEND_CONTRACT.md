@@ -1,6 +1,6 @@
 ## Backend ↔ Frontend Contract (NCA Audit backend)
 
-**Audience**: Next.js/browser frontend (REST + SSE + webhooks + chat streaming)  
+**Audience**: Next.js/browser frontend (REST + Pusher Channels + webhooks + chat streaming (SSE))  
 **Backend repo**: this workspace (`ai-audit`)  
 **Backend base URL (dev default)**: `http://localhost:3002`  
 **Swagger/OpenAPI (exported by backend)**: `GET /api-docs.json` (OpenAPI **3.0.0**) and UI at `GET /api-docs`
@@ -31,7 +31,7 @@ Those files are **not present** in this backend workspace, so this document is *
   - `/api/audits/*` (includes step re-run endpoints)
   - `/api/automation/*`
   - `/api/products/*`
-  - `/api/realtime/*` (SSE)
+  - `/api/realtime/*` (Pusher Channels)
   - `/api/*` (chat endpoints are mounted here)
   - `/api/webhooks/*` (testing endpoints)
   - `/api/inngest/*` (**internal** Inngest handler; not intended for frontend)
@@ -550,6 +550,26 @@ Important: This handler is **DB-only** (no local file cache fallback), which is 
 
 ## Audits API (`/api/audits/*`)
 
+### Audit transcript mode (legacy prompt vs RLM-style tools)
+
+This backend supports two transcript long-context strategies for audits:
+
+- **prompt** (default): full transcript timeline is embedded into each audit step prompt.
+- **tools** (optional, RLM-style): keeps the timeline out of the prompt and exposes constrained transcript tools (`searchTranscript`, `getTranscriptChunks`) for evidence lookup.
+
+Enable **tools** mode per request by sending `use_rlm: true` (alias: `useRlm: true`) on:
+- `POST /api/audits/run`
+- `POST /api/audits` (alias of `/api/audits/run`)
+- `POST /api/audits/run-latest`
+- `POST /api/audits/batch`
+
+The chosen approach is persisted on completed audits under:
+- `resultData.metadata.approach`
+- `resultData.audit.approach`
+- `resultData.audit.results.approach`
+
+Shape: `{ use_rlm: boolean; transcript_mode: "prompt" | "tools" }`.
+
 ### GET `/api/audits`
 
 - **Purpose**: list audits with filtering + pagination.
@@ -616,6 +636,7 @@ Important: This handler is **DB-only** (no local file cache fallback), which is 
   - `audit_id` (**legacy alias**, accepted): same as `audit_config_id` (backwards compatible)
   - `fiche_id` (**required**): string/number
   - `user_id` (optional string)
+  - `use_rlm` (optional boolean, alias: `useRlm`): if `true`, uses the **RLM-style transcript tools** approach; if omitted/false, uses the legacy **prompt** approach.
 - **Response 200**:
 
 ```json
@@ -648,6 +669,7 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
 - **Body**:
   - `fiche_id` (**required**)
   - `user_id` (optional)
+  - `use_rlm` (optional boolean, alias: `useRlm`): same behavior as `/api/audits/run`.
 - **Response 200**:
   - `{ success:true, message, event_id, fiche_id, audit_config_id, audit_config_name, metadata }`
 - **Errors**:
@@ -661,6 +683,7 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
   - `fiche_ids` (**required** array of strings)
   - `audit_config_id` (optional)
   - `user_id` (optional)
+  - `use_rlm` (optional boolean, alias: `useRlm`): same behavior as `/api/audits/run` (applied to all audits in the batch)
 - **Response 200**:
   - `{ success:true, message, fiche_ids, audit_config_id, batch_id, event_ids }`
 - **Errors**:
@@ -679,6 +702,12 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
 - **Purpose**: get audit detail payload.
 - **Response 200**:
   - `{ success:true, data: AuditDetail }`
+- **Note (approach tracking)**:
+  - Completed audits include an `approach` object indicating whether `use_rlm` was used and which `transcript_mode` ran (`prompt|tools`).
+  - You can read it from any of:
+    - `resultData.metadata.approach`
+    - `resultData.audit.approach`
+    - `resultData.audit.results.approach`
 - **Errors**:
   - `404`: `{ success:false, error:"Audit not found" }`
 

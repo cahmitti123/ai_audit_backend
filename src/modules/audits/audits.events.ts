@@ -15,6 +15,13 @@ export type AuditsEvents = {
     automation_schedule_id?: string; // BigInt serialized as string
     automation_run_id?: string; // BigInt serialized as string
     trigger_source?: string; // e.g. "automation" | "api"
+    /**
+     * Optional per-request toggle for RLM-style transcript tools mode.
+     * - true: use transcript tools (out-of-prompt evidence lookup)
+     * - false: legacy prompt stuffing
+     * - undefined: use server default (env)
+     */
+    use_rlm?: boolean;
   };
   /**
    * Analyze a single audit step (fan-out worker).
@@ -26,6 +33,7 @@ export type AuditsEvents = {
     fiche_id: string;
     audit_config_id: number;
     step_position: number;
+    use_rlm?: boolean;
   };
   /**
    * Emitted after a single step is analyzed (success or failure).
@@ -39,6 +47,7 @@ export type AuditsEvents = {
     step_position: number;
     ok: boolean;
     error?: string;
+    use_rlm?: boolean;
   };
   "audit/completed": {
     fiche_id: string;
@@ -47,6 +56,7 @@ export type AuditsEvents = {
     score: number;
     niveau: string;
     duration_ms: number;
+    use_rlm?: boolean;
   };
   "audit/failed": {
     fiche_id: string;
@@ -58,6 +68,7 @@ export type AuditsEvents = {
     fiche_ids: string[];
     audit_config_id?: number;
     user_id?: string;
+    use_rlm?: boolean;
   };
   "audit/batch.completed": {
     batch_id?: string;

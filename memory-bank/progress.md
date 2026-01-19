@@ -3,6 +3,7 @@
 ### Working now
 - **Scaled backend** behind nginx load balancer (3 replicas).
 - **Audit pipeline** executes in parallel at the **step** level across replicas.
+- **Optional audit transcript tools mode** (`use_rlm: true` per request) keeps long timelines out of prompts and lets the LLM fetch/quote evidence via constrained tools.
 - **Progressive fiche date-range jobs** run distributed per day and correctly finalize.
 - **Automation runs** distribute fiche detail fetch across replicas and fan out transcription/audit work.
 - TypeScript build is green (`npm run build`).

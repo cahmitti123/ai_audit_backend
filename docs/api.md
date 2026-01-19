@@ -2,6 +2,8 @@
 
 The API exposes REST endpoints under `/api/*` and publishes OpenAPI docs at `/api-docs`.
 
+For detailed request/response payloads (and frontend-ready DTOs), see `docs/BACKEND_FRONTEND_CONTRACT.md`.
+
 ## Interactive API docs
 
 - Swagger UI: `http://localhost:3002/api-docs`
@@ -61,16 +63,31 @@ The API exposes REST endpoints under `/api/*` and publishes OpenAPI docs at `/ap
   - `fetched_at_from` / `fetched_at_to` (ISO 8601 datetime)
   - `last_revalidated_from` / `last_revalidated_to` (ISO 8601 datetime)
 - `GET /api/audits/grouped-by-fiches`
+- `GET /api/audits/grouped`
 - `GET /api/audits/control-points/statuses`
 - `POST /api/audits/run`
+- `POST /api/audits` (alias of `/api/audits/run`)
 - `POST /api/audits/run-latest`
 - `POST /api/audits/batch`
 - `GET /api/audits/by-fiche/:fiche_id`
 - `GET /api/audits/:audit_id`
+- `PATCH /api/audits/:audit_id`
+- `DELETE /api/audits/:audit_id`
 - `POST /api/audits/:audit_id/steps/:step_position/rerun`
+- `PATCH /api/audits/:audit_id/steps/:step_position/review`
 - `POST /api/audits/:audit_id/steps/:step_position/control-points/:control_point_index/rerun`
 - `GET /api/audits/:audit_id/steps/:step_position/control-points/:control_point_index`
 - `PATCH /api/audits/:audit_id/steps/:step_position/control-points/:control_point_index/review`
+
+#### Audit transcript mode (legacy prompt vs RLM-style tools)
+
+- Default is **prompt** mode (the full transcript timeline is embedded into the audit step prompt).
+- To enable **tools** mode (RLM-style transcript access layer), send `use_rlm: true` (or `useRlm: true`) in the JSON body of:
+  - `POST /api/audits/run`
+  - `POST /api/audits` (alias)
+  - `POST /api/audits/run-latest`
+  - `POST /api/audits/batch`
+- Completed audits include the chosen approach in `resultData.metadata.approach` (also duplicated under `resultData.audit.results.approach`).
 
 ### Automation (`/api/automation`)
 

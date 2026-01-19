@@ -645,3 +645,124 @@ ${buildAnalysisRules()}
 
 Analysez maintenant cette étape.`;
 }
+
+export function buildAnalysisRulesForTranscriptTools(): string {
+  return `═══════════════════════════════════════════════════════════════════════════════
+RÈGLES D'ANALYSE (MODE OUT-OF-PROMPT / TOOLS)
+═══════════════════════════════════════════════════════════════════════════════
+
+OBJECTIF:
+- La chronologie complète N'EST PAS fournie dans le prompt.
+- Vous devez utiliser les outils transcript pour trouver des preuves et citer exactement.
+
+STRUCTURE STRICTE:
+- Citations DANS chaque point_controle.citations (pas au niveau global)
+- Si statut=PRESENT: AU MOINS 1 citation requise
+- Si statut=ABSENT/NON_APPLICABLE: citations=[]
+- TOUS les champs obligatoires même si vides
+
+ANTI-HALLUCINATION (OBLIGATOIRE):
+- N'inventez jamais une citation. Le champ "texte" doit être un extrait EXACT du "full_text"
+  renvoyé par getTranscriptChunks (ou une autre réponse d'outil contenant full_text).
+- Si vous ne trouvez pas de preuve textuelle → marquez ABSENT (ou PARTIEL si mention indirecte).
+
+MÉTADONNÉES CITATIONS (copier depuis les outils):
+- recording_index et chunk_index: indices 0-based depuis les outils (ne pas convertir)
+- minutage_secondes: copier depuis l'outil (équivaut au début du chunk)
+- minutage: copier depuis l'outil (format MM:SS)
+- recording_date / recording_time / recording_url: copier depuis l'outil (si URL inconnue: "N/A")
+- speaker: doit correspondre au speaker de la ligne citée ("speaker_0", "speaker_1", ...)
+
+VALEURS ENUM VALIDES:
+- conforme: "CONFORME" | "NON_CONFORME" | "PARTIEL"
+- niveau_conformite: "EXCELLENT" | "BON" | "ACCEPTABLE" | "INSUFFISANT" | "REJET"
+- statut: "PRESENT" | "ABSENT" | "PARTIEL" | "NON_APPLICABLE"
+
+⚠️ CHAMPS REQUIS (fournir même si vides):
+{{
+  "minutages": [],
+  "mots_cles_trouves": [],
+  "erreurs_transcription_tolerees": 0,
+  "erreur_transcription_notee": false,
+  "variation_phonetique_utilisee": null
+}}`;
+}
+
+export function buildStepPromptsWithTranscriptTools(params: {
+  step: AuditStepDefinition;
+  auditConfig: AuditConfigForAnalysis;
+  productVerificationContext?: ProductVerificationContext[] | null;
+  productInfo?: ProductLinkResult | null;
+}): { system: string; prompt: string } {
+  const { step, auditConfig, productVerificationContext, productInfo } = params;
+  const totalSteps = auditConfig.auditSteps?.length || step.position;
+
+  // Add Product Database context (if available and verification enabled)
+  let productSection = "";
+  if (
+    step.verifyProductInfo === true &&
+    productInfo &&
+    productInfo.matched &&
+    productInfo.formule
+  ) {
+    productSection = buildProductContext(productInfo);
+  }
+
+  // Add product verification context from vector store if available
+  let verificationSection = "";
+  if (
+    productVerificationContext &&
+    productVerificationContext.length > 0 &&
+    step.verifyProductInfo === true
+  ) {
+    verificationSection = formatVerificationContextForPrompt(
+      productVerificationContext
+    );
+  }
+
+  const system = `${auditConfig.systemPrompt}
+
+${buildAnalysisRulesForTranscriptTools()}
+
+OUTILS DISPONIBLES (TRANSCRIPT):
+- searchTranscript(query): recherche des chunks pertinents et renvoie des références (recording_index, chunk_index) + un aperçu
+- getTranscriptChunks(chunks, includeNeighbors?): renvoie full_text + métadonnées (minutage, recording_date/time/url, etc.)
+
+STRATÉGIE RECOMMANDÉE:
+- Faites 1 à 3 appels maximum par étape (batch).
+- 1) searchTranscript avec un query qui combine: nom de l'étape + mots-clés + points de contrôle
+- 2) getTranscriptChunks sur les meilleurs résultats (+ voisins si besoin)
+- 3) Produisez le JSON final en citant EXACTEMENT depuis full_text.
+
+⚠️ IMPORTANT:
+- Ne marquez jamais PRESENT/PARTIEL sans citation valide.
+- Ne citez jamais un chunk dont vous n'avez pas récupéré full_text.`;
+
+  const prompt = `${productSection}
+${verificationSection}
+═══════════════════════════════════════════════════════════════════════════════
+ÉTAPE ${step.position}/${totalSteps}: ${step.name}
+═══════════════════════════════════════════════════════════════════════════════
+
+Sévérité: ${step.severityLevel} | Poids: ${step.weight}
+Critique: ${step.isCritical ? "⚠️ OUI" : "Non"}
+${step.verifyProductInfo ? "🔍 VÉRIFICATION PRODUIT: ⚠️ ACTIVÉE" : ""}
+
+DESCRIPTION:
+${step.description}
+
+INSTRUCTIONS:
+${step.prompt}
+${step.customInstructions ? `\n\nINSTRUCTIONS SUPPLÉMENTAIRES:\n${step.customInstructions}` : ""}
+
+POINTS DE CONTRÔLE À ANALYSER:
+${step.controlPoints
+  .map((cp: string, i: number) => `${i + 1}. ${cp}`)
+  .join("\n")}
+
+MOTS-CLÉS: ${step.keywords.join(", ")}
+
+Commencez par rechercher des preuves dans la transcription via les outils, puis analysez cette étape et retournez le JSON demandé.`;
+
+  return { system, prompt };
+}

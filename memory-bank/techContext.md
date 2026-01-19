@@ -21,6 +21,8 @@
 - **Redis**: `REDIS_URL` (e.g., `redis://redis:6379`)
 - **Inngest**: `INNGEST_BASE_URL`, `INNGEST_EVENT_KEY`, `INNGEST_SIGNING_KEY`
 - **AI**: `OPENAI_API_KEY`, `OPENAI_MODEL_AUDIT`, `OPENAI_MODEL_CHAT`
+- **Audit long-context mode**:
+  - Per-request toggle: send `use_rlm: true` (or `useRlm: true`) on audit run endpoints to enable transcript-tools mode (out-of-prompt evidence lookup).
 - **Transcription**: `ELEVENLABS_API_KEY`
 - **Scheduler**: `AUTOMATION_SCHEDULER_CRON` (default every minute)
 - **Webhook security**: `WEBHOOK_ALLOWED_ORIGINS` (SSRF allowlist)

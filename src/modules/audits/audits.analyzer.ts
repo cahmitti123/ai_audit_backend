@@ -5,9 +5,12 @@
  */
 
 import { openai } from "@ai-sdk/openai";
-import { generateObject } from "ai";
+import { generateObject, generateText, Output } from "ai";
 import { AuditStepSchema } from "../../schemas.js";
-import { buildStepPrompt } from "./audits.prompts.js";
+import {
+  buildStepPrompt,
+  buildStepPromptsWithTranscriptTools,
+} from "./audits.prompts.js";
 import { auditWebhooks } from "../../shared/webhook.js";
 import { logger } from "../../shared/logger.js";
 import { mapWithConcurrency } from "../../utils/concurrency.js";
@@ -16,6 +19,7 @@ import {
   type ProductVerificationContext,
 } from "./audits.vector-store.js";
 import type { TimelineRecording } from "../../schemas.js";
+import { createTranscriptTools } from "./audits.transcript-tools.js";
 import type {
   AuditConfigForAnalysis,
   AuditStepDefinition,
@@ -27,6 +31,25 @@ export interface AuditOptions {
   reasoningEffort?: ReasoningEffort;
   textVerbosity?: TextVerbosity;
   maxRetries?: number;
+  /**
+   * Optional timeline (structured) used for transcript tools mode.
+   * When provided and transcript mode is enabled, the analyzer can fetch evidence via tools
+   * instead of stuffing the entire timeline into the prompt.
+   */
+  timeline?: ReadonlyArray<TimelineRecording>;
+  /**
+   * Override transcript mode for this call.
+   * - prompt: embed timelineText in the prompt (current behavior)
+   * - tools: keep timeline out of prompt; allow tool-based search/fetch of chunks
+   */
+  transcriptMode?: "prompt" | "tools";
+  /**
+   * Tool-loop limits (only used in transcriptMode=tools).
+   */
+  maxToolSteps?: number;
+  maxSearchResults?: number;
+  maxChunkFetch?: number;
+  maxChunkChars?: number;
 }
 
 type ReasoningEffort = "minimal" | "low" | "medium" | "high";
@@ -38,6 +61,19 @@ const DEFAULT_OPTIONS: AuditOptions = {
   textVerbosity: "high",
   maxRetries: 3,
 };
+
+const DEFAULT_TRANSCRIPT_TOOL_LIMITS = {
+  maxToolSteps: 8,
+  maxSearchResults: 25,
+  maxChunkFetch: 20,
+  maxChunkChars: 20_000,
+} as const;
+
+function getTranscriptMode(opts: AuditOptions): "prompt" | "tools" {
+  const fromOpts = opts.transcriptMode;
+  if (fromOpts === "prompt" || fromOpts === "tools") return fromOpts;
+  return "prompt";
+}
 
 export async function analyzeStep(
   step: AuditStepDefinition,
@@ -121,6 +157,122 @@ export async function analyzeStep(
     }
   }
 
+  const transcriptMode = getTranscriptMode(opts);
+  const canUseTools =
+    transcriptMode === "tools" &&
+    Array.isArray(opts.timeline) &&
+    opts.timeline.length > 0;
+
+  if (transcriptMode === "tools" && !canUseTools) {
+    logger.warn("Transcript tools mode enabled but no timeline provided; falling back to prompt", {
+      audit_id: auditId,
+      fiche_id: ficheId,
+      step_position: step.position,
+    });
+  }
+
+  if (canUseTools) {
+    const maxToolSteps = Math.max(
+      2,
+      Number(opts.maxToolSteps ?? DEFAULT_TRANSCRIPT_TOOL_LIMITS.maxToolSteps)
+    );
+
+    const maxSearchResults = opts.maxSearchResults ?? DEFAULT_TRANSCRIPT_TOOL_LIMITS.maxSearchResults;
+    const maxChunkFetch = opts.maxChunkFetch ?? DEFAULT_TRANSCRIPT_TOOL_LIMITS.maxChunkFetch;
+    const maxChunkChars = opts.maxChunkChars ?? DEFAULT_TRANSCRIPT_TOOL_LIMITS.maxChunkChars;
+
+    const tools = createTranscriptTools({
+      timeline: opts.timeline!,
+      limits: {
+        maxSearchResults,
+        maxChunkFetch,
+        maxChunkChars,
+      },
+    });
+
+    const { system, prompt: toolPrompt } = buildStepPromptsWithTranscriptTools({
+      step,
+      auditConfig,
+      productVerificationContext,
+      productInfo,
+    });
+
+    logger.debug("Sending tool-based prompt to model", {
+      audit_id: auditId,
+      fiche_id: ficheId,
+      step_position: step.position,
+      model: opts.model,
+      maxToolSteps,
+    });
+
+    const result = await generateText({
+      model: openai.responses(opts.model!),
+      system,
+      prompt: toolPrompt,
+      tools,
+      toolChoice: "required",
+      maxSteps: maxToolSteps,
+      maxRetries: opts.maxRetries,
+      // Reduce creativity to limit hallucinations; output is schema-constrained.
+      temperature: 0,
+      providerOptions: {
+        openai: {
+          reasoningEffort: opts.reasoningEffort!,
+          textVerbosity: opts.textVerbosity!,
+          reasoningSummary: "detailed",
+        },
+      },
+      experimental_output: Output.object({ schema: AuditStepSchema }),
+    });
+
+    const obj = result.experimental_output;
+    const totalCitations = obj.points_controle.reduce(
+      (sum, pc) => sum + pc.citations.length,
+      0
+    );
+
+    logger.info("Audit step analysis completed (tools mode)", {
+      audit_id: auditId,
+      fiche_id: ficheId,
+      step_position: step.position,
+      step_name: step.name,
+      score: `${obj.score}/${step.weight}`,
+      conforme: obj.conforme,
+      citations: totalCitations,
+      tokens: result.usage.totalTokens,
+      steps: result.steps.length,
+      tool_calls: result.toolCalls.length,
+    });
+
+    await auditWebhooks.stepCompleted(
+      auditId,
+      ficheId,
+      step.position,
+      step.name,
+      obj.score,
+      step.weight,
+      obj.conforme === "CONFORME",
+      totalCitations,
+      result.usage.totalTokens
+    );
+
+    return {
+      ...obj,
+      step_metadata: {
+        position: step.position,
+        name: step.name,
+        severity: step.severityLevel,
+        is_critical: step.isCritical,
+        weight: step.weight,
+      },
+      usage: {
+        prompt_tokens: result.usage.promptTokens,
+        completion_tokens: result.usage.completionTokens,
+        total_tokens: result.usage.totalTokens,
+      },
+    };
+  }
+
   const prompt = buildStepPrompt(
     step,
     auditConfig,
@@ -128,11 +280,13 @@ export async function analyzeStep(
     productVerificationContext,
     productInfo
   );
+
   logger.debug("Sending prompt to model", {
     audit_id: auditId,
     fiche_id: ficheId,
     step_position: step.position,
     model: opts.model,
+    transcript_mode: transcriptMode,
   });
 
   const result = await generateObject({
@@ -264,7 +418,7 @@ export async function analyzeAllSteps(
           auditId,
           ficheId,
           productInfo,
-          options
+          { ...options, timeline }
         );
 
         enqueueProgress(async () => {

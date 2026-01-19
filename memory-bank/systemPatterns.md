@@ -24,6 +24,9 @@
   - Orchestrator: `audit/run`
   - Worker: `audit/step.analyze` (one step per event, stores `audit_step_results.raw_result`)
   - Finalizer: triggered by `audit/step.analyzed` and finalizes once all steps exist
+  - Transcript context strategies:
+    - **prompt** (default): embed full `timelineText` in each step prompt
+    - **tools** (optional): keep timeline out of the prompt; LLM uses constrained transcript tools (`searchTranscript`, `getTranscriptChunks`) to fetch evidence
 - **Progressive fiche fetch (date range)**:
   - Orchestrator: `fiches/progressive-fetch-continue`
   - Worker: `fiches/progressive-fetch-day` (one date per event)

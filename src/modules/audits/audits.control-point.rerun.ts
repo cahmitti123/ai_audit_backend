@@ -417,7 +417,8 @@ export async function rerunAuditStepControlPoint(
     timelineText,
     `rerun-${options.auditId.toString()}-step-${options.stepPosition}-cp-${options.controlPointIndex}`,
     ficheId,
-    productInfo
+    productInfo,
+    { timeline }
   );
 
   // Evidence gating (deterministic) to avoid hallucinated citations.

@@ -46,6 +46,25 @@ Realtime domain events are published via **Pusher Channels**.
 - Endpoints: `POST /api/realtime/pusher/auth`, `POST /api/realtime/pusher/test`
 - Event catalog + payloads: `docs/FRONTEND_PUSHER_EVENTS.md`
 
+## Audit long-context strategy (RLM-style transcript tools)
+
+By default, each audit step embeds the full timeline text in the LLM prompt.
+
+To reduce context bloat / “context rot” on very long transcripts, you can enable an **out-of-prompt transcript access** mode inspired by “Recursive Language Models” **per request**:
+
+- Send `use_rlm: true` in `POST /api/audits/run` (or `POST /api/audits`, `POST /api/audits/run-latest`, `POST /api/audits/batch`)
+- Default is unchanged: if omitted/false, the audit uses the legacy prompt approach.
+
+In `use_rlm=true` mode, the LLM can call constrained server-side tools to:
+
+- `searchTranscript`: find relevant transcript chunks by keyword matching
+- `getTranscriptChunks`: fetch exact chunk text + metadata for quoting/citations
+
+Important operational notes:
+
+- Evidence enforcement is still handled by `AUDIT_EVIDENCE_GATING=1` (recommended). Hallucinated citations are dropped and unsupported “PRESENT” claims are conservatively downgraded.
+- For best consistency across replicas, keep `REDIS_URL` configured so workers and the finalizer share the same cached timeline. If Redis is missing, the system rebuilds the timeline from DB.
+
 
 
 

@@ -112,8 +112,10 @@ export async function createPendingAudit(
     automationRunId?: bigint;
     triggerSource?: string;
     triggerUserId?: string;
+    useRlm?: boolean;
   }
 ) {
+  const useRlm = typeof options?.useRlm === "boolean" ? options.useRlm : false;
   return await prisma.audit.create({
     data: {
       ficheCacheId,
@@ -138,6 +140,10 @@ export async function createPendingAudit(
         audit_id: auditId,
         status: "running",
         started_at: new Date().toISOString(),
+        approach: {
+          use_rlm: useRlm,
+          transcript_mode: useRlm ? "tools" : "prompt",
+        },
         ...(options?.triggerSource ? { trigger_source: options.triggerSource } : {}),
         ...(options?.automationScheduleId !== undefined
           ? { automation_schedule_id: options.automationScheduleId.toString() }

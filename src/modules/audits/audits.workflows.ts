@@ -539,6 +539,7 @@ export const runAuditFunction = inngest.createFunction(
       fiche_id,
       audit_config_id,
       user_id,
+      use_rlm,
       automation_schedule_id,
       automation_run_id,
       trigger_source,
@@ -546,7 +547,10 @@ export const runAuditFunction = inngest.createFunction(
       automation_schedule_id?: unknown;
       automation_run_id?: unknown;
       trigger_source?: unknown;
+      use_rlm?: unknown;
     };
+
+    const useRlm = typeof use_rlm === "boolean" ? use_rlm : false;
 
     const parseOptionalBigInt = (value: unknown): bigint | undefined => {
       if (typeof value === "bigint") return value;
@@ -585,6 +589,7 @@ export const runAuditFunction = inngest.createFunction(
       fiche_id,
       audit_config_id,
       user_id,
+      use_rlm: useRlm,
     });
 
     // Step 1: Ensure fiche is fetched
@@ -762,6 +767,7 @@ export const runAuditFunction = inngest.createFunction(
           automationRunId,
           triggerSource: triggerSource ?? "api",
           triggerUserId,
+          useRlm,
         }
       );
 
@@ -915,6 +921,7 @@ export const runAuditFunction = inngest.createFunction(
           fiche_id,
           audit_config_id,
           step_position: s.position,
+          use_rlm: useRlm,
         },
         // Idempotent per audit+step
         id: `audit-step-${auditDbId}-${s.position}`,
@@ -978,7 +985,14 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
   },
   { event: "audit/step.analyze" },
   async ({ event, step, logger }) => {
-    const { audit_db_id, audit_id, fiche_id, audit_config_id, step_position } =
+    const {
+      audit_db_id,
+      audit_id,
+      fiche_id,
+      audit_config_id,
+      step_position,
+      use_rlm,
+    } =
       event.data;
 
     const auditDbId = BigInt(audit_db_id);
@@ -1013,6 +1027,7 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
           audit_config_id,
           step_position: stepPosition,
           ok: true,
+          ...(typeof use_rlm === "boolean" ? { use_rlm } : {}),
         },
       });
 
@@ -1026,16 +1041,27 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
     let auditConfig: AuditConfigForAnalysis | null = null;
     let productInfo: ProductLinkResult | null = null;
     let timelineText: string | null = null;
+    let timeline: TimelineRecording[] | null = null;
     let auditStep: AuditStepDefinition | null = null;
+
+    const wantsTranscriptTools = typeof use_rlm === "boolean" ? use_rlm : false;
 
     if (redis) {
       try {
-        const [cfg, prod, perStepText, fullText] = await redis.mGet([
+        const keys = [
           `${base}:config`,
           `${base}:productInfo`,
           `${base}:step:${stepPosition}:timelineText`,
           `${base}:timelineText`,
-        ]);
+          ...(wantsTranscriptTools ? [`${base}:timeline`] : []),
+        ];
+
+        const values = await redis.mGet(keys);
+        const cfg = values[0];
+        const prod = values[1];
+        const perStepText = values[2];
+        const fullText = values[3];
+        const tl = wantsTranscriptTools ? values[4] : null;
 
         if (cfg) {
           const parsed = safeJsonParse(cfg);
@@ -1046,6 +1072,13 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
           productInfo = isProductLinkResult(parsed) ? parsed : null;
         }
         timelineText = perStepText || fullText || null;
+
+        if (wantsTranscriptTools && tl) {
+          const parsed = safeJsonParse(tl);
+          if (Array.isArray(parsed)) {
+            timeline = normalizeTimelineRecordings(parsed);
+          }
+        }
 
         if (auditConfig?.auditSteps?.length) {
           auditStep =
@@ -1095,21 +1128,27 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
     const stepDef = auditStep;
 
     // Fallback timeline text (expensive): rebuild from DB only if Redis is missing.
-    if (!timelineText) {
+    if (!timelineText || (wantsTranscriptTools && (!timeline || timeline.length === 0))) {
       logger.warn("Timeline text missing from Redis; rebuilding from DB", {
         audit_db_id,
         fiche_id,
       });
 
       const { buildTimelineText } = await import("./audits.prompts.js");
-      const timeline = await rebuildTimelineFromDatabase(fiche_id);
-      timelineText = buildTimelineText(timeline);
+      const rebuiltTimeline = await rebuildTimelineFromDatabase(fiche_id);
+      if (!timelineText) {
+        timelineText = buildTimelineText(rebuiltTimeline);
+      }
+      if (wantsTranscriptTools && (!timeline || timeline.length === 0)) {
+        timeline = rebuiltTimeline;
+      }
     }
 
     // Freeze narrowed values for use inside the async `step.run` callback.
     // TS can't guarantee captured variables won't change before the callback runs.
     const auditConfigForStep = auditConfig;
     const timelineTextForStep = timelineText;
+    const timelineForTools = wantsTranscriptTools ? timeline : null;
     if (!timelineTextForStep) {
       throw new NonRetriableError(`Timeline text missing for fiche ${fiche_id}`);
     }
@@ -1125,7 +1164,13 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
           timelineTextForStep,
           audit_id,
           fiche_id,
-          productInfo
+          productInfo,
+          {
+            transcriptMode: wantsTranscriptTools ? "tools" : "prompt",
+            ...(timelineForTools && timelineForTools.length > 0
+              ? { timeline: timelineForTools }
+              : {}),
+          }
         );
         return { ok: true, analyzed, errorMessage: undefined as string | undefined };
       } catch (err) {
@@ -1251,6 +1296,7 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
         step_position: stepPosition,
         ok,
         ...(ok ? {} : { error: errorMessage }),
+        ...(typeof use_rlm === "boolean" ? { use_rlm } : {}),
       },
     });
 
@@ -1297,8 +1343,10 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
   },
   { event: "audit/step.analyzed" },
   async ({ event, step, logger }) => {
-    const { audit_db_id, audit_id, fiche_id, audit_config_id } = event.data;
+    const { audit_db_id, audit_id, fiche_id, audit_config_id, use_rlm } = event.data;
     const auditDbId = BigInt(audit_db_id);
+    const useRlm = typeof use_rlm === "boolean" ? use_rlm : false;
+    const transcriptMode = useRlm ? "tools" : "prompt";
 
     // Load audit meta (JSON safe)
     const auditMeta = await step.run("load-audit-meta", async () => {
@@ -1565,8 +1613,16 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
         results: {
           steps: gatedStepResults,
           compliance,
+          approach: {
+            use_rlm: useRlm,
+            transcript_mode: transcriptMode,
+          },
         },
         compliance,
+        approach: {
+          use_rlm: useRlm,
+          transcript_mode: transcriptMode,
+        },
       },
       statistics: {
         recordings_count: timeline.length,
@@ -1581,6 +1637,10 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
         started_at: startedAtIso,
         completed_at: new Date().toISOString(),
         duration_ms: durationMs,
+        approach: {
+          use_rlm: useRlm,
+          transcript_mode: transcriptMode,
+        },
       },
     };
 
@@ -1628,6 +1688,7 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
         score: compliance.score || 0,
         niveau: compliance.niveau,
         duration_ms: durationMs,
+        use_rlm: useRlm,
       },
     });
 
@@ -1678,7 +1739,10 @@ export const batchAuditFunction = inngest.createFunction(
   },
   { event: "audit/batch" },
   async ({ event, step, logger }): Promise<BatchAuditResult> => {
-    const { fiche_ids, audit_config_id, user_id } = event.data;
+    const { fiche_ids, audit_config_id, user_id, use_rlm } = event.data as typeof event.data & {
+      use_rlm?: unknown;
+    };
+    const useRlm = typeof use_rlm === "boolean" ? use_rlm : false;
     const defaultAuditConfigId = audit_config_id || DEFAULT_AUDIT_CONFIG_ID;
 
     // Capture start time in a step to persist it across Inngest checkpoints
@@ -1769,6 +1833,7 @@ export const batchAuditFunction = inngest.createFunction(
           audit_config_id: defaultAuditConfigId,
           ...(typeof user_id === "string" && user_id ? { user_id } : {}),
           trigger_source: "batch",
+          use_rlm: useRlm,
         },
         id: `batch-${batchId}-audit-${fiche_id}-${defaultAuditConfigId}`,
       }))

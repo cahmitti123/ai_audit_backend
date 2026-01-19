@@ -314,7 +314,8 @@ export async function rerunAuditStep(
     timelineText,
     `rerun-${options.auditId}-step-${options.stepPosition}`,
     ficheId,
-    productInfo
+    productInfo,
+    { timeline }
   );
 
   const duration = Date.now() - startTime;

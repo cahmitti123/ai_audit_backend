@@ -246,6 +246,13 @@ auditsRouter.post(
     const automation_schedule_id = data.automation_schedule_id;
     const automation_run_id = data.automation_run_id;
     const trigger_source = data.trigger_source;
+    const useRlmRaw =
+      Object.prototype.hasOwnProperty.call(data, "use_rlm")
+        ? data.use_rlm
+        : Object.prototype.hasOwnProperty.call(data, "useRlm")
+          ? data.useRlm
+          : undefined;
+    const use_rlm = typeof useRlmRaw === "boolean" ? useRlmRaw : undefined;
 
     const auditConfigId = Number.parseInt(String(auditConfigRaw ?? ""), 10);
     const ficheIdStr = typeof fiche_id === "string" ? fiche_id : String(fiche_id ?? "");
@@ -265,6 +272,7 @@ auditsRouter.post(
         fiche_id: ficheIdStr,
         audit_config_id: auditConfigId,
         ...(typeof user_id === "string" && user_id ? { user_id } : {}),
+        ...(typeof use_rlm === "boolean" ? { use_rlm } : {}),
         ...(typeof automation_schedule_id === "string" && automation_schedule_id.trim()
           ? { automation_schedule_id: automation_schedule_id.trim() }
           : {}),
@@ -587,6 +595,13 @@ auditsRouter.post(
     const auditConfigRaw = data.audit_config_id ?? data.audit_id;
     const fiche_id = data.fiche_id;
     const user_id = data.user_id;
+    const useRlmRaw =
+      Object.prototype.hasOwnProperty.call(data, "use_rlm")
+        ? data.use_rlm
+        : Object.prototype.hasOwnProperty.call(data, "useRlm")
+          ? data.useRlm
+          : undefined;
+    const use_rlm = typeof useRlmRaw === "boolean" ? useRlmRaw : undefined;
 
     const auditConfigId = Number.parseInt(String(auditConfigRaw ?? ""), 10);
     const ficheIdStr = typeof fiche_id === "string" ? fiche_id : String(fiche_id ?? "");
@@ -614,6 +629,7 @@ auditsRouter.post(
         fiche_id: ficheIdStr,
         audit_config_id: auditConfigId,
         ...(typeof user_id === "string" && user_id ? { user_id } : {}),
+        ...(typeof use_rlm === "boolean" ? { use_rlm } : {}),
         trigger_source: "api",
       },
       id: eventId,
@@ -670,7 +686,20 @@ auditsRouter.post(
 auditsRouter.post(
   "/run-latest",
   asyncHandler(async (req: Request, res: Response) => {
-    const { fiche_id, user_id } = req.body;
+    const body: unknown = req.body;
+    const data =
+      typeof body === "object" && body !== null
+        ? (body as Record<string, unknown>)
+        : {};
+    const fiche_id = data.fiche_id;
+    const user_id = data.user_id;
+    const useRlmRaw =
+      Object.prototype.hasOwnProperty.call(data, "use_rlm")
+        ? data.use_rlm
+        : Object.prototype.hasOwnProperty.call(data, "useRlm")
+          ? data.useRlm
+          : undefined;
+    const use_rlm = typeof useRlmRaw === "boolean" ? useRlmRaw : undefined;
 
     if (!fiche_id) {
       return res.status(400).json({
@@ -707,6 +736,7 @@ auditsRouter.post(
         fiche_id: fiche_id.toString(),
         audit_config_id: Number(latestConfig.id),
         ...(typeof user_id === "string" && user_id ? { user_id } : {}),
+        ...(typeof use_rlm === "boolean" ? { use_rlm } : {}),
         trigger_source: "api",
       },
       id: eventId,
@@ -768,7 +798,21 @@ auditsRouter.post(
 auditsRouter.post(
   "/batch",
   asyncHandler(async (req: Request, res: Response) => {
-    const { fiche_ids, audit_config_id, user_id } = req.body;
+    const body: unknown = req.body;
+    const data =
+      typeof body === "object" && body !== null
+        ? (body as Record<string, unknown>)
+        : {};
+    const fiche_ids = data.fiche_ids;
+    const audit_config_id_raw = data.audit_config_id;
+    const user_id_raw = data.user_id;
+    const useRlmRaw =
+      Object.prototype.hasOwnProperty.call(data, "use_rlm")
+        ? data.use_rlm
+        : Object.prototype.hasOwnProperty.call(data, "useRlm")
+          ? data.useRlm
+          : undefined;
+    const use_rlm = typeof useRlmRaw === "boolean" ? useRlmRaw : undefined;
 
     if (!fiche_ids || !Array.isArray(fiche_ids)) {
       return res.status(400).json({
@@ -777,14 +821,34 @@ auditsRouter.post(
       });
     }
 
+    const ficheIds = fiche_ids
+      .map((v) => (typeof v === "string" ? v : String(v ?? "")))
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const audit_config_id =
+      typeof audit_config_id_raw === "number" && Number.isFinite(audit_config_id_raw)
+        ? audit_config_id_raw
+        : typeof audit_config_id_raw === "string" && audit_config_id_raw.trim()
+          ? Number.parseInt(audit_config_id_raw, 10)
+          : undefined;
+
+    const user_id =
+      typeof user_id_raw === "string"
+        ? user_id_raw.trim() || undefined
+        : user_id_raw !== undefined && user_id_raw !== null
+          ? String(user_id_raw)
+          : undefined;
+
     // Send batch event with deduplication ID
-    const batchId = `batch-${Date.now()}-${fiche_ids.length}`;
+    const batchId = `batch-${Date.now()}-${ficheIds.length}`;
     const { ids } = await inngest.send({
       name: "audit/batch",
       data: {
-        fiche_ids,
+        fiche_ids: ficheIds,
         audit_config_id,
         user_id,
+        ...(typeof use_rlm === "boolean" ? { use_rlm } : {}),
       },
       // Prevent duplicate batch runs
       id: batchId,

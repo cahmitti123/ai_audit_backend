@@ -8,6 +8,10 @@
 - **Audit step-level fan-out**:
   - `audit/run` orchestrates prerequisites then dispatches `audit/step.analyze` events.
   - Each step worker stores results in DB; a finalizer completes the audit once all steps exist.
+- **RLM-style transcript tools (optional)**:
+  - Enabled per-request via `use_rlm: true` (or `useRlm: true`) on audit run endpoints (no env toggle).
+  - The LLM uses constrained tools (`searchTranscript`, `getTranscriptChunks`) to find/quote evidence.
+  - Existing deterministic **evidence gating** still validates citations against the transcript and downgrades unsupported claims.
 - **Progressive fiche date-range fan-out**:
   - `fiches/progressive-fetch-continue` fans out per-day work.
   - Day workers emit processed events; a serialized updater updates/finalizes the job.

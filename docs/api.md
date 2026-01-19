@@ -61,6 +61,7 @@ The API exposes REST endpoints under `/api/*` and publishes OpenAPI docs at `/ap
   - `fetched_at_from` / `fetched_at_to` (ISO 8601 datetime)
   - `last_revalidated_from` / `last_revalidated_to` (ISO 8601 datetime)
 - `GET /api/audits/grouped-by-fiches`
+- `GET /api/audits/control-points/statuses`
 - `POST /api/audits/run`
 - `POST /api/audits/run-latest`
 - `POST /api/audits/batch`
@@ -68,6 +69,8 @@ The API exposes REST endpoints under `/api/*` and publishes OpenAPI docs at `/ap
 - `GET /api/audits/:audit_id`
 - `POST /api/audits/:audit_id/steps/:step_position/rerun`
 - `POST /api/audits/:audit_id/steps/:step_position/control-points/:control_point_index/rerun`
+- `GET /api/audits/:audit_id/steps/:step_position/control-points/:control_point_index`
+- `PATCH /api/audits/:audit_id/steps/:step_position/control-points/:control_point_index/review`
 
 ### Automation (`/api/automation`)
 

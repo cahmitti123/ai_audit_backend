@@ -44,6 +44,18 @@ export const stepNiveauConformiteEnum = z.enum([
   "REJET",
 ]);
 
+/**
+ * Control point ("checkpoint") status values inside `rawResult.points_controle[*].statut`.
+ *
+ * Source of truth: `src/schemas.ts` (`ControlPointSchema`).
+ */
+export const controlPointStatutEnum = z.enum([
+  "PRESENT",
+  "ABSENT",
+  "PARTIEL",
+  "NON_APPLICABLE",
+]);
+
 export const sortByEnum = z.enum([
   "created_at",
   "completed_at",
@@ -322,6 +334,26 @@ export const reviewAuditStepResultInputSchema = z.object({
 });
 
 /**
+ * Human review override for a single control point ("checkpoint") inside a step result.
+ *
+ * Notes:
+ * - This edits `rawResult.points_controle[i].statut` and/or `.commentaire`.
+ * - We append an audit trail entry to `rawResult.human_review`.
+ */
+export const reviewAuditControlPointInputSchema = z
+  .object({
+    statut: controlPointStatutEnum.optional(),
+    commentaire: z.string().max(20000).optional(),
+
+    // Optional metadata (stored in rawResult human_review)
+    reviewer: z.string().min(1).max(200).optional(),
+    reason: z.string().min(1).max(5000).optional(),
+  })
+  .refine((value) => value.statut !== undefined || value.commentaire !== undefined, {
+    message: "At least one of statut or commentaire must be provided",
+  });
+
+/**
  * Update an audit record metadata (soft-delete, notes, and optional linkage fields).
  *
  * IMPORTANT:
@@ -451,6 +483,7 @@ export type AuditStatus = z.infer<typeof auditStatusEnum>;
 export type AuditNiveau = z.infer<typeof auditNiveauEnum>;
 export type StepConforme = z.infer<typeof stepConformeEnum>;
 export type StepNiveauConformite = z.infer<typeof stepNiveauConformiteEnum>;
+export type ControlPointStatut = z.infer<typeof controlPointStatutEnum>;
 export type SortBy = z.infer<typeof sortByEnum>;
 export type SortOrder = z.infer<typeof sortOrderEnum>;
 
@@ -475,6 +508,9 @@ export type RunAuditInput = z.infer<typeof runAuditInputSchema>;
 export type BatchAuditInput = z.infer<typeof batchAuditInputSchema>;
 export type ReviewAuditStepResultInput = z.infer<
   typeof reviewAuditStepResultInputSchema
+>;
+export type ReviewAuditControlPointInput = z.infer<
+  typeof reviewAuditControlPointInputSchema
 >;
 export type UpdateAuditInput = z.infer<typeof updateAuditInputSchema>;
 
@@ -520,6 +556,17 @@ export const validateReviewAuditStepResultInput = (
   } catch (error) {
     logger.error("Review audit step result input validation failed", { error });
     throw new ValidationError("Invalid review audit step result input", error);
+  }
+};
+
+export const validateReviewAuditControlPointInput = (
+  data: unknown
+): ReviewAuditControlPointInput => {
+  try {
+    return reviewAuditControlPointInputSchema.parse(data);
+  } catch (error) {
+    logger.error("Review audit control point input validation failed", { error });
+    throw new ValidationError("Invalid review audit control point input", error);
   }
 };
 

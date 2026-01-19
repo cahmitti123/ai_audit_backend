@@ -19,7 +19,9 @@ import {
   parseListAuditsQuery,
   type ListAuditsQuery,
   validateReviewAuditStepResultInput,
+  validateReviewAuditControlPointInput,
   validateUpdateAuditInput,
+  controlPointStatutEnum,
 } from "./audits.schemas.js";
 import { jsonResponse } from "../../shared/bigint-serializer.js";
 import { logger } from "../../shared/logger.js";
@@ -854,6 +856,183 @@ auditsRouter.get(
     return jsonResponse(res, {
       success: true,
       data: audit,
+    });
+  })
+);
+
+/**
+ * @swagger
+ * /api/audits/control-points/statuses:
+ *   get:
+ *     tags: [Audits]
+ *     summary: List available checkpoint (control point) statuses
+ *     description: |
+ *       Returns the allowed values for `points_controle[*].statut` ("checkpoint status").
+ *       Useful for UI dropdowns when performing human overrides.
+ *     responses:
+ *       200:
+ *         description: Status options
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     statuses:
+ *                       type: array
+ *                       items:
+ *                         type: string
+ *                       example: [PRESENT, ABSENT, PARTIEL, NON_APPLICABLE]
+ */
+auditsRouter.get(
+  "/control-points/statuses",
+  asyncHandler(async (_req: Request, res: Response) => {
+    return res.json({
+      success: true,
+      data: {
+        statuses: controlPointStatutEnum.options,
+      },
+    });
+  })
+);
+
+/**
+ * @swagger
+ * /api/audits/{audit_id}/steps/{step_position}/control-points/{control_point_index}:
+ *   get:
+ *     tags: [Audits]
+ *     summary: Get a single checkpoint (control point) status + comment
+ *     description: |
+ *       Reads from the stored step `rawResult.points_controle[i]` and returns the current
+ *       checkpoint status (`statut`) and comment (`commentaire`).
+ *     parameters:
+ *       - in: path
+ *         name: audit_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: step_position
+ *         required: true
+ *         schema:
+ *           type: integer
+ *       - in: path
+ *         name: control_point_index
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: 1-based index in the step's `points_controle` array
+ *     responses:
+ *       200:
+ *         description: Checkpoint status
+ *       400:
+ *         description: Invalid path params
+ *       404:
+ *         description: Step/control point not found or not available
+ */
+auditsRouter.get(
+  "/:audit_id/steps/:step_position/control-points/:control_point_index",
+  asyncHandler(async (req: Request, res: Response) => {
+    const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
+    const stepPosition = parsePositiveIntParam(req.params.step_position, "step_position");
+    const controlPointIndex = parsePositiveIntParam(
+      req.params.control_point_index,
+      "control_point_index"
+    );
+
+    const data = await auditsService.getAuditControlPointStatus(
+      auditId,
+      stepPosition,
+      controlPointIndex
+    );
+
+    return jsonResponse(res, {
+      success: true,
+      data,
+    });
+  })
+);
+
+/**
+ * @swagger
+ * /api/audits/{audit_id}/steps/{step_position}/control-points/{control_point_index}/review:
+ *   patch:
+ *     tags: [Audits]
+ *     summary: Override a checkpoint (control point) status/comment after human review
+ *     description: |
+ *       Allows a human reviewer to override the stored checkpoint status (`statut`) and/or
+ *       comment (`commentaire`) for a single control point inside a step.
+ *
+ *       Behavior:
+ *       - Updates `rawResult.points_controle[i].statut` and/or `.commentaire`
+ *       - Appends an audit trail entry into `rawResult.human_review`
+ *     parameters:
+ *       - in: path
+ *         name: audit_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: step_position
+ *         required: true
+ *         schema:
+ *           type: integer
+ *       - in: path
+ *         name: control_point_index
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: 1-based index in the step's `points_controle` array
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               statut:
+ *                 type: string
+ *                 enum: [PRESENT, ABSENT, PARTIEL, NON_APPLICABLE]
+ *               commentaire:
+ *                 type: string
+ *               reviewer:
+ *                 type: string
+ *               reason:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Updated checkpoint status
+ *       400:
+ *         description: Invalid input
+ *       404:
+ *         description: Step/control point not found or not available
+ */
+auditsRouter.patch(
+  "/:audit_id/steps/:step_position/control-points/:control_point_index/review",
+  asyncHandler(async (req: Request, res: Response) => {
+    const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
+    const stepPosition = parsePositiveIntParam(req.params.step_position, "step_position");
+    const controlPointIndex = parsePositiveIntParam(
+      req.params.control_point_index,
+      "control_point_index"
+    );
+
+    const input = validateReviewAuditControlPointInput(req.body);
+    const data = await auditsService.reviewAuditControlPoint(
+      auditId,
+      stepPosition,
+      controlPointIndex,
+      input
+    );
+
+    return jsonResponse(res, {
+      success: true,
+      data,
     });
   })
 );

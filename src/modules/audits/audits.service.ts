@@ -21,6 +21,7 @@ import type {
   RunAuditInput,
   AuditFunctionResult,
   ReviewAuditStepResultInput,
+  ReviewAuditControlPointInput,
   UpdateAuditInput,
 } from "./audits.schemas.js";
 import {
@@ -507,6 +508,86 @@ export async function reviewAuditStepResult(
   }
 
   return toAuditStepResult(updated);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONTROL POINTS ("CHECKPOINTS") ACCESS / HUMAN REVIEW
+// ═══════════════════════════════════════════════════════════════════════════
+
+type AuditControlPointStatus = {
+  auditId: string;
+  stepPosition: number;
+  controlPointIndex: number;
+  point: string;
+  statut: string;
+  commentaire: string;
+};
+
+/**
+ * Get the current status/comment for a single checkpoint (control point) within a step.
+ *
+ * Reads from `audit_step_results.raw_result.points_controle[i]`.
+ */
+export async function getAuditControlPointStatus(
+  auditId: string | bigint,
+  stepPosition: number,
+  controlPointIndex: number
+): Promise<AuditControlPointStatus> {
+  const id = typeof auditId === "string" ? BigInt(auditId) : auditId;
+
+  const cp = await auditsRepository.getAuditStepControlPointSummary(
+    id,
+    stepPosition,
+    controlPointIndex
+  );
+
+  if (!cp) {
+    throw new NotFoundError(
+      "Audit control point",
+      `${id.toString()}:${stepPosition}:${controlPointIndex}`
+    );
+  }
+
+  return {
+    auditId: id.toString(),
+    stepPosition,
+    controlPointIndex,
+    point: cp.point,
+    statut: cp.statut,
+    commentaire: cp.commentaire,
+  };
+}
+
+/**
+ * Apply a human override to a single checkpoint (control point) within a step.
+ *
+ * Persists the update inside `rawResult.points_controle[i]` and appends an audit-trail entry to
+ * `rawResult.human_review`.
+ */
+export async function reviewAuditControlPoint(
+  auditId: string | bigint,
+  stepPosition: number,
+  controlPointIndex: number,
+  input: ReviewAuditControlPointInput
+): Promise<AuditControlPointStatus> {
+  const id = typeof auditId === "string" ? BigInt(auditId) : auditId;
+
+  const updated = await auditsRepository.applyHumanReviewToAuditControlPoint(
+    id,
+    stepPosition,
+    controlPointIndex,
+    input
+  );
+
+  if (!updated) {
+    throw new NotFoundError(
+      "Audit control point",
+      `${id.toString()}:${stepPosition}:${controlPointIndex}`
+    );
+  }
+
+  // Re-read the updated control point (cheap + avoids duplicating raw parsing logic here).
+  return await getAuditControlPointStatus(id, stepPosition, controlPointIndex);
 }
 
 /**

@@ -214,6 +214,73 @@ describe("HTTP validation (no DB required)", () => {
       })
     );
   });
+
+  it("GET /api/audits/control-points/statuses returns allowed checkpoint statuses", async () => {
+    const app = makeApp();
+
+    const res = await request(app).get("/api/audits/control-points/statuses");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        success: true,
+        data: {
+          statuses: ["PRESENT", "ABSENT", "PARTIEL", "NON_APPLICABLE"],
+        },
+      })
+    );
+  });
+
+  it("GET /api/audits/:audit_id/steps/:step_position/control-points/:control_point_index invalid control_point_index -> 400", async () => {
+    const app = makeApp();
+
+    const res = await request(app).get(
+      "/api/audits/1/steps/1/control-points/not-an-int"
+    );
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        success: false,
+        code: "VALIDATION_ERROR",
+        error: "Invalid control_point_index",
+      })
+    );
+  });
+
+  it("PATCH /api/audits/:audit_id/steps/:step_position/control-points/:control_point_index/review invalid audit_id -> 400", async () => {
+    const app = makeApp();
+
+    const res = await request(app)
+      .patch("/api/audits/not-a-bigint/steps/1/control-points/1/review")
+      .send({ statut: "PRESENT" });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        success: false,
+        code: "VALIDATION_ERROR",
+        error: "Invalid audit_id",
+      })
+    );
+  });
+
+  it("PATCH /api/audits/:audit_id/steps/:step_position/control-points/:control_point_index/review missing statut/commentaire -> 400", async () => {
+    const app = makeApp();
+
+    const res = await request(app)
+      .patch("/api/audits/1/steps/1/control-points/1/review")
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        success: false,
+        code: "VALIDATION_ERROR",
+        error: "Invalid review audit control point input",
+      })
+    );
+  });
 });
 
 

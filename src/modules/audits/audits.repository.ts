@@ -1497,6 +1497,67 @@ export type AuditStepReviewOverride = {
   reason?: string;
 };
 
+export type AuditControlPointReviewOverride = {
+  statut?: string;
+  commentaire?: string;
+  reviewer?: string;
+  reason?: string;
+};
+
+type AuditControlPointSummary = {
+  point: string;
+  statut: string;
+  commentaire: string;
+};
+
+function extractControlPointFromRawResult(
+  rawResult: unknown,
+  controlPointIndex: number
+): AuditControlPointSummary | null {
+  if (!Number.isFinite(controlPointIndex) || controlPointIndex <= 0) return null;
+  if (!isRecord(rawResult)) return null;
+
+  const points = rawResult.points_controle;
+  if (!Array.isArray(points) || points.length < controlPointIndex) return null;
+
+  const cp = points[controlPointIndex - 1];
+  if (!isRecord(cp)) return null;
+
+  const point = typeof cp.point === "string" ? cp.point : "";
+  const statut = typeof cp.statut === "string" ? cp.statut : "UNKNOWN";
+  const commentaire = typeof cp.commentaire === "string" ? cp.commentaire : "";
+
+  return { point, statut, commentaire };
+}
+
+/**
+ * Get a single control point ("checkpoint") summary from a step result.
+ *
+ * Returns null if the step result doesn't exist or if the control point isn't available
+ * (e.g. missing rawResult / points_controle).
+ */
+export async function getAuditStepControlPointSummary(
+  auditId: bigint,
+  stepPosition: number,
+  controlPointIndex: number
+): Promise<AuditControlPointSummary | null> {
+  const row = await prisma.auditStepResult.findUnique({
+    where: {
+      auditId_stepPosition: {
+        auditId,
+        stepPosition,
+      },
+    },
+    select: {
+      rawResult: true,
+    },
+  });
+
+  if (!row) return null;
+
+  return extractControlPointFromRawResult(row.rawResult as unknown, controlPointIndex);
+}
+
 /**
  * Update a single audit step result after human review.
  *
@@ -1576,6 +1637,103 @@ export async function applyHumanReviewToAuditStepResult(
         ? { niveauConformite: override.niveauConformite }
         : {}),
       rawResult: toPrismaJsonValue(nextRawResult),
+    },
+  });
+}
+
+/**
+ * Update a single control point ("checkpoint") inside a step result after human review.
+ *
+ * - Updates `rawResult.points_controle[i].statut` and/or `.commentaire`.
+ * - Preserves an audit trail by appending an entry into `rawResult.human_review`.
+ *
+ * Returns the updated row, or null if not found / control point unavailable.
+ */
+export async function applyHumanReviewToAuditControlPoint(
+  auditId: bigint,
+  stepPosition: number,
+  controlPointIndex: number,
+  override: AuditControlPointReviewOverride
+) {
+  const existing = await prisma.auditStepResult.findUnique({
+    where: {
+      auditId_stepPosition: {
+        auditId,
+        stepPosition,
+      },
+    },
+  });
+
+  if (!existing) return null;
+  if (!Number.isFinite(controlPointIndex) || controlPointIndex <= 0) return null;
+
+  // We can only edit control points when rawResult is present and object-shaped.
+  if (!isRecord(existing.rawResult)) return null;
+
+  const raw = { ...(existing.rawResult as Record<string, unknown>) };
+  const pointsRaw = raw.points_controle;
+  if (!Array.isArray(pointsRaw) || pointsRaw.length < controlPointIndex) return null;
+
+  const cpRaw = pointsRaw[controlPointIndex - 1];
+  if (!isRecord(cpRaw)) return null;
+
+  const previous = {
+    point: typeof cpRaw.point === "string" ? cpRaw.point : "",
+    statut: typeof cpRaw.statut === "string" ? cpRaw.statut : "UNKNOWN",
+    commentaire: typeof cpRaw.commentaire === "string" ? cpRaw.commentaire : "",
+  };
+
+  const next = {
+    statut: override.statut ?? previous.statut,
+    commentaire: override.commentaire ?? previous.commentaire,
+  };
+
+  // Update the control point in-place (immutably for JSON safety).
+  const nextPoints = [...pointsRaw];
+  nextPoints[controlPointIndex - 1] = {
+    ...(cpRaw as Record<string, unknown>),
+    statut: next.statut,
+    commentaire: next.commentaire,
+  };
+  raw.points_controle = nextPoints;
+
+  // Append audit trail entry
+  const nowIso = new Date().toISOString();
+  const reviewEntry = {
+    at: nowIso,
+    by: override.reviewer ?? null,
+    reason: override.reason ?? null,
+    kind: "control_point",
+    control_point_index: controlPointIndex,
+    point: previous.point,
+    previous: {
+      statut: previous.statut,
+      commentaire: previous.commentaire,
+    },
+    override: {
+      statut: next.statut,
+      commentaire: next.commentaire,
+    },
+  };
+
+  const existingReview = raw.human_review;
+  const history: unknown[] = Array.isArray(existingReview)
+    ? [...existingReview]
+    : existingReview
+      ? [existingReview]
+      : [];
+  history.push(reviewEntry);
+  raw.human_review = history;
+
+  return await prisma.auditStepResult.update({
+    where: {
+      auditId_stepPosition: {
+        auditId,
+        stepPosition,
+      },
+    },
+    data: {
+      rawResult: toPrismaJsonValue(raw),
     },
   });
 }

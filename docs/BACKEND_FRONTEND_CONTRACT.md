@@ -728,6 +728,42 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
 - **Errors**:
   - `400`: invalid `step_position` or `control_point_index`
 
+### GET `/api/audits/control-points/statuses`
+
+- **Purpose**: list allowed checkpoint (control point) status values for UI dropdowns.
+- **Response 200**:
+  - `{ success:true, data: { statuses: ["PRESENT","ABSENT","PARTIEL","NON_APPLICABLE"] } }`
+
+### GET `/api/audits/:audit_id/steps/:step_position/control-points/:control_point_index`
+
+- **Purpose**: fetch the current stored status + comment for a single checkpoint (control point) inside a step.
+- **Path**:
+  - `audit_id` (BigInt string)
+  - `step_position` (int > 0)
+  - `control_point_index` (int > 0, **1-based** index in `rawResult.points_controle`)
+- **Response 200**:
+  - `{ success:true, data: { auditId, stepPosition, controlPointIndex, point, statut, commentaire } }`
+- **Errors**:
+  - `400`: invalid path params
+  - `404`: step/control point not found or rawResult not available
+
+### PATCH `/api/audits/:audit_id/steps/:step_position/control-points/:control_point_index/review`
+
+- **Purpose**: human override of a checkpoint status/comment.
+- **Body** (validated by `validateReviewAuditControlPointInput()`):
+  - `statut` (optional): `"PRESENT" | "ABSENT" | "PARTIEL" | "NON_APPLICABLE"`
+  - `commentaire` (optional string)
+  - `reviewer` (optional string): stored for audit trail
+  - `reason` (optional string): stored for audit trail
+- **Behavior**:
+  - Updates `raw_result.points_controle[i].statut` and/or `.commentaire`
+  - Appends an audit trail entry into `raw_result.human_review`
+- **Response 200**:
+  - `{ success:true, data: { auditId, stepPosition, controlPointIndex, point, statut, commentaire } }`
+- **Errors**:
+  - `400`: invalid path params or body
+  - `404`: step/control point not found or rawResult not available
+
 ### PATCH `/api/audits/:audit_id/steps/:step_position/review`
 
 - **Purpose**: human QA override of a single step result (accept/reject/partial), even if the AI decided otherwise.

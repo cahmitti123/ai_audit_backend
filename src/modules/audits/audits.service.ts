@@ -39,6 +39,70 @@ import { logger } from "../../shared/logger.js";
 import { NotFoundError } from "../../shared/errors.js";
 import { COMPLIANCE_THRESHOLDS } from "../../shared/constants.js";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Produce a "latest view" of an audit's stored `resultData` by overlaying step-level `rawResult`
+ * (from `audit_step_results.raw_result`) onto `resultData.audit.results.steps`.
+ *
+ * Why: human overrides currently update step rawResult, while `audits.resultData` is a workflow snapshot.
+ * This ensures `GET /api/audits/:audit_id` reflects the latest checkpoint changes by default.
+ */
+function mergeResultDataWithLatestStepRawResults(params: {
+  resultData: unknown;
+  stepResults: Array<{ stepPosition: number; rawResult?: unknown | null }>;
+}): unknown {
+  const { resultData, stepResults } = params;
+
+  if (!isRecord(resultData)) return resultData;
+  const audit = resultData.audit;
+  if (!isRecord(audit)) return resultData;
+  const results = audit.results;
+  if (!isRecord(results)) return resultData;
+
+  const steps = results.steps;
+  if (!Array.isArray(steps) || steps.length === 0) return resultData;
+
+  const nextSteps = [...steps];
+
+  const findStepIndex = (stepPosition: number): number => {
+    const idxByMetadata = nextSteps.findIndex((s) => {
+      if (!isRecord(s)) return false;
+      const meta = s.step_metadata;
+      if (!isRecord(meta)) return false;
+      return Number(meta.position) === stepPosition;
+    });
+    if (idxByMetadata >= 0) return idxByMetadata;
+
+    // Fallback: assume steps are ordered by position (1-based)
+    return stepPosition - 1;
+  };
+
+  for (const step of stepResults) {
+    const stepPos = Number(step.stepPosition);
+    if (!Number.isFinite(stepPos) || stepPos <= 0) continue;
+    if (!isRecord(step.rawResult)) continue;
+
+    const idx = findStepIndex(stepPos);
+    if (idx < 0 || idx >= nextSteps.length) continue;
+
+    nextSteps[idx] = step.rawResult;
+  }
+
+  return {
+    ...(resultData as Record<string, unknown>),
+    audit: {
+      ...(audit as Record<string, unknown>),
+      results: {
+        ...(results as Record<string, unknown>),
+        steps: nextSteps,
+      },
+    },
+  };
+}
+
 type DbAuditStepResult = {
   id: bigint;
   auditId: bigint;
@@ -129,6 +193,14 @@ export async function getAuditById(
     return null;
   }
 
+  const resultDataLatest = mergeResultDataWithLatestStepRawResults({
+    resultData: audit.resultData,
+    stepResults: audit.stepResults as Array<{
+      stepPosition: number;
+      rawResult?: unknown | null;
+    }>,
+  });
+
   // Transform to API-friendly format
   return {
     id: audit.id.toString(),
@@ -158,7 +230,7 @@ export async function getAuditById(
     failedSteps: audit.failedSteps,
     recordingsCount: audit.recordingsCount,
     timelineChunks: audit.timelineChunks,
-    resultData: audit.resultData,
+    resultData: resultDataLatest,
     version: audit.version,
     isLatest: audit.isLatest,
     createdAt: audit.createdAt,
@@ -206,6 +278,14 @@ export async function getAuditsByFiche(
   const audits = await auditsRepository.getAuditsByFiche(ficheId, includeDetails);
 
   return audits.map((audit) => ({
+    // Keep resultData consistent with latest step rawResult overrides when available.
+    resultData: mergeResultDataWithLatestStepRawResults({
+      resultData: audit.resultData,
+      stepResults: (audit as any).stepResults as Array<{
+        stepPosition: number;
+        rawResult?: unknown | null;
+      }>,
+    }),
     id: audit.id.toString(),
     ficheCacheId: audit.ficheCacheId.toString(),
     auditConfigId: audit.auditConfigId.toString(),
@@ -233,7 +313,6 @@ export async function getAuditsByFiche(
     failedSteps: audit.failedSteps,
     recordingsCount: audit.recordingsCount,
     timelineChunks: audit.timelineChunks,
-    resultData: audit.resultData,
     version: audit.version,
     isLatest: audit.isLatest,
     createdAt: audit.createdAt,

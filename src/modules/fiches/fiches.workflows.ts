@@ -35,7 +35,14 @@ import * as fichesWebhooks from "./fiches.webhooks.js";
 // Type definitions for step returns
 type CacheCheckResultNotFound = {
   found: false;
-  reason: "no_cache" | "cache_expired" | "force_refresh" | "sales_list_only";
+  reason:
+    | "no_cache"
+    | "cache_expired"
+    | "force_refresh"
+    | "sales_list_only"
+    | "cache_incomplete"
+    | "recordings_missing_rows"
+    | "recordings_missing_url";
   fiche_id: string;
   cache_id: string | null;
   recordings_count: number;
@@ -60,6 +67,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isSalesListOnlyRawData(value: unknown): boolean {
   return isRecord(value) && value._salesListOnly === true;
+}
+
+function isFullFicheDetailsRawData(value: unknown): boolean {
+  if (!isRecord(value)) {return false;}
+  // Cached full details are expected to be the validated gateway payload shape
+  // (see `fiches.schemas.ts`: `success: true` + `information.fiche_id`).
+  const success = (value as { success?: unknown }).success;
+  const information = (value as { information?: unknown }).information;
+  if (success !== true) {return false;}
+  if (!isRecord(information)) {return false;}
+  const ficheId = (information as { fiche_id?: unknown }).fiche_id;
+  return typeof ficheId === "string" && ficheId.trim().length > 0;
 }
 
 function getProgressiveFetchDayContext(event: unknown): {
@@ -174,18 +193,51 @@ export const fetchFicheFunction = inngest.createFunction(
 
         // Check if cached data is only sales list (minimal data without recordings)
         const rawData: unknown = cachedData.rawData;
-        if (isSalesListOnlyRawData(rawData)) {
+        const isSalesListOnly = isSalesListOnlyRawData(rawData);
+        const hasFullDetails = isFullFicheDetailsRawData(rawData);
+
+        // Self-heal: if we have recordings in DB but their URLs are blank, re-fetch full details.
+        // This can happen when sales-list caching upserts recordings without URLs.
+        const recordings = Array.isArray(cachedData.recordings) ? cachedData.recordings : [];
+        const wantsRecordings =
+          Boolean(cachedData.hasRecordings) ||
+          (typeof cachedData.recordingsCount === "number" && cachedData.recordingsCount > 0) ||
+          recordings.length > 0;
+        const missingRecordingRows = wantsRecordings && recordings.length === 0;
+        const blankUrls =
+          wantsRecordings &&
+          recordings.some(
+            (r) => typeof r.recordingUrl === "string" && r.recordingUrl.trim().length === 0
+          );
+
+        if (isSalesListOnly || !hasFullDetails || missingRecordingRows || blankUrls) {
           logger.info(
-            "Cache has only sales list data, need to fetch full details",
+            isSalesListOnly
+              ? "Cache has only sales list data, need to fetch full details"
+              : !hasFullDetails
+              ? "Cache is missing full details fields, need to fetch full details"
+              : missingRecordingRows
+              ? "Cache indicates recordings but recording rows are missing, need to refetch full details"
+              : "Cache recordings missing URL(s), need to refetch full details",
             {
               fiche_id,
               cache_id: String(cachedData.id),
               recordings: cachedData.recordingsCount,
+              isSalesListOnly,
+              hasFullDetails,
+              missingRecordingRows,
+              blankUrls,
             }
           );
           return {
             found: false,
-            reason: "sales_list_only",
+            reason: isSalesListOnly
+              ? "sales_list_only"
+              : missingRecordingRows
+              ? "recordings_missing_rows"
+              : blankUrls
+              ? "recordings_missing_url"
+              : "cache_incomplete",
             fiche_id,
             cache_id: String(cachedData.id),
             recordings_count: cachedData.recordingsCount || 0,

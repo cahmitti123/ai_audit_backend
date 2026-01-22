@@ -317,6 +317,8 @@ export async function upsertRecordings(
       };
 
       const parsed = recording.parsed;
+      const recordingUrlRaw =
+        typeof recording.recording_url === "string" ? recording.recording_url.trim() : "";
 
       await prisma.recording.upsert({
         where: {
@@ -328,7 +330,9 @@ export async function upsertRecordings(
         create: {
           ficheCacheId,
           callId: recording.call_id,
-          recordingUrl: recording.recording_url || "",
+          // `recordingUrl` is non-nullable in DB, but upstream may omit it in sales-list endpoints.
+          // Store an empty string on create, but avoid overwriting a non-empty URL on updates.
+          recordingUrl: recordingUrlRaw,
           recordingDate: parsed?.date || null,
           recordingTime: parsed?.time || null,
           fromNumber: parsed?.from_number || null,
@@ -343,18 +347,25 @@ export async function upsertRecordings(
           hasTranscription: false,
         },
         update: {
-          recordingUrl: recording.recording_url || "",
-          recordingDate: parsed?.date || null,
-          recordingTime: parsed?.time || null,
-          fromNumber: parsed?.from_number || null,
-          toNumber: parsed?.to_number || null,
-          uuid: parsed?.uuid || null,
-          direction: recording.direction || null,
-          answered: recording.answered ?? null,
-          startTime: recording.start_time
-            ? new Date(recording.start_time)
-            : null,
-          durationSeconds: recording.duration_seconds ?? null,
+          // IMPORTANT:
+          // - Never overwrite a non-empty URL with an empty string (can break transcriptions/audits).
+          // - Only update optional fields when the upstream provides a value.
+          ...(recordingUrlRaw ? { recordingUrl: recordingUrlRaw } : {}),
+          ...(parsed?.date ? { recordingDate: parsed.date } : {}),
+          ...(parsed?.time ? { recordingTime: parsed.time } : {}),
+          ...(parsed?.from_number ? { fromNumber: parsed.from_number } : {}),
+          ...(parsed?.to_number ? { toNumber: parsed.to_number } : {}),
+          ...(parsed?.uuid ? { uuid: parsed.uuid } : {}),
+          ...(typeof recording.direction === "string" && recording.direction.trim()
+            ? { direction: recording.direction }
+            : {}),
+          ...(typeof recording.answered === "boolean" ? { answered: recording.answered } : {}),
+          ...(typeof recording.start_time === "string" && recording.start_time.trim()
+            ? { startTime: new Date(recording.start_time) }
+            : {}),
+          ...(typeof recording.duration_seconds === "number"
+            ? { durationSeconds: recording.duration_seconds }
+            : {}),
         },
       });
     })

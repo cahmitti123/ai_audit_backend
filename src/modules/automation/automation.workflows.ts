@@ -71,6 +71,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function isFullFicheDetailsRawData(value: unknown): boolean {
+  if (!isRecord(value)) {return false;}
+  const success = (value as { success?: unknown }).success;
+  const information = (value as { information?: unknown }).information;
+  if (success !== true) {return false;}
+  if (!isRecord(information)) {return false;}
+  const ficheId = (information as { fiche_id?: unknown }).fiche_id;
+  return typeof ficheId === "string" && ficheId.trim().length > 0;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -915,6 +925,7 @@ export const runAutomationFunction = inngest.createFunction(
         recordingsCount: number | null;
         hasRecordings: boolean;
         isSalesListOnly: boolean;
+        isFullDetails: boolean;
       }> = [];
 
       let ficheDetailsPollAttempt = 0;
@@ -945,10 +956,12 @@ export const runAutomationFunction = inngest.createFunction(
                   recordingsCount: null,
                   hasRecordings: false,
                   isSalesListOnly: true,
+                  isFullDetails: false,
                 };
               }
               const raw = r.rawData ?? null;
               const isSalesListOnly = isRecord(raw) && raw._salesListOnly === true;
+              const isFullDetails = isFullFicheDetailsRawData(raw) && !isSalesListOnly;
               const rawRecordings = isRecord(raw)
                 ? (raw as { recordings?: unknown }).recordings
                 : undefined;
@@ -964,14 +977,13 @@ export const runAutomationFunction = inngest.createFunction(
                 recordingsCount: derivedRecordingsCount,
                 hasRecordings: Boolean(r.hasRecordings),
                 isSalesListOnly,
+                isFullDetails,
               };
             });
           }
         );
 
-        const ready = lastSnapshot.filter(
-          (r) => r.exists && r.isSalesListOnly === false
-        ).length;
+        const ready = lastSnapshot.filter((r) => r.exists && r.isFullDetails === true).length;
 
         await log(
           "info",
@@ -1028,12 +1040,14 @@ export const runAutomationFunction = inngest.createFunction(
           : 0;
 
       for (const snap of lastSnapshot) {
-        if (!snap.exists || snap.isSalesListOnly) {
+        if (!snap.exists || !snap.isFullDetails) {
           ficheFetchFailures.push({
             ficheId: snap.ficheId,
-            error: snap.exists
+            error: !snap.exists
+              ? "Fiche not found in cache"
+              : snap.isSalesListOnly
               ? "Fiche details not fetched (still sales-list-only cache)"
-              : "Fiche not found in cache",
+              : "Fiche details not fetched (cache incomplete)",
           });
           continue;
         }

@@ -189,8 +189,14 @@ export async function fetchFicheDetails(
     // Gateway endpoint: /api/fiches/by-id/:ficheId
     // NOTE: The gateway is responsible for handling/refreshing `cle` internally.
     // We intentionally do not pass `cle` query params even if a cached value is present.
+    const params = new URLSearchParams({
+      include_recordings: String(includeRecordings),
+      // We run our own transcription system; ask the gateway not to include upstream transcriptions.
+      include_transcriptions: "false",
+    });
+
     const response = await axios.get<FicheDetailsResponse>(
-      `${apiBase}/fiches/by-id/${ficheId}`,
+      `${apiBase}/fiches/by-id/${ficheId}?${params}`,
       {
         timeout: 120000, // 2 minutes - CRM can be slow with full details
         headers: getAuthHeaders(),

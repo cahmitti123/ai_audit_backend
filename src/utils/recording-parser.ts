@@ -43,7 +43,9 @@ export type EnrichedParsedRecording = {
 export function parseRecordingUrl(url: string): ParsedRecording | null {
   try {
     // Extract filename from URL
-    const fileName = url.split("/").pop() || url;
+    const fileNameWithQuery = url.split("/").pop() || url;
+    // Strip querystring/fragment so patterns match: "file.mp3?token=..." -> "file.mp3"
+    const fileName = fileNameWithQuery.split("?")[0]?.split("#")[0] || fileNameWithQuery;
 
     // Regex pattern for recording filename
     // UUID (with hyphens) - DD-MM-YY-HHhMM-FROM_NUMBER-TO_NUMBER.mp3
@@ -149,6 +151,69 @@ export function enrichRecording<T extends RecordingLike>(
   const url = recording.recording_url || recording.recordingUrl || "";
   const callId = recording.call_id || recording.callId || "";
 
+  const getStringField = (key: string): string | null => {
+    const v = (recording as Record<string, unknown>)[key];
+    return typeof v === "string" && v.trim() ? v.trim() : null;
+  };
+
+  const startTimeRaw =
+    getStringField("start_time") ||
+    getStringField("startTime") ||
+    null;
+
+  const fromRaw =
+    getStringField("from_number") ||
+    getStringField("fromNumber") ||
+    null;
+
+  const toRaw =
+    getStringField("to_number") ||
+    getStringField("toNumber") ||
+    null;
+
+  const uuidRaw = getStringField("uuid");
+
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+
+  const buildParsedFromStartTime = (): {
+    date: string;
+    time: string;
+    timestamp: string;
+  } | null => {
+    if (!startTimeRaw) {return null;}
+
+    // Try ISO parsing first (works for "2026-01-22T16:20:00Z", etc.)
+    const ms = Date.parse(startTimeRaw);
+    if (Number.isFinite(ms)) {
+      const d = new Date(ms);
+      const date = `${pad2(d.getUTCDate())}/${pad2(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+      const time = `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+      return { date, time, timestamp: d.toISOString() };
+    }
+
+    // Fallback: "YYYY-MM-DD HH:MM(:SS)" or "YYYY-MM-DDTHH:MM"
+    const mYmd = /^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2}))/.exec(startTimeRaw);
+    if (mYmd) {
+      const [, yyyy, mm, dd, hh, min] = mYmd;
+      const date = `${dd}/${mm}/${yyyy}`;
+      const time = `${hh}:${min}`;
+      const iso = `${yyyy}-${mm}-${dd}T${hh}:${min}:00.000Z`;
+      return { date, time, timestamp: iso };
+    }
+
+    // Fallback: "DD/MM/YYYY HH:MM"
+    const mDmy = /^(\d{2})\/(\d{2})\/(\d{4})(?:\s(\d{2}):(\d{2}))/.exec(startTimeRaw);
+    if (mDmy) {
+      const [, dd, mm, yyyy, hh, min] = mDmy;
+      const date = `${dd}/${mm}/${yyyy}`;
+      const time = `${hh}:${min}`;
+      const iso = `${yyyy}-${mm}-${dd}T${hh}:${min}:00.000Z`;
+      return { date, time, timestamp: iso };
+    }
+
+    return null;
+  };
+
   logger.debug("enrichRecording: processing recording", {
     call_id: callId,
     has_recording_url: Boolean(recording.recording_url),
@@ -159,13 +224,32 @@ export function enrichRecording<T extends RecordingLike>(
   const parsed = parseRecordingUrl(url);
 
   if (!parsed) {
-    logger.warn("enrichRecording: failed to parse URL", { call_id: callId });
+    // Fallback: if the API already provides start_time/from/to, use them instead of parsing the URL.
+    const fallbackTime = buildParsedFromStartTime();
+    const canFallback = Boolean(fallbackTime || fromRaw || toRaw || uuidRaw);
+
+    // Only warn when we have neither a parseable URL nor enough metadata to build a useful fallback.
+    if (!canFallback) {
+      logger.warn("enrichRecording: failed to parse URL", { call_id: callId });
+    }
+
     return {
       ...recording,
       // Normalize field names to snake_case
       recording_url: url,
       call_id: callId,
-      parsed: null,
+      parsed: canFallback
+        ? {
+            uuid: uuidRaw || "",
+            date: fallbackTime?.date || "",
+            time: fallbackTime?.time || "",
+            timestamp: fallbackTime?.timestamp || "",
+            from_number: fromRaw ? formatPhoneNumber(fromRaw) : "",
+            to_number: toRaw ? formatPhoneNumber(toRaw) : "",
+            from_number_raw: fromRaw || "",
+            to_number_raw: toRaw || "",
+          }
+        : null,
     };
   }
 

@@ -131,6 +131,12 @@ export const fetchFicheFunction = inngest.createFunction(
       {
         limit: CONCURRENCY.FICHE_FETCH.limit,
       },
+      // Prevent overlapping fetches for the same fiche across replicas.
+      // (Allows re-fetch attempts while avoiding duplicate concurrent CRM calls.)
+      {
+        key: "event.data.fiche_id",
+        limit: 1,
+      },
     ],
     name: "Fetch Fiche from API",
     retries: 3,
@@ -141,7 +147,6 @@ export const fetchFicheFunction = inngest.createFunction(
     timeouts: {
       finish: TIMEOUTS.FICHE_FETCH,
     },
-    idempotency: "event.data.fiche_id",
   },
   { event: "fiche/fetch" },
   async ({ event, step, logger }): Promise<FicheFetchResult> => {

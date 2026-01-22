@@ -24,6 +24,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function toYyyyMmDdFromDateLike(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {return undefined;}
+
+  // Accept:
+  // - "YYYY-MM-DD"
+  // - "YYYY-MM-DDTHH:MM:SSZ"
+  // - "DD/MM/YYYY"
+  // - "DD/MM/YYYY HH:MM"
+  const firstToken = trimmed.split(/\s+/)[0] || "";
+  const datePart = firstToken.includes("T") ? firstToken.split("T")[0] || "" : firstToken;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {return datePart;}
+
+  const parts = datePart.split("/");
+  if (parts.length === 3) {
+    const [dayRaw, monthRaw, yearRaw] = parts;
+    const day = (dayRaw || "").trim();
+    const month = (monthRaw || "").trim();
+    const year = (yearRaw || "").trim();
+    if (!/^\d{1,2}$/.test(day) || !/^\d{1,2}$/.test(month) || !/^\d{4}$/.test(year)) {
+      return undefined;
+    }
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+
+  return undefined;
+}
+
 function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
   const json: unknown = JSON.parse(JSON.stringify(value));
   return json as Prisma.InputJsonValue;
@@ -321,6 +350,19 @@ export async function cacheFicheSalesSummary(
         })()
       : summaryRawData;
 
+  // Ensure we always try to set `salesDate` when we can.
+  // This is critical because date-range queries use `FicheCache.salesDate` as the source of truth.
+  let salesDate: string | undefined =
+    options?.salesDate ?? existing?.salesDate ?? undefined;
+  if (!salesDate) {
+    if (typeof ficheData.date_insertion === "string") {
+      salesDate = toYyyyMmDdFromDateLike(ficheData.date_insertion);
+    }
+    if (!salesDate && typeof ficheData.date_modification === "string") {
+      salesDate = toYyyyMmDdFromDateLike(ficheData.date_modification);
+    }
+  }
+
   const ficheCache = await fichesRepository.upsertFicheCache({
     ficheId: ficheData.id,
     // Never overwrite existing groupe/agence with empty strings.
@@ -332,7 +374,7 @@ export async function cacheFicheSalesSummary(
     prospectEmail: ficheData.email || existing?.prospectEmail || undefined,
     prospectTel: ficheData.telephone || existing?.prospectTel || undefined,
     // Track which CRM sales date this fiche belongs to (used by date-range queries)
-    salesDate: options?.salesDate ?? existing?.salesDate ?? undefined,
+    salesDate,
     rawData: nextRawData,
     hasRecordings: enrichedRecordings.length > 0,
     recordingsCount: enrichedRecordings.length,

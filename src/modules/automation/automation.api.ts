@@ -127,8 +127,8 @@ function getEmailTransport(): { transporter: Transporter; from: string } | null 
 
 /**
  * Fetch fiches for a single date from external CRM API
- * Note: This returns basic fiche data WITHOUT recordings
- * To get recordings, you must fetch each fiche individually
+ * NOTE: We use the CRM "by-date-with-calls" endpoint so we can cache sales summaries
+ * with recordings metadata (call IDs + URLs when available).
  * 
  * @param date - Date in DD/MM/YYYY format
  * @param onlyWithRecordings - Filter for fiches with recordings (not supported by API yet)
@@ -146,14 +146,14 @@ export async function fetchFichesForDate(
     "https://api.devis-mutuelle-pas-cher.com";
   const apiBase = `${baseUrl}/api`;
 
-  // The /by-date endpoint only returns basic fiche data
-  // It doesn't support include_recordings parameter
-  const url = `${apiBase}/fiches/search/by-date`;
+  // Use the "with calls" endpoint to include recordings metadata in the sales list.
+  const url = `${apiBase}/fiches/search/by-date-with-calls`;
 
   const params = new URLSearchParams({
     date: date,
     criteria_type: "1",
     include_recordings: "true",
+    include_transcriptions: "false",
     force_new_session: "false",
   });
 

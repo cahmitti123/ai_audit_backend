@@ -184,6 +184,23 @@ function safeOneLineJson(value: unknown, maxChars = 15_000): string {
   }
 }
 
+function toPositiveInt(value: unknown, fallback: number): number {
+  const n =
+    typeof value === "number"
+      ? value
+      : Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+function chunkArray<T>(items: T[], chunkSize: number): T[][] {
+  const size = Math.max(1, Math.floor(chunkSize));
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
 /**
  * Run Automation Function
  * =======================
@@ -681,7 +698,10 @@ export const runAutomationFunction = inngest.createFunction(
                 batch.map(async (date) => {
                   const fiches = await automationApi.fetchFichesForDate(
                     date,
-                    selection.onlyWithRecordings || false,
+                    // IMPORTANT: never pre-filter by recordings at this stage.
+                    // Sales-list endpoints are often incomplete; we enforce `onlyWithRecordings`
+                    // only AFTER fetching full fiche details.
+                    false,
                     apiKey
                   );
 
@@ -790,14 +810,23 @@ export const runAutomationFunction = inngest.createFunction(
           );
           if (allowed.size > 0) {
             const before = filteredFiches.length;
+            let unknownGroupKept = 0;
             filteredFiches = filteredFiches.filter((fiche) => {
               if (!isRecord(fiche)) {return false;}
               const g = getStringField(fiche, "groupe");
-              return typeof g === "string" && allowed.has(g);
+              // IMPORTANT: sales-list-only cache rows may not have `groupe` yet.
+              // If groupe is missing, keep the fiche and apply the real group filter
+              // AFTER fetching full fiche details (where groupe is authoritative).
+              if (typeof g !== "string" || !g.trim()) {
+                unknownGroupKept++;
+                return true;
+              }
+              return allowed.has(g);
             });
-            await log("info", `Filtered fiches by groupes (${allowed.size})`, {
+            await log("info", `Filtered fiches by groupes (${allowed.size}) (best-effort)`, {
               before,
               after: filteredFiches.length,
+              unknown_group_kept: unknownGroupKept,
               groupes: Array.from(allowed),
             });
           }
@@ -963,18 +992,24 @@ export const runAutomationFunction = inngest.createFunction(
         `Ensuring fiche details via distributed 'fiche/fetch' fan-out (${ficheIds.length} fiches)`
       );
 
-      await step.sendEvent(
-        "fan-out-fiche-fetches",
-        ficheIds.map((ficheId) => ({
-          name: "fiche/fetch",
-          data: {
-            fiche_id: ficheId,
-            force_refresh: false,
-          },
-          // Deterministic id: retries won't dispatch duplicate fetches for the same run+fiche
-          id: `automation-${runIdString}-fetch-${ficheId}`,
-        }))
-      );
+      const sendChunkSize = toPositiveInt(process.env.AUTOMATION_SEND_EVENT_CHUNK_SIZE, 200);
+      const fetchEvents = ficheIds.map((ficheId) => ({
+        name: "fiche/fetch" as const,
+        data: {
+          fiche_id: ficheId,
+          force_refresh: false,
+        },
+        // Deterministic id: retries won't dispatch duplicate fetches for the same run+fiche
+        id: `automation-${runIdString}-fetch-${ficheId}`,
+      }));
+
+      const fetchChunks = chunkArray(fetchEvents, sendChunkSize);
+      for (let i = 0; i < fetchChunks.length; i++) {
+        await step.sendEvent(
+          `fan-out-fiche-fetches-${i + 1}-of-${fetchChunks.length}`,
+          fetchChunks[i]!
+        );
+      }
 
       // Durable wait (no in-step busy polling): poll DB snapshot with `step.run` + `step.sleep`.
       const ficheDetailsMaxWaitMs = Math.max(
@@ -1003,6 +1038,7 @@ export const runAutomationFunction = inngest.createFunction(
       let lastSnapshot: Array<{
         ficheId: string;
         exists: boolean;
+        groupe: string | null;
         recordingsCount: number | null;
         hasRecordings: boolean;
         isSalesListOnly: boolean;
@@ -1020,6 +1056,7 @@ export const runAutomationFunction = inngest.createFunction(
               where: { ficheId: { in: ficheIds } },
               select: {
                 ficheId: true,
+                groupe: true,
                 recordingsCount: true,
                 hasRecordings: true,
                 rawData: true,
@@ -1034,6 +1071,7 @@ export const runAutomationFunction = inngest.createFunction(
                 return {
                   ficheId: id,
                   exists: false,
+                  groupe: null,
                   recordingsCount: null,
                   hasRecordings: false,
                   isSalesListOnly: true,
@@ -1055,6 +1093,7 @@ export const runAutomationFunction = inngest.createFunction(
               return {
                 ficheId: id,
                 exists: true,
+                groupe: typeof r.groupe === "string" && r.groupe.trim() ? r.groupe.trim() : null,
                 recordingsCount: derivedRecordingsCount,
                 hasRecordings: Boolean(r.hasRecordings),
                 isSalesListOnly,
@@ -1082,11 +1121,32 @@ export const runAutomationFunction = inngest.createFunction(
             ) {
               ficheDetailsStallRetries++;
               stableCount = 0;
-              await log("warning", "Fiche details stalled; extending wait", {
-                ready,
-                total: ficheIds.length,
-                stall_retry: `${ficheDetailsStallRetries}/${maxFicheDetailsStallRetries}`,
-              });
+                  const retryNo = ficheDetailsStallRetries;
+                  const incomplete = lastSnapshot
+                    .filter((r) => !r.exists || r.isFullDetails !== true)
+                    .map((r) => r.ficheId);
+
+                  await log("warning", "Fiche details stalled; retrying incomplete fetches", {
+                    ready,
+                    total: ficheIds.length,
+                    stall_retry: `${retryNo}/${maxFicheDetailsStallRetries}`,
+                    incomplete: incomplete.length,
+                  });
+
+                  if (incomplete.length > 0) {
+                    const retryEvents = incomplete.map((ficheId) => ({
+                      name: "fiche/fetch" as const,
+                      data: { fiche_id: ficheId, force_refresh: true },
+                      id: `automation-${runIdString}-fetch-${ficheId}-retry-${retryNo}`,
+                    }));
+                    const retryChunks = chunkArray(retryEvents, sendChunkSize);
+                    for (let i = 0; i < retryChunks.length; i++) {
+                      await step.sendEvent(
+                        `retry-fiche-fetches-${runIdString}-${retryNo}-${i + 1}-of-${retryChunks.length}`,
+                        retryChunks[i]!
+                      );
+                    }
+                  }
             } else {
               break; // likely some failed; proceed with what we have
             }
@@ -1108,6 +1168,15 @@ export const runAutomationFunction = inngest.createFunction(
       const fichesWithoutRecordings: string[] = [];
       const ignoredTooManyRecordings: Array<{ ficheId: string; recordingsCount: number }> =
         [];
+      const ignoredWrongGroup: Array<{ ficheId: string; groupe: string | null }> = [];
+
+      const allowedGroupes = new Set(
+        Array.isArray(selection.groupes)
+          ? selection.groupes
+              .map((g) => (typeof g === "string" ? g.trim() : ""))
+              .filter(Boolean)
+          : []
+      );
 
       // Ignore fiches with too many recordings (protects transcription/audit fan-out).
       const maxRecordingsPerFicheEnv = Number(
@@ -1131,6 +1200,16 @@ export const runAutomationFunction = inngest.createFunction(
               : "Fiche details not fetched (cache incomplete)",
           });
           continue;
+        }
+
+        // Enforce group filter AFTER full details are present.
+        // Sales-list rows may not contain the group information.
+        if (allowedGroupes.size > 0) {
+          const g = snap.groupe;
+          if (!g || !allowedGroupes.has(g)) {
+            ignoredWrongGroup.push({ ficheId: snap.ficheId, groupe: g });
+            continue;
+          }
         }
 
         const recordingsCount =
@@ -1157,6 +1236,32 @@ export const runAutomationFunction = inngest.createFunction(
         } else {
           fichesWithoutRecordings.push(snap.ficheId);
         }
+      }
+
+      if (ignoredWrongGroup.length > 0) {
+        const ignoredSet = new Set(ignoredWrongGroup.map((f) => f.ficheId));
+        const before = ficheIds.length;
+        ficheIds = ficheIds.filter((id) => !ignoredSet.has(id));
+
+        for (const f of ignoredWrongGroup) {
+          results.ignored.push({
+            ficheId: f.ficheId,
+            reason: f.groupe ? `Groupe not selected (${f.groupe})` : "Missing groupe",
+          });
+        }
+
+        await log("info", "Ignoring fiches outside selected groupes", {
+          before,
+          after: ficheIds.length,
+          ignored: ignoredWrongGroup.length,
+          groupes: allowedGroupes.size > 0 ? Array.from(allowedGroupes) : undefined,
+        });
+
+        await step.run("update-run-total-after-group-filter", async () => {
+          await automationRepository.updateAutomationRun(runId, {
+            totalFiches: ficheIds.length,
+          });
+        });
       }
 
       if (ignoredTooManyRecordings.length > 0) {
@@ -1325,22 +1430,27 @@ export const runAutomationFunction = inngest.createFunction(
         });
 
         if (toTranscribe.length > 0) {
-          await step.sendEvent(
-            "fan-out-transcriptions",
-            toTranscribe.map((ficheId) => ({
-              name: "fiche/transcribe",
-              data: {
-                fiche_id: ficheId,
-                priority:
-                  (schedule.transcriptionPriority as "normal" | "high" | "low") ||
-                  "normal",
-                // Automation doesn't need each fiche-level transcription orchestrator to block;
-                // we wait/poll at the automation level (and audits also ensure transcription when needed).
-                wait_for_completion: false,
-              },
-              id: `automation-${runIdString}-transcribe-${ficheId}`,
-            }))
-          );
+          const transcriptionEvents = toTranscribe.map((ficheId) => ({
+            name: "fiche/transcribe" as const,
+            data: {
+              fiche_id: ficheId,
+              priority:
+                (schedule.transcriptionPriority as "normal" | "high" | "low") ||
+                "normal",
+              // Automation doesn't need each fiche-level transcription orchestrator to block;
+              // we wait/poll at the automation level (and audits also ensure transcription when needed).
+              wait_for_completion: false,
+            },
+            id: `automation-${runIdString}-transcribe-${ficheId}`,
+          }));
+
+          const txChunks = chunkArray(transcriptionEvents, sendChunkSize);
+          for (let i = 0; i < txChunks.length; i++) {
+            await step.sendEvent(
+              `fan-out-transcriptions-${i + 1}-of-${txChunks.length}`,
+              txChunks[i]!
+            );
+          }
         }
 
         // Durable wait (no in-step busy polling): poll recording table snapshot with `step.run` + `step.sleep`.
@@ -1485,20 +1595,25 @@ export const runAutomationFunction = inngest.createFunction(
               incomplete: incomplete.length,
             });
 
-            await step.sendEvent(
-              `retry-transcriptions-${retryNo}`,
-              incomplete.map((ficheId) => ({
-                name: "fiche/transcribe",
-                data: {
-                  fiche_id: ficheId,
-                  priority:
-                    (schedule.transcriptionPriority as "normal" | "high" | "low") ||
-                    "normal",
-                  wait_for_completion: false,
-                },
-                id: `automation-${runIdString}-transcribe-${ficheId}-retry-${retryNo}`,
-              }))
-            );
+            const retryEvents = incomplete.map((ficheId) => ({
+              name: "fiche/transcribe" as const,
+              data: {
+                fiche_id: ficheId,
+                priority:
+                  (schedule.transcriptionPriority as "normal" | "high" | "low") ||
+                  "normal",
+                wait_for_completion: false,
+              },
+              id: `automation-${runIdString}-transcribe-${ficheId}-retry-${retryNo}`,
+            }));
+
+            const retryChunks = chunkArray(retryEvents, sendChunkSize);
+            for (let i = 0; i < retryChunks.length; i++) {
+              await step.sendEvent(
+                `retry-transcriptions-${retryNo}-${i + 1}-of-${retryChunks.length}`,
+                retryChunks[i]!
+              );
+            }
           }
 
           transcriptionPollAttempt++;
@@ -1652,22 +1767,27 @@ export const runAutomationFunction = inngest.createFunction(
             `Sending ${auditTasks.length} audit events (FULL FAN-OUT)`
           );
 
-          await step.sendEvent(
-            "fan-out-all-audits",
-            auditTasks.map(({ ficheId, configId }) => ({
-              name: "audit/run",
-              data: {
-                fiche_id: ficheId,
-                audit_config_id: Number(configId),
-                automation_schedule_id: String(schedule_id),
-                automation_run_id: String(runIdString),
-                trigger_source: "automation",
-                use_rlm: Boolean(selection.useRlm),
-              },
-              // Deterministic id: avoid duplicate audit dispatch on retries
-              id: `automation-${runIdString}-audit-${ficheId}-${configId}`,
-            }))
-          );
+          const auditEvents = auditTasks.map(({ ficheId, configId }) => ({
+            name: "audit/run" as const,
+            data: {
+              fiche_id: ficheId,
+              audit_config_id: Number(configId),
+              automation_schedule_id: String(schedule_id),
+              automation_run_id: String(runIdString),
+              trigger_source: "automation",
+              use_rlm: Boolean(selection.useRlm),
+            },
+            // Deterministic id: avoid duplicate audit dispatch on retries
+            id: `automation-${runIdString}-audit-${ficheId}-${configId}`,
+          }));
+
+          const auditChunks = chunkArray(auditEvents, sendChunkSize);
+          for (let i = 0; i < auditChunks.length; i++) {
+            await step.sendEvent(
+              `fan-out-all-audits-${i + 1}-of-${auditChunks.length}`,
+              auditChunks[i]!
+            );
+          }
 
           // Durable wait (no in-step busy polling): poll audit table with `step.run` + `step.sleep`.
           const auditMaxWaitMs = Math.max(
@@ -1702,17 +1822,14 @@ export const runAutomationFunction = inngest.createFunction(
               `poll-audits-${runIdString}-${auditPollAttempt}`,
               async () => {
                 const { prisma } = await import("../../shared/prisma.js");
-                const startedAt = new Date(
-                  typeof startTime === "number" && Number.isFinite(startTime)
-                    ? startTime
-                    : Date.now()
-                );
                 const configIds = auditConfigIdsClean.map((id) => BigInt(Number(id)));
 
                 const baseWhere = {
                   ficheCache: { ficheId: { in: fichesWithRecordings } },
                   auditConfigId: { in: configIds },
-                  createdAt: { gte: startedAt },
+                  // Link audits to this automation run explicitly (more reliable than createdAt windows)
+                  automationRunId: runId,
+                  isLatest: true,
                 } as const;
 
                 const [completed, failed] = await Promise.all([
@@ -1798,18 +1915,14 @@ export const runAutomationFunction = inngest.createFunction(
             `summarize-audit-outcomes-${runIdString}`,
             async () => {
               const { prisma } = await import("../../shared/prisma.js");
-              const startedAt = new Date(
-                typeof startTime === "number" && Number.isFinite(startTime)
-                  ? startTime
-                  : Date.now()
-              );
               const configIds = auditConfigIdsClean.map((id) => BigInt(Number(id)));
 
               const rows = await prisma.audit.findMany({
                 where: {
                   ficheCache: { ficheId: { in: fichesWithRecordings } },
                   auditConfigId: { in: configIds },
-                  createdAt: { gte: startedAt },
+                  automationRunId: runId,
+                  isLatest: true,
                 },
                 select: {
                   status: true,

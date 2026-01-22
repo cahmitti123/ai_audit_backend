@@ -22,6 +22,7 @@ import { getRedisClient } from "../../shared/redis.js";
 import { releaseRedisLock,tryAcquireRedisLock } from "../../shared/redis-lock.js";
 import { transcriptionWebhooks } from "../../shared/webhook.js";
 import {
+  ElevenLabsSpeechToTextError,
   normalizeElevenLabsApiKey,
   TranscriptionService,
 } from "./transcriptions.elevenlabs.js";
@@ -586,6 +587,70 @@ const RECORDING_PER_FICHE_CONCURRENCY = Math.max(
   )
 );
 
+const ELEVENLABS_RECORDING_RATE_LIMIT_PER_MINUTE = Math.max(
+  1,
+  Number(process.env.TRANSCRIPTION_ELEVENLABS_RATE_LIMIT_PER_MINUTE || 10)
+);
+
+const ELEVENLABS_MAX_ATTEMPTS = Math.max(
+  1,
+  Number(process.env.TRANSCRIPTION_ELEVENLABS_MAX_ATTEMPTS || 6)
+);
+
+const ELEVENLABS_BACKOFF_BASE_SECONDS = Math.max(
+  1,
+  Number(process.env.TRANSCRIPTION_ELEVENLABS_BACKOFF_BASE_SECONDS || 2)
+);
+
+const ELEVENLABS_BACKOFF_MAX_SECONDS = Math.max(
+  ELEVENLABS_BACKOFF_BASE_SECONDS,
+  Number(process.env.TRANSCRIPTION_ELEVENLABS_BACKOFF_MAX_SECONDS || 60)
+);
+
+function getRetryDelaySeconds(params: {
+  attempt: number;
+  retryAfterSeconds?: number;
+}): number {
+  const attemptNo = Math.max(1, Math.floor(params.attempt));
+  const exp = Math.min(
+    ELEVENLABS_BACKOFF_MAX_SECONDS,
+    ELEVENLABS_BACKOFF_BASE_SECONDS * 2 ** (attemptNo - 1)
+  );
+  const delay = typeof params.retryAfterSeconds === "number" && params.retryAfterSeconds > 0
+    ? Math.max(exp, params.retryAfterSeconds)
+    : exp;
+  return Math.max(1, Math.ceil(delay));
+}
+
+function getElevenLabsRetryHint(error: unknown): {
+  retryable: boolean;
+  status?: number;
+  retryAfterSeconds?: number;
+} {
+  if (error instanceof ElevenLabsSpeechToTextError) {
+    const status = error.status;
+    const retryAfterSeconds = error.retryAfterSeconds;
+    const retryable =
+      status === 429 ||
+      status === 408 ||
+      (typeof status === "number" && status >= 500 && status <= 599);
+    return { retryable, status, retryAfterSeconds };
+  }
+
+  // Fallback: parse safe error message (eg. "status=429") when we lost structured data.
+  if (error instanceof Error) {
+    const m = /(?:^|\s)status=(\d{3})(?:\s|$)/.exec(error.message);
+    const status = m ? Number(m[1]) : undefined;
+    const retryable =
+      status === 429 ||
+      status === 408 ||
+      (typeof status === "number" && status >= 500 && status <= 599);
+    return { retryable, status };
+  }
+
+  return { retryable: false };
+}
+
 /**
  * Transcribe Recording Function (Worker)
  * ======================================
@@ -610,6 +675,12 @@ export const transcribeRecordingFunction = inngest.createFunction(
         limit: RECORDING_PER_FICHE_CONCURRENCY,
       },
     ],
+    // Global provider cap (prevents ElevenLabs 429 due to high fan-out across replicas).
+    // Override with TRANSCRIPTION_ELEVENLABS_RATE_LIMIT_PER_MINUTE if your plan allows more throughput.
+    rateLimit: {
+      limit: ELEVENLABS_RECORDING_RATE_LIMIT_PER_MINUTE,
+      period: "1m",
+    },
     timeouts: {
       finish: TIMEOUTS.TRANSCRIPTION,
     },
@@ -797,10 +868,47 @@ export const transcribeRecordingFunction = inngest.createFunction(
         return { notified: true };
       });
 
-      const transcription = await step.run(`elevenlabs-transcribe-${call_id}`, async () => {
-        const svc = new TranscriptionService(apiKey);
-        return await svc.transcribe(url);
-      });
+      let transcription:
+        | Awaited<ReturnType<TranscriptionService["transcribe"]>>
+        | null = null;
+      let attempt = 0;
+      while (!transcription) {
+        attempt++;
+        try {
+          transcription = await step.run(
+            `elevenlabs-transcribe-${call_id}-attempt-${attempt}`,
+            async () => {
+              const svc = new TranscriptionService(apiKey);
+              return await svc.transcribe(url);
+            }
+          );
+        } catch (err: unknown) {
+          const hint = getElevenLabsRetryHint(err);
+          const canRetry = hint.retryable && attempt < ELEVENLABS_MAX_ATTEMPTS;
+          if (!canRetry) {
+            throw err;
+          }
+
+          const delaySeconds = getRetryDelaySeconds({
+            attempt,
+            retryAfterSeconds: hint.retryAfterSeconds,
+          });
+
+          logger.warn("ElevenLabs transcription throttled; backing off", {
+            fiche_id,
+            call_id,
+            attempt: `${attempt}/${ELEVENLABS_MAX_ATTEMPTS}`,
+            status: hint.status,
+            retry_after_seconds: hint.retryAfterSeconds,
+            delay_seconds: delaySeconds,
+          });
+
+          await step.sleep(
+            `elevenlabs-backoff-${call_id}-attempt-${attempt}`,
+            `${delaySeconds}s`
+          );
+        }
+      }
 
       const transcriptionId = transcription.transcription_id;
       if (!transcriptionId) {

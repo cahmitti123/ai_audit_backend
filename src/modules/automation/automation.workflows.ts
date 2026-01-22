@@ -4,6 +4,9 @@
  * Inngest workflow functions for automated audit processing
  */
 
+import fs from "node:fs/promises";
+import path from "node:path";
+
 import { NonRetriableError } from "inngest";
 
 import { inngest } from "../../inngest/client.js";
@@ -164,6 +167,23 @@ function toLogContext(metadata: unknown): Record<string, unknown> | undefined {
   return { metadata };
 }
 
+function envFlag(name: string): boolean {
+  const raw = String(process.env[name] ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+function safeOneLineJson(value: unknown, maxChars = 15_000): string {
+  try {
+    const json = JSON.stringify(value);
+    if (typeof json !== "string") {return "";}
+    if (json.length <= maxChars) {return json;}
+    return `${json.slice(0, maxChars)}…(truncated ${json.length - maxChars} chars)`;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `{"_error":"failed to stringify metadata","message":${JSON.stringify(msg)}}`;
+  }
+}
+
 /**
  * Run Automation Function
  * =======================
@@ -272,6 +292,49 @@ export const runAutomationFunction = inngest.createFunction(
     const runId = BigInt(runIdString);
     logger.info("Run record created", { run_id: runIdString });
 
+    const fileLoggingEnabled = envFlag("AUTOMATION_DEBUG_LOG_TO_FILE");
+    const fileLogDir = path.resolve(process.cwd(), "automation-debug-logs");
+    const fileLogPath = fileLoggingEnabled
+      ? path.join(fileLogDir, `automation-run-${runIdString}.txt`)
+      : null;
+
+    // Best-effort: initialize file log (never fail the run due to filesystem issues)
+    await step.run("init-automation-debug-log-file", async () => {
+      if (!fileLogPath) {return { enabled: false };}
+      try {
+        await fs.mkdir(fileLogDir, { recursive: true });
+        const header = [
+          "================================================================================",
+          "AI Audit - Automation debug log (file logging enabled)",
+          `run_id=${runIdString}`,
+          `schedule_id=${String(schedule_id)}`,
+          `due_at=${typeof due_at === "string" ? due_at : ""}`,
+          `started_at=${new Date().toISOString()}`,
+          "================================================================================",
+          "",
+        ].join("\n");
+        await fs.appendFile(fileLogPath, header, "utf8");
+        return { enabled: true, path: fileLogPath };
+      } catch (err: unknown) {
+        logger.warn("Failed to initialize automation debug log file (non-fatal)", {
+          run_id: runIdString,
+          error: errorMessage(err),
+        });
+        return { enabled: false, error: errorMessage(err) };
+      }
+    });
+
+    // Serialize file writes so lines remain ordered.
+    let fileWriteQueue: Promise<void> = Promise.resolve();
+    const appendToFile = (line: string) => {
+      if (!fileLogPath) {return;}
+      fileWriteQueue = fileWriteQueue
+        .then(async () => {
+          await fs.appendFile(fileLogPath, line, "utf8");
+        })
+        .catch(() => undefined);
+    };
+
     // Mark schedule as "running" even for manual triggers (prevents overlapping scheduled runs).
     // If due_at is provided (scheduler dispatch), use it; otherwise use "now".
     await step.run("mark-schedule-running", async () => {
@@ -318,11 +381,29 @@ export const runAutomationFunction = inngest.createFunction(
         message,
         metadata
       );
+
+      // Optional: also persist a human-readable line to a local txt file for debugging.
+      // This is best-effort and should never break the automation.
+      if (fileLogPath) {
+        const ts = new Date().toISOString();
+        const meta = metadata === undefined ? "" : ` ${safeOneLineJson(metadata)}`;
+        appendToFile(`${ts} [${level.toUpperCase()}] ${message}${meta}\n`);
+      }
+
       const ctx = toLogContext(metadata);
-      if (level === "debug") {logger.debug(message, ctx);}
-      else if (level === "warning") {logger.warn(message, ctx);}
-      else if (level === "error") {logger.error(message, ctx);}
-      else {logger.info(message, ctx);}
+      if (level === "debug") {
+        if (ctx) {logger.debug(message, ctx);}
+        else {logger.debug(message);}
+      } else if (level === "warning") {
+        if (ctx) {logger.warn(message, ctx);}
+        else {logger.warn(message);}
+      } else if (level === "error") {
+        if (ctx) {logger.error(message, ctx);}
+        else {logger.error(message);}
+      } else {
+        if (ctx) {logger.info(message, ctx);}
+        else {logger.info(message);}
+      }
     };
 
     try {

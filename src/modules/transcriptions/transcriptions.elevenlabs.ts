@@ -18,6 +18,23 @@ type RecordingInput = {
   [key: string]: unknown;
 };
 
+export class ElevenLabsSpeechToTextError extends Error {
+  readonly status?: number;
+  readonly code?: string;
+  readonly retryAfterSeconds?: number;
+
+  constructor(
+    message: string,
+    params: { status?: number; code?: string; retryAfterSeconds?: number }
+  ) {
+    super(message);
+    this.name = "ElevenLabsSpeechToTextError";
+    this.status = params.status;
+    this.code = params.code;
+    this.retryAfterSeconds = params.retryAfterSeconds;
+  }
+}
+
 function stripSurroundingQuotes(value: string): string {
   if (value.length < 2) {return value;}
   const first = value[0];
@@ -54,6 +71,33 @@ function extractProviderErrorMessage(data: unknown): string | undefined {
   ];
   for (const c of candidates) {
     if (typeof c === "string" && c.trim().length > 0) {return c.trim().slice(0, 500);}
+  }
+
+  return undefined;
+}
+
+function parseRetryAfterSeconds(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.ceil(value);
+  }
+  if (Array.isArray(value) && value.length > 0) {
+    return parseRetryAfterSeconds(value[0]);
+  }
+  if (typeof value !== "string") {return undefined;}
+
+  const trimmed = value.trim();
+  if (!trimmed) {return undefined;}
+
+  const asNumber = Number(trimmed);
+  if (Number.isFinite(asNumber) && asNumber > 0) {
+    return Math.ceil(asNumber);
+  }
+
+  const asDateMs = Date.parse(trimmed);
+  if (Number.isFinite(asDateMs)) {
+    const deltaMs = asDateMs - Date.now();
+    if (!Number.isFinite(deltaMs) || deltaMs <= 0) {return undefined;}
+    return Math.ceil(deltaMs / 1000);
   }
 
   return undefined;
@@ -151,13 +195,27 @@ export class TranscriptionService {
       });
     } catch (error: unknown) {
       // IMPORTANT: never rethrow raw AxiosError (may include request headers in logs)
-      throw new Error(
-        toSafeAxiosFailureMessage({
-          provider: "elevenlabs",
-          operation: "speech-to-text",
-          error,
-        })
-      );
+      const safeMessage = toSafeAxiosFailureMessage({
+        provider: "elevenlabs",
+        operation: "speech-to-text",
+        error,
+      });
+
+      if (axios.isAxiosError(error)) {
+        const status =
+          typeof error.response?.status === "number" ? error.response.status : undefined;
+        const code = typeof error.code === "string" ? error.code : undefined;
+        const retryAfterSeconds = parseRetryAfterSeconds(
+          (error.response?.headers as Record<string, unknown> | undefined)?.["retry-after"]
+        );
+        throw new ElevenLabsSpeechToTextError(safeMessage, {
+          status,
+          code,
+          retryAfterSeconds,
+        });
+      }
+
+      throw new Error(safeMessage);
     }
 
     if (typeof response.data !== "object" || response.data === null) {

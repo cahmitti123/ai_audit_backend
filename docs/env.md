@@ -184,6 +184,26 @@ This document explains **what each variable does**, **what happens if it’s mis
 - **If missing**: transcription endpoints and automation transcription stages will fail when they try to call ElevenLabs.
 - **Where to get it**: ElevenLabs dashboard → API keys ([ElevenLabs API keys](https://elevenlabs.io/app/settings/api-keys)).
 
+### `TRANSCRIPTION_ELEVENLABS_RATE_LIMIT_PER_MINUTE`
+- **What it does**: Global cap (per minute) for per-recording transcription workers (`transcription/recording.transcribe`) to avoid ElevenLabs `429 Too Many Requests`.
+- **If missing**: defaults to `10`.
+- **Where to get it**: you choose the value (depends on your ElevenLabs plan/quota).
+
+### `TRANSCRIPTION_ELEVENLABS_MAX_ATTEMPTS`
+- **What it does**: Maximum number of attempts per recording when ElevenLabs returns transient errors (429/5xx).
+- **If missing**: defaults to `6`.
+- **Where to get it**: you choose the value.
+
+### `TRANSCRIPTION_ELEVENLABS_BACKOFF_BASE_SECONDS`
+- **What it does**: Base backoff used between retry attempts after transient ElevenLabs errors.
+- **If missing**: defaults to `2`.
+- **Where to get it**: you choose the value.
+
+### `TRANSCRIPTION_ELEVENLABS_BACKOFF_MAX_SECONDS`
+- **What it does**: Maximum backoff cap used between retry attempts.
+- **If missing**: defaults to `60`.
+- **Where to get it**: you choose the value.
+
 ---
 
 ## Inngest (workflows orchestration)
@@ -354,6 +374,13 @@ These are optional and safe to leave unset unless you’re tuning throughput or 
 - `AUTOMATION_TRANSCRIPTION_POLL_INTERVAL_SECONDS`: poll interval for transcription completion checks.
 - `AUTOMATION_AUDIT_MAX_WAIT_MS`: max time automation waits for audit completion.
 - `AUTOMATION_AUDIT_POLL_INTERVAL_SECONDS`: poll interval for audit completion checks.
+
+#### Automation debug log file (optional)
+
+##### `AUTOMATION_DEBUG_LOG_TO_FILE`
+- **What it does**: When enabled, the `automation/run` orchestrator writes a plain-text debug log file to `./automation-debug-logs/automation-run-<RUN_ID>.txt` and appends every automation `log()` entry to it (level + message + metadata).
+- **If missing**: defaults to disabled.
+- **Where to get it**: you choose the value (`"1"` to enable, `"0"`/empty to disable).
 
 #### Safety guard
 

@@ -83,6 +83,7 @@ services:
       - AUDIT_STEP_TIMELINE_MAX_CHUNKS=${AUDIT_STEP_TIMELINE_MAX_CHUNKS:-40}
       - AUTOMATION_SCHEDULER_CRON=${AUTOMATION_SCHEDULER_CRON:-*/1 * * * *}
       - AUTOMATION_SCHEDULER_WINDOW_MINUTES=${AUTOMATION_SCHEDULER_WINDOW_MINUTES:-20}
+      - AUTOMATION_MAX_RECORDINGS_PER_FICHE=${AUTOMATION_MAX_RECORDINGS_PER_FICHE:-0}
       # Inngest scaling:
       # - INNGEST_PARALLELISM_PER_SERVER: how many tasks each server replica can run in parallel (default 10)
       # - INNGEST_SERVER_REPLICAS: how many `server` containers you scaled to (ex: --scale server=6)
@@ -126,8 +127,8 @@ services:
       - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
       - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
       - INNGEST_LOG_LEVEL=info
-      - INNGEST_POLL_INTERVAL=60
-    command: inngest start --sdk-url http://lb/api/inngest
+      - INNGEST_POLL_INTERVAL=${INNGEST_POLL_INTERVAL:-60}
+    command: inngest start --sdk-url http://lb/api/inngest --poll-interval ${INNGEST_POLL_INTERVAL:-60}
     networks:
       - ai-audit-network
     healthcheck:

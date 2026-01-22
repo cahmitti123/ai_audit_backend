@@ -4,6 +4,19 @@ The API exposes REST endpoints under `/api/*` and publishes OpenAPI docs at `/ap
 
 For detailed request/response payloads (and frontend-ready DTOs), see `docs/BACKEND_FRONTEND_CONTRACT.md`.
 
+## Frontend integration notes (recent changes)
+
+If you’re updating the frontend, start here:
+
+- **Reruns now update stored audits**: step reruns and control-point reruns mutate `audit_step_results` and recompute audit compliance; UI should refetch `GET /api/audits/:audit_id` after rerun completion.
+- **Automation has dedicated realtime events**: `automation.run.*` events are emitted on `private-job-automation-run-{run_id}` (see contract + checklist).
+- **Batch audits require Redis**: `POST /api/audits/batch` returns `503` if Redis is not configured; UI must handle this.
+- **Optional API token auth**: if `API_AUTH_TOKEN`/`API_AUTH_TOKENS` is set, all `/api/*` calls (including Pusher auth + chat) require `Authorization: Bearer ...` or `X-API-Key: ...`.
+
+See:
+- `docs/BACKEND_FRONTEND_CONTRACT.md` (migration notes + DTOs)
+- `docs/audit-verification-checklist.md` (deep behavior + debugging)
+
 ## Interactive API docs
 
 - Swagger UI: `http://localhost:3002/api-docs`
@@ -89,6 +102,14 @@ For detailed request/response payloads (and frontend-ready DTOs), see `docs/BACK
   - `POST /api/audits/batch`
 - Completed audits include the chosen approach in `resultData.metadata.approach` (also duplicated under `resultData.audit.results.approach`).
 
+#### AB testing (script: prompt vs tools)
+
+- A standalone runner exists at `scripts/ab-test-audits.ts`.
+- It samples random fiches from the DB, runs **two audits per fiche** (prompt vs tools), waits for completion, then writes a benchmark report to `data/ab-tests/`.
+- Run it with:
+  - `npm run abtest:audits -- --count 5 --audit-config-id 13`
+  - `npm run abtest:audits -- --count 10 --sales-date 2026-01-19`
+
 ### Automation (`/api/automation`)
 
 - `POST /api/automation/schedules`
@@ -101,6 +122,11 @@ For detailed request/response payloads (and frontend-ready DTOs), see `docs/BACK
 - `GET /api/automation/schedules/:id/runs`
 - `GET /api/automation/runs/:id`
 - `GET /api/automation/runs/:id/logs`
+
+#### Safety: ignore fiches with too many recordings
+
+- Set `AUTOMATION_MAX_RECORDINGS_PER_FICHE` (env) or schedule `ficheSelection.maxRecordingsPerFiche` (overrides env) to a positive integer.
+- When enabled, automation will **skip** fiches where `recordingsCount` is greater than the threshold; skipped fiches are reported in the run summary.
 
 ### Products (`/api/products`)
 

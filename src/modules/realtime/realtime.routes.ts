@@ -1,4 +1,5 @@
-import { Router, type Request, type Response } from "express";
+import { type Request, type Response,Router } from "express";
+
 import { asyncHandler } from "../../middleware/async-handler.js";
 import { ValidationError } from "../../shared/errors.js";
 import {
@@ -16,10 +17,12 @@ export const realtimeRouter = Router();
 /**
  * Pusher auth endpoint for private/presence channels.
  *
- * IMPORTANT: This backend currently has no auth middleware, so this endpoint
- * only enforces channel naming rules. For real security, you must add auth
- * (JWT/session/org membership) or proxy this endpoint through a trusted
- * Next.js API route.
+ * IMPORTANT:
+ * - This backend supports optional API auth via `API_AUTH_TOKEN(S)`, but it has no
+ *   user/org membership system yet.
+ * - When API auth is disabled, this endpoint only enforces channel naming rules.
+ * - For real security, add auth + membership checks or proxy this endpoint through
+ *   a trusted Next.js API route.
  */
 realtimeRouter.post(
   "/pusher/auth",
@@ -83,10 +86,10 @@ realtimeRouter.post(
       input.payload ?? { message: "hello from backend", ts: new Date().toISOString() };
 
     const channelCheck = isValidPusherChannelName(channel);
-    if (!channelCheck.ok) throw new ValidationError(channelCheck.error);
+    if (!channelCheck.ok) {throw new ValidationError(channelCheck.error);}
 
     const eventCheck = isValidPusherEventName(event);
-    if (!eventCheck.ok) throw new ValidationError(eventCheck.error);
+    if (!eventCheck.ok) {throw new ValidationError(eventCheck.error);}
 
     const result = await triggerPusher({ channels: [channel], event, payload });
     if (!result.ok) {

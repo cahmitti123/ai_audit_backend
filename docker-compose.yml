@@ -53,6 +53,7 @@ services:
       - VECTOR_STORE_ID=${VECTOR_STORE_ID}
       - VECTOR_STORE_MAX_RESULTS=${VECTOR_STORE_MAX_RESULTS:-5}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - AUTOMATION_MAX_RECORDINGS_PER_FICHE=${AUTOMATION_MAX_RECORDINGS_PER_FICHE:-0}
     volumes:
       - ./data:/app/data
     networks:
@@ -82,7 +83,7 @@ services:
       - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
       - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
       - INNGEST_LOG_LEVEL=info
-    command: inngest start --sdk-url http://server:3002/api/inngest
+    command: inngest start --sdk-url http://server:3002/api/inngest --poll-interval ${INNGEST_POLL_INTERVAL:-60}
     networks:
       - ai-audit-network
     healthcheck:

@@ -5,9 +5,12 @@
  */
 
 import { inngest } from "../../inngest/client.js";
-import { rerunAuditStep } from "./audits.rerun.js";
-import { rerunAuditStepControlPoint } from "./audits.control-point.rerun.js";
 import { auditWebhooks } from "../../shared/webhook.js";
+import {
+  rerunAuditStepControlPoint,
+  saveControlPointRerunResult,
+} from "./audits.control-point.rerun.js";
+import { rerunAuditStep, saveRerunResult } from "./audits.rerun.js";
 
 export const rerunAuditStepFunction = inngest.createFunction(
   {
@@ -22,6 +25,8 @@ export const rerunAuditStepFunction = inngest.createFunction(
   async ({ event, step, logger }) => {
     const { audit_id, step_position, custom_prompt } = event.data;
 
+    const rerunId = `rerun-${audit_id}-${step_position}-${event.id}`;
+
     logger.info("Starting step re-run", {
       audit_id,
       step_position,
@@ -31,7 +36,7 @@ export const rerunAuditStepFunction = inngest.createFunction(
     // Send started webhook
     await step.run("send-rerun-started", async () => {
       await auditWebhooks.stepRerunStarted(
-        `rerun-${audit_id}-${step_position}`,
+        rerunId,
         audit_id,
         step_position
       );
@@ -47,6 +52,20 @@ export const rerunAuditStepFunction = inngest.createFunction(
       });
     });
 
+    // Persist rerun result into the stored audit so the UI sees the updated step on fetch.
+    await step.run("persist-rerun", async () => {
+      return await saveRerunResult(
+        {
+          auditId: BigInt(audit_id),
+          stepPosition: step_position,
+          customPrompt: custom_prompt,
+        },
+        result,
+        true,
+        { rerunId, eventId: event.id }
+      );
+    });
+
     logger.info("Step re-run completed", {
       audit_id,
       step_position,
@@ -58,7 +77,7 @@ export const rerunAuditStepFunction = inngest.createFunction(
     // Send completion webhook
     await step.run("send-rerun-completed", async () => {
       await auditWebhooks.stepRerunCompleted(
-        `rerun-${audit_id}-${step_position}`,
+        rerunId,
         audit_id,
         step_position,
         result.originalStep,
@@ -133,6 +152,21 @@ export const rerunAuditStepControlPointFunction = inngest.createFunction(
         controlPointIndex: control_point_index,
         customPrompt: custom_prompt,
       });
+    });
+
+    // Persist rerun result into the stored audit (updates rawResult + step score/conforme deterministically).
+    await step.run("persist-control-point-rerun", async () => {
+      return await saveControlPointRerunResult(
+        {
+          auditId: BigInt(audit_id),
+          stepPosition: step_position,
+          controlPointIndex: control_point_index,
+          customPrompt: custom_prompt,
+        },
+        result,
+        true,
+        { rerunId, eventId: event.id }
+      );
     });
 
     logger.info("Control point re-run completed", {

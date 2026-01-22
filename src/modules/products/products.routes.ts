@@ -4,20 +4,21 @@
  * API endpoints for insurance products
  */
 
-import { Router, type Request, type Response } from "express";
-import * as productsService from "./products.service.js";
-import {
-  createGroupeSchema,
-  updateGroupeSchema,
-  createGammeSchema,
-  updateGammeSchema,
-  createFormuleSchema,
-  updateFormuleSchema,
-  productsQuerySchema,
-} from "./products.schemas.js";
+import { type Request, type Response,Router } from "express";
+
 import { asyncHandler } from "../../middleware/async-handler.js";
 import { ValidationError } from "../../shared/errors.js";
 import { ok } from "../../shared/http.js";
+import {
+  createFormuleSchema,
+  createGammeSchema,
+  createGroupeSchema,
+  productsQuerySchema,
+  updateFormuleSchema,
+  updateGammeSchema,
+  updateGroupeSchema,
+} from "./products.schemas.js";
+import * as productsService from "./products.service.js";
 
 export const productsRouter = Router();
 

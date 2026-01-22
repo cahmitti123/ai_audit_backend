@@ -6,18 +6,19 @@
 
 import { openai } from "@ai-sdk/openai";
 import { streamText } from "ai";
-import { prisma } from "../../shared/prisma.js";
-import { logger } from "../../shared/logger.js";
-import { getCachedFiche } from "../fiches/fiches.repository.js";
-import { getAuditById } from "../audits/audits.repository.js";
-import { getRecordingsByFiche } from "../recordings/recordings.repository.js";
-import { generateTimeline } from "../audits/audits.timeline.js";
-import { buildTimelineText } from "../audits/audits.prompts.js";
+
 import type {
+  ChatCitation,
   TimelineRecording,
   Transcription,
-  ChatCitation,
 } from "../../schemas.js";
+import { logger } from "../../shared/logger.js";
+import { prisma } from "../../shared/prisma.js";
+import { buildTimelineText } from "../audits/audits.prompts.js";
+import { getAuditById } from "../audits/audits.repository.js";
+import { generateTimeline } from "../audits/audits.timeline.js";
+import { getCachedFiche } from "../fiches/fiches.repository.js";
+import { getRecordingsByFiche } from "../recordings/recordings.repository.js";
 
 const DEFAULT_CHAT_MODEL =
   process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || "gpt-5.2";
@@ -103,7 +104,7 @@ function parseRecordingMetadata(filename: string): {
 function toTranscriptionWord(
   value: unknown
 ): Transcription["transcription"]["words"][number] | null {
-  if (!isRecord(value)) return null;
+  if (!isRecord(value)) {return null;}
 
   const text = value.text;
   const start = value.start;
@@ -129,17 +130,17 @@ function toTranscriptionWord(
 function toTranscriptionPayload(
   payload: unknown
 ): Transcription["transcription"] | null {
-  if (!isRecord(payload)) return null;
+  if (!isRecord(payload)) {return null;}
 
   const wordsRaw = payload.words;
-  if (!Array.isArray(wordsRaw) || wordsRaw.length === 0) return null;
+  if (!Array.isArray(wordsRaw) || wordsRaw.length === 0) {return null;}
 
   const words = wordsRaw
     .map(toTranscriptionWord)
     .filter(
       (w): w is Transcription["transcription"]["words"][number] => w !== null
     );
-  if (words.length === 0) return null;
+  if (words.length === 0) {return null;}
 
   const textFromPayload = payload.text;
   const text =
@@ -181,7 +182,7 @@ function buildTranscriptionsFromRecordings(
   const transcriptions: Transcription[] = [];
 
   for (const rec of recordings) {
-    if (!rec.hasTranscription || !rec.recordingUrl) continue;
+    if (!rec.hasTranscription || !rec.recordingUrl) {continue;}
 
     const parsed = buildParsedMetadata(rec);
 
@@ -199,7 +200,7 @@ function buildTranscriptionsFromRecordings(
       }
     }
 
-    if (!transcriptionData) continue;
+    if (!transcriptionData) {continue;}
 
     transcriptions.push({
       recording_url: rec.recordingUrl,
@@ -242,8 +243,8 @@ export async function buildAuditContext(
     getRecordingsByFiche(ficheId),
   ]);
 
-  if (!audit) throw new Error("Audit not found");
-  if (!fiche) throw new Error("Fiche not found");
+  if (!audit) {throw new Error("Audit not found");}
+  if (!fiche) {throw new Error("Fiche not found");}
 
   const ficheData = fiche.rawData as {
     prospect?: { prenom?: string; nom?: string };
@@ -353,7 +354,7 @@ export async function buildFicheContext(
     }),
   ]);
 
-  if (!fiche) throw new Error("Fiche not found");
+  if (!fiche) {throw new Error("Fiche not found");}
 
   const ficheData = fiche.rawData as {
     prospect?: {
@@ -470,16 +471,16 @@ export function extractCitations(
 
       // Enrich with recording URL from timeline
       const recordingMeta = timelineMap.get(citationData.recording_index);
-      if (!recordingMeta) continue;
+      if (!recordingMeta) {continue;}
 
       const chunkIndex = Number(citationData.chunk_index);
-      if (!Number.isInteger(chunkIndex)) continue;
-      if (chunkIndex < 0 || chunkIndex >= recordingMeta.chunks.length) continue;
+      if (!Number.isInteger(chunkIndex)) {continue;}
+      if (chunkIndex < 0 || chunkIndex >= recordingMeta.chunks.length) {continue;}
 
       // Verify quoted text appears in the referenced chunk to avoid hallucinated citations.
       const quoted = normalizeForMatch(citationData.texte);
       const chunkText = normalizeForMatch(recordingMeta.chunks[chunkIndex]?.full_text);
-      if (!quoted || !chunkText || !chunkText.includes(quoted)) continue;
+      if (!quoted || !chunkText || !chunkText.includes(quoted)) {continue;}
 
       citationData.recording_url = recordingMeta.recording_url || "N/A";
       citationData.recording_date = recordingMeta.recording_date || "N/A";

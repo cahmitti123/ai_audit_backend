@@ -78,6 +78,7 @@ services:
       # Automation scheduler
       - AUTOMATION_SCHEDULER_CRON=${AUTOMATION_SCHEDULER_CRON:-0 * * * *}
       - AUTOMATION_SCHEDULER_WINDOW_MINUTES=${AUTOMATION_SCHEDULER_WINDOW_MINUTES:-20}
+      - AUTOMATION_MAX_RECORDINGS_PER_FICHE=${AUTOMATION_MAX_RECORDINGS_PER_FICHE:-0}
       # Distributed worker concurrency (single replica defaults)
       - AUDIT_STEP_WORKER_CONCURRENCY=${AUDIT_STEP_WORKER_CONCURRENCY:-5}
       - AUDIT_STEP_PER_AUDIT_CONCURRENCY=${AUDIT_STEP_PER_AUDIT_CONCURRENCY:-5}
@@ -130,8 +131,8 @@ services:
       - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
       - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
       - INNGEST_LOG_LEVEL=info
-      - INNGEST_POLL_INTERVAL=60
-    command: inngest start --sdk-url http://server:3002/api/inngest
+      - INNGEST_POLL_INTERVAL=${INNGEST_POLL_INTERVAL:-60}
+    command: inngest start --sdk-url http://server:3002/api/inngest --poll-interval ${INNGEST_POLL_INTERVAL:-60}
     networks:
       - ai-audit-network
     healthcheck:

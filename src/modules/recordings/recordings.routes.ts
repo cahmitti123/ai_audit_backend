@@ -4,7 +4,9 @@
  * API endpoints for recording operations
  */
 
-import { Router, Request, Response } from "express";
+import type { Request, Response } from "express";
+import { Router } from "express";
+
 import { asyncHandler } from "../../middleware/async-handler.js";
 import { jsonResponse } from "../../shared/bigint-serializer.js";
 

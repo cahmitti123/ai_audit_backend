@@ -11,8 +11,9 @@
  */
 
 import Pusher from "pusher";
-import { logger } from "./logger.js";
+
 import { getPayloadSize } from "../utils/payload-size.js";
+import { logger } from "./logger.js";
 
 const DEFAULT_PUSHER_MAX_PAYLOAD_BYTES = 9000; // keep buffer vs Pusher limits (~10KB)
 
@@ -58,7 +59,7 @@ export function channelForJobId(jobId: string): string {
 }
 
 export function getPusherClient(): Pusher | null {
-  if (cachedPusher !== undefined) return cachedPusher;
+  if (cachedPusher !== undefined) {return cachedPusher;}
 
   const appId = envString("PUSHER_APP_ID");
   const key = envString("PUSHER_KEY") || envString("NEXT_PUBLIC_PUSHER_KEY");
@@ -116,8 +117,8 @@ export function normalizePusherChannelPart(value: string): string {
 
 export function isValidPusherChannelName(channel: string): { ok: true } | { ok: false; error: string } {
   const name = String(channel || "");
-  if (name.length === 0) return { ok: false, error: "channel_name is required" };
-  if (name.length > 200) return { ok: false, error: "channel_name too long (max 200 chars)" };
+  if (name.length === 0) {return { ok: false, error: "channel_name is required" };}
+  if (name.length > 200) {return { ok: false, error: "channel_name too long (max 200 chars)" };}
   if (!CHANNEL_ALLOWED_CHARS.test(name)) {
     return { ok: false, error: "channel_name contains invalid characters" };
   }
@@ -130,9 +131,9 @@ export function isValidPusherChannelName(channel: string): { ok: true } | { ok: 
 
 export function isValidPusherEventName(event: string): { ok: true } | { ok: false; error: string } {
   const name = String(event || "");
-  if (name.length === 0) return { ok: false, error: "event is required" };
-  if (name.length > 200) return { ok: false, error: "event too long (max 200 chars)" };
-  if (name.startsWith("pusher:")) return { ok: false, error: "event name cannot start with 'pusher:'" };
+  if (name.length === 0) {return { ok: false, error: "event is required" };}
+  if (name.length > 200) {return { ok: false, error: "event too long (max 200 chars)" };}
+  if (name.startsWith("pusher:")) {return { ok: false, error: "event name cannot start with 'pusher:'" };}
   return { ok: true };
 }
 
@@ -143,7 +144,7 @@ export function globalPusherChannel(): string {
 
 function getStringField(obj: Record<string, unknown>, key: string): string | null {
   const v = obj[key];
-  if (typeof v === "string" && v.trim().length > 0) return v.trim();
+  if (typeof v === "string" && v.trim().length > 0) {return v.trim();}
   return null;
 }
 
@@ -161,12 +162,16 @@ export function derivePusherChannelsForEvent(params: {
     const rec = payload as Record<string, unknown>;
 
     const auditId = getStringField(rec, "audit_id");
+    const auditDbId = getStringField(rec, "audit_db_id");
     const ficheId = getStringField(rec, "fiche_id");
     const jobId = getStringField(rec, "jobId") || getStringField(rec, "job_id");
+    const batchId = getStringField(rec, "batch_id");
 
-    if (auditId) out.add(channelForAuditId(auditId));
-    if (ficheId) out.add(channelForFicheId(ficheId));
-    if (jobId) out.add(channelForJobId(jobId));
+    if (auditId) {out.add(channelForAuditId(auditId));}
+    if (auditDbId && auditDbId !== auditId) {out.add(channelForAuditId(auditDbId));}
+    if (ficheId) {out.add(channelForFicheId(ficheId));}
+    if (jobId) {out.add(channelForJobId(jobId));}
+    if (batchId) {out.add(channelForJobId(batchId));}
   }
 
   if (out.size === 0 || isGlobalEvent) {
@@ -192,21 +197,21 @@ export function isAllowedAuthChannel(channelName: string): boolean {
 
   // If we are using public channels, we generally don't need auth.
   // Still, allow auth for private/presence for migration.
-  if (name.startsWith("private-audit-")) return true;
-  if (name.startsWith("private-fiche-")) return true;
-  if (name.startsWith("private-job-")) return true;
+  if (name.startsWith("private-audit-")) {return true;}
+  if (name.startsWith("private-fiche-")) {return true;}
+  if (name.startsWith("private-job-")) {return true;}
 
   // Optional future conventions (not wired today, but safe to support)
-  if (name.startsWith("private-user-")) return true;
-  if (name.startsWith("private-org-")) return true;
-  if (name.startsWith("private-tenant-")) return true;
-  if (name.startsWith("presence-org-")) return true;
+  if (name.startsWith("private-user-")) {return true;}
+  if (name.startsWith("private-org-")) {return true;}
+  if (name.startsWith("private-tenant-")) {return true;}
+  if (name.startsWith("presence-org-")) {return true;}
 
   // Global notifications / batch events
-  if (name === "private-global" || name === "presence-global") return true;
+  if (name === "private-global" || name === "presence-global") {return true;}
 
   // Allow a dedicated test channel
-  if (name === "private-realtime-test" || name === "presence-realtime-test") return true;
+  if (name === "private-realtime-test" || name === "presence-realtime-test") {return true;}
 
   return false;
 }
@@ -244,15 +249,31 @@ function shrinkRealtimeEventPayload(payload: unknown): unknown {
 
   const d = data as Record<string, unknown>;
   const pickKeys = [
+    // Correlation
     "audit_id",
     "audit_db_id",
     "audit_config_id",
     "fiche_id",
+    "event_id",
+    "batch_id",
+    "job_id",
     "jobId",
+    // Reruns / step-level signals
+    "rerun_id",
+    "rerun_scope",
+    "step_position",
+    "step_name",
+    "control_point_index",
+    // Common status/progress fields (snake_case + legacy camelCase)
     "schedule_id",
     "run_id",
     "status",
     "progress",
+    "current_phase",
+    "progress_percentage",
+    "completed_steps",
+    "total_steps",
+    "failed_steps",
     "completedSteps",
     "totalSteps",
     "failedSteps",
@@ -263,13 +284,13 @@ function shrinkRealtimeEventPayload(payload: unknown): unknown {
 
   const picked: Record<string, unknown> = {};
   for (const k of pickKeys) {
-    if (k in d) picked[k] = d[k];
+    if (k in d) {picked[k] = d[k];}
   }
 
   // Include array lengths for a couple common bulky fields
   for (const k of ["datesCompleted", "datesRemaining", "datesFailed"] as const) {
     const v = d[k];
-    if (Array.isArray(v)) picked[`${k}Count`] = v.length;
+    if (Array.isArray(v)) {picked[`${k}Count`] = v.length;}
   }
 
   if (looksLikeEnvelope) {
@@ -283,8 +304,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function toPusherPayload(value: unknown): Record<string, unknown> | null {
-  if (value === null || value === undefined) return null;
-  if (isRecord(value)) return value;
+  if (value === null || value === undefined) {return null;}
+  if (isRecord(value)) {return value;}
   // Pusher SDK types expect an object; wrap primitives/arrays.
   return { value };
 }
@@ -295,13 +316,13 @@ export async function triggerPusher(params: {
   payload: unknown;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
   const pusher = getPusherClient();
-  if (!pusher) return { ok: false, error: "Pusher not configured" };
+  if (!pusher) {return { ok: false, error: "Pusher not configured" };}
 
   const channels = (params.channels || []).filter(Boolean);
-  if (channels.length === 0) return { ok: false, error: "No channels to publish to" };
+  if (channels.length === 0) {return { ok: false, error: "No channels to publish to" };}
 
   const eventOk = isValidPusherEventName(params.event);
-  if (!eventOk.ok) return { ok: false, error: eventOk.error };
+  if (!eventOk.ok) {return { ok: false, error: eventOk.error };}
 
   const maxBytes = Math.max(
     1000,

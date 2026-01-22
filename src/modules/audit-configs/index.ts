@@ -33,37 +33,37 @@ export * as auditConfigsRepository from "./audit-configs.repository.js";
 // Types & Schemas (All types inferred from Zod schemas)
 export type * from "./audit-configs.schemas.js";
 export {
+  auditConfigCreateResponseSchema,
+  auditConfigDetailResponseSchema,
+  auditConfigDetailSchema,
+  // Response Schemas
+  auditConfigListResponseSchema,
+  auditConfigSchema,
+  auditConfigSummarySchema,
+  auditConfigUpdateResponseSchema,
+  auditConfigWithStepsSchema,
   // Enums
   auditSeveritySchema,
   auditStatusSchema,
+  auditStepCreateResponseSchema,
+  auditStepResponseSchema,
   // Core Schemas
   auditStepSchema,
   auditStepSummarySchema,
-  auditConfigSchema,
-  auditConfigSummarySchema,
-  auditConfigWithStepsSchema,
-  auditConfigDetailSchema,
+  createAuditConfigInputSchema,
   // Input Schemas
   createAuditStepInputSchema,
-  updateAuditStepInputSchema,
-  createAuditConfigInputSchema,
-  updateAuditConfigInputSchema,
-  // Response Schemas
-  auditConfigListResponseSchema,
-  auditConfigDetailResponseSchema,
-  auditStepResponseSchema,
-  auditConfigCreateResponseSchema,
-  auditConfigUpdateResponseSchema,
-  auditStepCreateResponseSchema,
   deleteResponseSchema,
   errorResponseSchema,
-  // Validators
-  validateCreateAuditConfigInput,
-  validateUpdateAuditConfigInput,
-  validateCreateAuditStepInput,
-  validateUpdateAuditStepInput,
+  updateAuditConfigInputSchema,
+  updateAuditStepInputSchema,
   validateAuditConfigDetail,
   validateAuditStep,
+  // Validators
+  validateCreateAuditConfigInput,
+  validateCreateAuditStepInput,
+  validateUpdateAuditConfigInput,
+  validateUpdateAuditStepInput,
 } from "./audit-configs.schemas.js";
 
 // Events

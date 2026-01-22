@@ -11,6 +11,7 @@
  */
 
 import crypto from "crypto";
+
 import { logger } from "./logger.js";
 import { getRedisClient } from "./redis.js";
 
@@ -43,7 +44,7 @@ export async function acquireRedisLock(params: {
     key: params.key,
     token,
     release: async () => {
-      if (!enabled) return;
+      if (!enabled) {return;}
       await releaseRedisLock({ key: params.key, token });
     },
   };
@@ -94,7 +95,7 @@ export async function releaseRedisLock(params: {
     return;
   }
 
-  if (!redis) return;
+  if (!redis) {return;}
 
   try {
     await redis.sendCommand(["EVAL", RELEASE_SCRIPT, "1", key, token]);

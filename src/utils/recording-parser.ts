@@ -123,8 +123,8 @@ export function getCallDirection(
 ): "in" | "out" | "unknown" {
   // If we have agent numbers, check them
   if (agentNumbers.length > 0) {
-    if (agentNumbers.includes(fromNumber)) return "out";
-    if (agentNumbers.includes(toNumber)) return "in";
+    if (agentNumbers.includes(fromNumber)) {return "out";}
+    if (agentNumbers.includes(toNumber)) {return "in";}
   }
 
   // Heuristic: if from number starts with standard mobile/landline, it's likely incoming

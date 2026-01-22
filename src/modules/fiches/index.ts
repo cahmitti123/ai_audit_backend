@@ -44,18 +44,18 @@ export * as fichesApi from "./fiches.api.js";
 // Types & Schemas (All types inferred from Zod schemas)
 export type * from "./fiches.schemas.js";
 export {
+  auditStatusRecordSchema,
+  auditStatusSchema,
+  ficheStatusSchema,
+  recordingSchema,
+  recordingStatusSchema,
   // Schemas
   salesFicheSchema,
   salesWithCallsResponseSchema,
-  recordingSchema,
-  ficheStatusSchema,
   transcriptionStatusSchema,
-  auditStatusSchema,
-  recordingStatusSchema,
-  auditStatusRecordSchema,
+  validateFicheDetailsResponse,
   // Validators
   validateSalesWithCallsResponse,
-  validateFicheDetailsResponse,
 } from "./fiches.schemas.js";
 
 // Events

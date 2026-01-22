@@ -10,17 +10,19 @@
  * LAYER: Presentation (HTTP)
  */
 
-import { Router, Request, Response } from "express";
-import * as fichesService from "./fiches.service.js";
-import * as fichesRepository from "./fiches.repository.js";
-import { jsonResponse } from "../../shared/bigint-serializer.js";
-import { logger } from "../../shared/logger.js";
+import type { Request, Response } from "express";
+import { Router } from "express";
+
+import { inngest } from "../../inngest/client.js";
 import { asyncHandler } from "../../middleware/async-handler.js";
+import { jsonResponse } from "../../shared/bigint-serializer.js";
 import { ValidationError } from "../../shared/errors.js";
 import { ok } from "../../shared/http.js";
-import { inngest } from "../../inngest/client.js";
+import { logger } from "../../shared/logger.js";
 import { prisma } from "../../shared/prisma.js";
 import { validateOutgoingWebhookUrl } from "../../shared/webhook-security.js";
+import * as fichesRepository from "./fiches.repository.js";
+import * as fichesService from "./fiches.service.js";
 
 export const fichesRouter = Router();
 

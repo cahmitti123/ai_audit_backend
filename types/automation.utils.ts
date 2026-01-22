@@ -74,7 +74,7 @@ export function formatDuration(durationMs: number): string {
  * @example calculateSuccessRate({totalFiches: 10, successfulFiches: 8}) // 80
  */
 export function calculateSuccessRate(run: AutomationRunResponse): number {
-  if (run.totalFiches === 0) return 0;
+  if (run.totalFiches === 0) {return 0;}
   return Math.round((run.successfulFiches / run.totalFiches) * 100);
 }
 
@@ -195,7 +195,7 @@ export function getShortDayName(day: number): string {
  * @example formatNextRun(new Date("2024-01-15T14:30:00Z")) // "Today at 2:30 PM"
  */
 export function formatNextRun(date: Date | string | null): string {
-  if (!date) return "Not scheduled";
+  if (!date) {return "Not scheduled";}
 
   const nextRun = typeof date === "string" ? new Date(date) : date;
   const now = new Date();
@@ -239,7 +239,7 @@ export function hasValidAuditConfig(schedule: {
   useAutomaticAudits: boolean;
   specificAuditConfigs: string[];
 }): boolean {
-  if (!schedule.runAudits) return true; // Not running audits is valid
+  if (!schedule.runAudits) {return true;} // Not running audits is valid
   
   // Either automatic audits enabled OR specific configs provided
   return (
@@ -256,7 +256,7 @@ export function getAuditConfigWarning(schedule: {
   useAutomaticAudits: boolean;
   specificAuditConfigs: string[];
 }): string | null {
-  if (!schedule.runAudits) return null;
+  if (!schedule.runAudits) {return null;}
   
   if (!hasValidAuditConfig(schedule)) {
     return "No audit configs selected. Either enable automatic audits or select specific audit configs.";

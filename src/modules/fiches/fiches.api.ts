@@ -10,6 +10,8 @@
  */
 
 import axios from "axios";
+
+import { AppError } from "../../shared/errors.js";
 import { logger } from "../../shared/logger.js";
 import {
   type FicheDetailsResponse,
@@ -24,19 +26,29 @@ const baseUrl =
   "https://api.devis-mutuelle-pas-cher.com";
 const apiBase = `${baseUrl}/api`;
 
-export class FicheApiError extends Error {
+function getAuthHeaders(): Record<string, string> {
+  const token = (process.env.FICHE_API_AUTH_TOKEN || "").trim();
+  if (!token) {return {};}
+  // Accept either raw token or already-prefixed "Bearer ..."
+  const value = token.toLowerCase().startsWith("bearer ") ? token : `Bearer ${token}`;
+  return { Authorization: value };
+}
+
+export class FicheApiError extends AppError {
   status?: number;
-  code?: string;
+  upstreamCode?: string;
   path?: string;
 
   constructor(
     message: string,
     options?: { status?: number; code?: string; path?: string }
   ) {
-    super(message);
-    this.name = "FicheApiError";
-    this.status = options?.status;
-    this.code = options?.code;
+    const upstreamStatus = options?.status;
+    const statusCode = upstreamStatus === 404 ? 404 : 502;
+    const code = upstreamStatus === 404 ? "NOT_FOUND" : "EXTERNAL_API_ERROR";
+    super(message, statusCode, code);
+    this.status = upstreamStatus;
+    this.upstreamCode = options?.code;
     this.path = options?.path;
   }
 }
@@ -112,6 +124,7 @@ export async function fetchSalesWithCalls(
       `${apiBase}/fiches/search/by-date-with-calls?${params}`,
       {
         timeout: 120000, // 2 minutes - fail faster, workflow will retry
+        headers: getAuthHeaders(),
       }
     );
 
@@ -153,14 +166,14 @@ export async function fetchSalesWithCalls(
  * IMPORTANT: Requires `cle` parameter from fiche data
  *
  * @param ficheId - The fiche ID
- * @param cle - The fiche security key (required by CRM)
+ * @param cle - Deprecated (gateway refreshes cle internally); kept for backwards compatibility
  * @param options - Optional parameters
  * @param options.includeRecordings - Include call recordings (default: TRUE - recordings fetched here!)
  * @param options.includeMailDevis - Include Mail Devis Personnalisé details (default: FALSE - opt-in)
  */
 export async function fetchFicheDetails(
   ficheId: string,
-  cle: string,
+  cle?: string,
   options?: {
     includeRecordings?: boolean;
   }
@@ -169,23 +182,18 @@ export async function fetchFicheDetails(
 
   logger.info("Fetching fiche details", {
     fiche_id: ficheId,
-    has_cle: Boolean(cle),
     include_recordings: includeRecordings,
   });
 
   try {
-    // CRM API endpoint: /fiches/{ficheId}?cle={cle}&include_recordings=true
-    const params = new URLSearchParams({
-      cle: cle, // Required by CRM
-      include_recordings: String(includeRecordings),
-      include_transcriptions: "false", // Always false - we use our own transcription system
-      include_mail_devis: "false", // Always false - mail devis feature disabled
-    });
-
+    // Gateway endpoint: /api/fiches/by-id/:ficheId
+    // NOTE: The gateway is responsible for handling/refreshing `cle` internally.
+    // We intentionally do not pass `cle` query params even if a cached value is present.
     const response = await axios.get<FicheDetailsResponse>(
-      `${apiBase}/fiches/${ficheId}?${params}`,
+      `${apiBase}/fiches/by-id/${ficheId}`,
       {
         timeout: 120000, // 2 minutes - CRM can be slow with full details
+        headers: getAuthHeaders(),
       }
     );
 
@@ -209,8 +217,8 @@ export async function fetchFicheDetails(
   } catch (error: unknown) {
     // IMPORTANT: Never rethrow raw Axios errors here.
     // Inngest (and other runtimes) may log the full AxiosError object, which includes
-    // request URL + query params (e.g. `cle=`). We only surface safe metadata.
-    const path = `/api/fiches/${ficheId}`;
+    // request URL + query params. We only surface safe metadata.
+    const path = `/api/fiches/by-id/${ficheId}`;
 
     if (axios.isAxiosError(error)) {
       const status =

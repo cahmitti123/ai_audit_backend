@@ -10,34 +10,33 @@
  * LAYER: Business Logic / Orchestration
  */
 
-import type {
-  Audit,
-  AuditDetail,
-  AuditSummary,
-  AuditWithConfig,
-  AuditWithFiche,
-  FicheWithAudits,
-  ListAuditsFilters,
-  RunAuditInput,
-  AuditFunctionResult,
-  ReviewAuditStepResultInput,
-  ReviewAuditControlPointInput,
-  UpdateAuditInput,
-} from "./audits.schemas.js";
-import {
-  auditNiveauEnum,
-  auditStatusEnum,
-  stepConformeEnum,
-  stepNiveauConformiteEnum,
-  type AuditNiveau,
-  type AuditStatus,
-  type StepConforme,
-  type StepNiveauConformite,
-} from "./audits.schemas.js";
-import * as auditsRepository from "./audits.repository.js";
-import { logger } from "../../shared/logger.js";
-import { NotFoundError } from "../../shared/errors.js";
+import type { Prisma } from "@prisma/client";
+
 import { COMPLIANCE_THRESHOLDS } from "../../shared/constants.js";
+import { NotFoundError } from "../../shared/errors.js";
+import { logger } from "../../shared/logger.js";
+import { prisma } from "../../shared/prisma.js";
+import * as auditsRepository from "./audits.repository.js";
+import {
+  type Audit,
+  type AuditDetail,
+  type AuditNiveau,
+  auditNiveauEnum,
+  type AuditStatus,
+  auditStatusEnum,
+  type AuditSummary,
+  type AuditWithConfig,
+  type AuditWithFiche,
+  type FicheWithAudits,
+  type ListAuditsFilters,
+  type ReviewAuditControlPointInput,
+  type ReviewAuditStepResultInput,
+  type StepConforme,
+  stepConformeEnum,
+  type StepNiveauConformite,
+  stepNiveauConformiteEnum,
+  type UpdateAuditInput,
+} from "./audits.schemas.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -56,25 +55,25 @@ function mergeResultDataWithLatestStepRawResults(params: {
 }): unknown {
   const { resultData, stepResults } = params;
 
-  if (!isRecord(resultData)) return resultData;
+  if (!isRecord(resultData)) {return resultData;}
   const audit = resultData.audit;
-  if (!isRecord(audit)) return resultData;
+  if (!isRecord(audit)) {return resultData;}
   const results = audit.results;
-  if (!isRecord(results)) return resultData;
+  if (!isRecord(results)) {return resultData;}
 
   const steps = results.steps;
-  if (!Array.isArray(steps) || steps.length === 0) return resultData;
+  if (!Array.isArray(steps) || steps.length === 0) {return resultData;}
 
   const nextSteps = [...steps];
 
   const findStepIndex = (stepPosition: number): number => {
     const idxByMetadata = nextSteps.findIndex((s) => {
-      if (!isRecord(s)) return false;
+      if (!isRecord(s)) {return false;}
       const meta = s.step_metadata;
-      if (!isRecord(meta)) return false;
+      if (!isRecord(meta)) {return false;}
       return Number(meta.position) === stepPosition;
     });
-    if (idxByMetadata >= 0) return idxByMetadata;
+    if (idxByMetadata >= 0) {return idxByMetadata;}
 
     // Fallback: assume steps are ordered by position (1-based)
     return stepPosition - 1;
@@ -82,11 +81,11 @@ function mergeResultDataWithLatestStepRawResults(params: {
 
   for (const step of stepResults) {
     const stepPos = Number(step.stepPosition);
-    if (!Number.isFinite(stepPos) || stepPos <= 0) continue;
-    if (!isRecord(step.rawResult)) continue;
+    if (!Number.isFinite(stepPos) || stepPos <= 0) {continue;}
+    if (!isRecord(step.rawResult)) {continue;}
 
     const idx = findStepIndex(stepPos);
-    if (idx < 0 || idx >= nextSteps.length) continue;
+    if (idx < 0 || idx >= nextSteps.length) {continue;}
 
     nextSteps[idx] = step.rawResult;
   }
@@ -149,28 +148,28 @@ function toAuditStepResult(step: DbAuditStepResult) {
 
 function toAuditNiveau(value: string): AuditNiveau {
   const parsed = auditNiveauEnum.safeParse(value);
-  if (parsed.success) return parsed.data;
+  if (parsed.success) {return parsed.data;}
   logger.warn("Unknown audit niveau value from DB", { value });
   return "INSUFFISANT";
 }
 
 function toAuditStatus(value: string): AuditStatus {
   const parsed = auditStatusEnum.safeParse(value);
-  if (parsed.success) return parsed.data;
+  if (parsed.success) {return parsed.data;}
   logger.warn("Unknown audit status value from DB", { value });
   return "failed";
 }
 
 function toStepConforme(value: string): StepConforme {
   const parsed = stepConformeEnum.safeParse(value);
-  if (parsed.success) return parsed.data;
+  if (parsed.success) {return parsed.data;}
   logger.warn("Unknown step conforme value from DB", { value });
   return "NON_CONFORME";
 }
 
 function toStepNiveauConformite(value: string): StepNiveauConformite {
   const parsed = stepNiveauConformiteEnum.safeParse(value);
-  if (parsed.success) return parsed.data;
+  if (parsed.success) {return parsed.data;}
   logger.warn("Unknown step niveauConformite value from DB", { value });
   return "INSUFFISANT";
 }
@@ -281,10 +280,22 @@ export async function getAuditsByFiche(
     // Keep resultData consistent with latest step rawResult overrides when available.
     resultData: mergeResultDataWithLatestStepRawResults({
       resultData: audit.resultData,
-      stepResults: (audit as any).stepResults as Array<{
-        stepPosition: number;
-        rawResult?: unknown | null;
-      }>,
+      stepResults: (() => {
+        const out: Array<{ stepPosition: number; rawResult?: unknown | null }> = [];
+        const maybe = (audit as unknown as { stepResults?: unknown }).stepResults;
+        if (!Array.isArray(maybe)) {return out;}
+
+        for (const r of maybe) {
+          if (!isRecord(r)) {continue;}
+          const stepPosition = r.stepPosition;
+          if (typeof stepPosition !== "number" || !Number.isFinite(stepPosition)) {
+            continue;
+          }
+          out.push({ stepPosition, rawResult: (r.rawResult as unknown) ?? null });
+        }
+
+        return out;
+      })(),
     }),
     id: audit.id.toString(),
     ficheCacheId: audit.ficheCacheId.toString(),
@@ -471,11 +482,11 @@ export async function updateAuditMetadata(
   const id = typeof auditId === "string" ? BigInt(auditId) : auditId;
 
   const parseNullableBigInt = (value: string | null | undefined): bigint | null | undefined => {
-    if (value === undefined) return undefined;
-    if (value === null) return null;
+    if (value === undefined) {return undefined;}
+    if (value === null) {return null;}
     const trimmed = value.trim();
-    if (!trimmed) return null;
-    if (!/^\d+$/.test(trimmed)) return null;
+    if (!trimmed) {return null;}
+    if (!/^\d+$/.test(trimmed)) {return null;}
     try {
       return BigInt(trimmed);
     } catch {
@@ -724,21 +735,25 @@ export async function getAuditsGroupedByFiches(filters: ListAuditsFilters): Prom
         name: audit.auditConfig.name,
         description: audit.auditConfig.description,
       },
-      automationSchedule: (audit as any).automationSchedule
-        ? {
-            id: String((audit as any).automationSchedule.id),
-            name: String((audit as any).automationSchedule.name),
-          }
-        : null,
-      automationRun: (audit as any).automationRun
-        ? {
-            id: String((audit as any).automationRun.id),
-            status: String((audit as any).automationRun.status),
-            startedAt: (audit as any).automationRun.startedAt as Date,
-            completedAt: ((audit as any).automationRun.completedAt as Date | null) ?? null,
-            scheduleId: String((audit as any).automationRun.scheduleId),
-          }
-        : null,
+      automationSchedule: (() => {
+        const schedule = (audit as unknown as { automationSchedule?: unknown }).automationSchedule;
+        if (!isRecord(schedule)) {return null;}
+        return {
+          id: String(schedule.id),
+          name: String(schedule.name),
+        };
+      })(),
+      automationRun: (() => {
+        const run = (audit as unknown as { automationRun?: unknown }).automationRun;
+        if (!isRecord(run)) {return null;}
+        return {
+          id: String(run.id),
+          status: String(run.status),
+          startedAt: run.startedAt as Date,
+          completedAt: (run.completedAt as Date | null) ?? null,
+          scheduleId: String(run.scheduleId),
+        };
+      })(),
     }));
 
     // Calculate latest audit date
@@ -788,9 +803,9 @@ export async function getAuditsGroupedByFiches(filters: ListAuditsFilters): Prom
     const bTime = b.summary.latestAuditDate?.getTime() || 0;
 
     // Fiches with audits come first
-    if (aTime === 0 && bTime === 0) return 0;
-    if (aTime === 0) return 1;
-    if (bTime === 0) return -1;
+    if (aTime === 0 && bTime === 0) {return 0;}
+    if (aTime === 0) {return 1;}
+    if (bTime === 0) {return -1;}
 
     // Sort by most recent first
     return bTime - aTime;
@@ -827,7 +842,7 @@ export { runAudit } from "./audits.runner.js";
  * NOTE: This currently delegates to audits.analyzer.ts
  * In future refactoring, move the full implementation here
  */
-export { analyzeStep, analyzeAllSteps } from "./audits.analyzer.js";
+export { analyzeAllSteps,analyzeStep } from "./audits.analyzer.js";
 
 /**
  * Generate timeline from transcriptions
@@ -923,44 +938,57 @@ export async function getGlobalAuditStatistics(filters?: {
   averageScore: number | null;
   averageDuration: number | null;
 }> {
-  const { audits } = await listAudits({
-    dateFrom: filters?.dateFrom,
-    dateTo: filters?.dateTo,
-    auditConfigIds: filters?.auditConfigIds,
-    latestOnly: true,
-    includeDeleted: false,
-    limit: 10000, // Get all for stats
-    sortBy: "created_at",
-    sortOrder: "desc",
-    offset: 0,
-  });
+  const auditConfigIds = (filters?.auditConfigIds || [])
+    .map((s) => (typeof s === "string" ? s.trim() : ""))
+    .filter(Boolean);
+  const auditConfigBigInts: bigint[] = [];
+  for (const id of auditConfigIds) {
+    if (!/^\d+$/.test(id)) {continue;}
+    try {
+      auditConfigBigInts.push(BigInt(id));
+    } catch {
+      // ignore invalid
+    }
+  }
 
-  const completedAudits = audits.filter((a) => a.status === "completed");
-  const failedAudits = audits.filter((a) => a.status === "failed");
-  const compliantAudits = completedAudits.filter((a) => a.isCompliant);
+  const where: Prisma.AuditWhereInput = {
+    ...(filters?.dateFrom ? { createdAt: { gte: filters.dateFrom } } : {}),
+    ...(filters?.dateTo ? { createdAt: { lte: filters.dateTo } } : {}),
+    ...(auditConfigBigInts.length > 0 ? { auditConfigId: { in: auditConfigBigInts } } : {}),
+    isLatest: true,
+    deletedAt: null,
+  };
+
+  const whereCompleted: Prisma.AuditWhereInput = { ...where, status: "completed" };
+  const whereFailed: Prisma.AuditWhereInput = { ...where, status: "failed" };
+
+  const [totalAudits, completedAudits, failedAudits, compliantAudits, aggregates] =
+    await Promise.all([
+      prisma.audit.count({ where }),
+      prisma.audit.count({ where: whereCompleted }),
+      prisma.audit.count({ where: whereFailed }),
+      prisma.audit.count({ where: { ...whereCompleted, isCompliant: true } }),
+      prisma.audit.aggregate({
+        where: whereCompleted,
+        _avg: { scorePercentage: true, durationMs: true },
+      }),
+    ]);
 
   const averageScore =
-    completedAudits.length > 0
-      ? completedAudits.reduce((sum, a) => sum + Number(a.scorePercentage), 0) /
-        completedAudits.length
+    aggregates._avg.scorePercentage !== null && aggregates._avg.scorePercentage !== undefined
+      ? Number(aggregates._avg.scorePercentage)
       : null;
-
   const averageDuration =
-    completedAudits.length > 0
-      ? completedAudits.reduce((sum, a) => sum + (a.durationMs || 0), 0) /
-        completedAudits.length
+    aggregates._avg.durationMs !== null && aggregates._avg.durationMs !== undefined
+      ? Number(aggregates._avg.durationMs)
       : null;
-
-  const complianceRate =
-    completedAudits.length > 0
-      ? (compliantAudits.length / completedAudits.length) * 100
-      : 0;
+  const complianceRate = completedAudits > 0 ? (compliantAudits / completedAudits) * 100 : 0;
 
   return {
-    totalAudits: audits.length,
-    completedAudits: completedAudits.length,
-    failedAudits: failedAudits.length,
-    compliantAudits: compliantAudits.length,
+    totalAudits,
+    completedAudits,
+    failedAudits,
+    compliantAudits,
     complianceRate,
     averageScore,
     averageDuration,

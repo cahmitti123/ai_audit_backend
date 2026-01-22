@@ -4,11 +4,12 @@
  * API endpoints for transcription operations
  */
 
-import { Router, type Request, type Response } from "express";
+import { type Request, type Response,Router } from "express";
+
 import { inngest } from "../../inngest/client.js";
-import { getFicheTranscriptionStatus } from "./transcriptions.service.js";
-import { logger } from "../../shared/logger.js";
 import { asyncHandler } from "../../middleware/async-handler.js";
+import { logger } from "../../shared/logger.js";
+import { getFicheTranscriptionStatus } from "./transcriptions.service.js";
 
 export const transcriptionsRouter = Router();
 

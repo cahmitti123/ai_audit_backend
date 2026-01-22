@@ -27,6 +27,8 @@ cp .env.example .env
 - `ELEVENLABS_API_KEY`
 - `FICHE_API_BASE_URL` (+ `FICHE_API_AUTH_TOKEN` if required)
 
+Full reference: `docs/env.md`.
+
 4. Apply database migrations and generate Prisma client:
 
 ```bash
@@ -57,7 +59,7 @@ npm run inngest
 1. Create a `.env` for Docker:
 
 ```bash
-cp .env.docker.example .env
+cp .env.example .env
 ```
 
 2. Start services (API + Redis + self-hosted Inngest):

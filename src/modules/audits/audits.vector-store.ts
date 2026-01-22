@@ -5,6 +5,7 @@
  */
 
 import OpenAI from "openai";
+
 import { logger } from "../../shared/logger.js";
 
 const openai = new OpenAI({

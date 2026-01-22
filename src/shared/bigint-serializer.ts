@@ -13,16 +13,16 @@ import type { Response } from "express";
  * Recursively serialize BigInt values to strings in arbitrary object/array values
  */
 export function serializeBigInt(value: unknown): unknown {
-  if (value === null || value === undefined) return value;
+  if (value === null || value === undefined) {return value;}
 
   // Handle BigInt primitive
-  if (typeof value === "bigint") return String(value);
+  if (typeof value === "bigint") {return String(value);}
 
   // Keep Date objects intact (Express will serialize via toJSON)
-  if (value instanceof Date) return value;
+  if (value instanceof Date) {return value;}
 
   // Handle Arrays
-  if (Array.isArray(value)) return value.map((item) => serializeBigInt(item));
+  if (Array.isArray(value)) {return value.map((item) => serializeBigInt(item));}
 
   // Handle Objects (plain or otherwise; only enumerable own props are serialized)
   if (typeof value === "object") {

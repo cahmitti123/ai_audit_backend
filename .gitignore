@@ -14,7 +14,6 @@ package-lock.json
 
 # Keep example files
 !.env.example
-!.env.docker.example
 
 # Build outputs
 dist/
@@ -72,6 +71,7 @@ temp/
 # Data files (optional - uncomment if you don't want to track data)
 data/*.json
 !data/.gitkeep
+data/
 
 # Prisma
 # Keep schema.prisma but ignore generated client

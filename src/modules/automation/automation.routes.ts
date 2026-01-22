@@ -13,16 +13,18 @@
  * LAYER: Presentation (HTTP endpoints)
  */
 
-import { Router, Request, Response } from "express";
+import type { Request, Response } from "express";
+import { Router } from "express";
+
+import { inngest } from "../../inngest/client.js";
+import { asyncHandler } from "../../middleware/async-handler.js";
+import { logger } from "../../shared/logger.js";
 import {
   validateCreateAutomationScheduleInput,
-  validateUpdateAutomationScheduleInput,
   validateTriggerAutomationInput,
+  validateUpdateAutomationScheduleInput,
 } from "./automation.schemas.js";
 import * as automationService from "./automation.service.js";
-import { inngest } from "../../inngest/client.js";
-import { logger } from "../../shared/logger.js";
-import { asyncHandler } from "../../middleware/async-handler.js";
 
 const router = Router();
 
@@ -166,7 +168,7 @@ router.post(
 
     // Send event to Inngest
     const result = await inngest.send({
-      name: "automation/run" as "automation/run",
+      name: "automation/run" as const,
       data: {
         schedule_id: input.scheduleId,
         override_fiche_selection: input.overrideFicheSelection,

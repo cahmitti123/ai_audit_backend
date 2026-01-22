@@ -10,12 +10,12 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Routes (HTTP endpoints)
-export { auditsRouter } from "./audits.routes.js";
-export { auditRerunRouter } from "./audits.rerun.routes.js";
-
 // Workflows (Background jobs)
-import { functions as workflowFunctions } from "./audits.workflows.js";
 import { functions as rerunFunctions } from "./audits.rerun.workflows.js";
+import { functions as workflowFunctions } from "./audits.workflows.js";
+
+export { auditRerunRouter } from "./audits.rerun.routes.js";
+export { auditsRouter } from "./audits.routes.js";
 export const auditsFunctions = [...workflowFunctions, ...rerunFunctions];
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -27,8 +27,8 @@ export * as auditsService from "./audits.service.js";
 
 // Helpers (Specialized utilities)
 export * as auditsAnalyzer from "./audits.analyzer.js";
-export * as auditsTimeline from "./audits.timeline.js";
 export * as auditsPrompts from "./audits.prompts.js";
+export * as auditsTimeline from "./audits.timeline.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DATA LAYER
@@ -47,43 +47,43 @@ export * as auditsVectorStore from "./audits.vector-store.js";
 // Types & Schemas (All types inferred from Zod schemas)
 export type * from "./audits.schemas.js";
 export {
-  // Enums
-  auditStatusEnum,
-  auditNiveauEnum,
-  stepConformeEnum,
-  stepNiveauConformiteEnum,
-  sortByEnum,
-  sortOrderEnum,
-  // Core Schemas
-  auditSchema,
-  auditSummarySchema,
-  auditDetailSchema,
-  auditStepResultSchema,
-  auditWithConfigSchema,
-  auditWithFicheSchema,
-  ficheWithAuditsSchema,
-  // Input Schemas
-  runAuditInputSchema,
-  batchAuditInputSchema,
-  listAuditsFiltersSchema,
-  listAuditsQuerySchema,
-  // Response Schemas
-  auditListResponseSchema,
   auditDetailResponseSchema,
-  ficheAuditsResponseSchema,
-  groupedAuditsResponseSchema,
-  runAuditResponseSchema,
-  batchAuditResponseSchema,
+  auditDetailSchema,
   // Workflow Schemas
   auditFunctionResultSchema,
+  // Response Schemas
+  auditListResponseSchema,
+  auditNiveauEnum,
+  // Core Schemas
+  auditSchema,
+  // Enums
+  auditStatusEnum,
+  auditStepResultSchema,
+  auditSummarySchema,
+  auditWithConfigSchema,
+  auditWithFicheSchema,
+  batchAuditInputSchema,
+  batchAuditResponseSchema,
   batchAuditResultSchema,
-  // Validators
-  validateRunAuditInput,
+  ficheAuditsResponseSchema,
+  ficheWithAuditsSchema,
+  groupedAuditsResponseSchema,
+  listAuditsFiltersSchema,
+  listAuditsQuerySchema,
+  parseListAuditsQuery,
+  // Input Schemas
+  runAuditInputSchema,
+  runAuditResponseSchema,
+  sortByEnum,
+  sortOrderEnum,
+  stepConformeEnum,
+  stepNiveauConformiteEnum,
+  validateAudit,
+  validateAuditDetail,
   validateBatchAuditInput,
   validateListAuditsFilters,
-  parseListAuditsQuery,
-  validateAuditDetail,
-  validateAudit,
+  // Validators
+  validateRunAuditInput,
 } from "./audits.schemas.js";
 
 // Events

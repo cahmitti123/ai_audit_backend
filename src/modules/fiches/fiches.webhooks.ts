@@ -10,12 +10,13 @@
  * LAYER: Integration
  */
 
-import crypto from "crypto";
+import type { Prisma } from "@prisma/client";
 import axios from "axios";
+import crypto from "crypto";
+
 import { logger } from "../../shared/logger.js";
 import { prisma } from "../../shared/prisma.js";
 import { validateOutgoingWebhookUrl } from "../../shared/webhook-security.js";
-import type { Prisma } from "@prisma/client";
 
 /**
  * Webhook payload types

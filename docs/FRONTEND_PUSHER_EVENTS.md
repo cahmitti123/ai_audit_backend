@@ -3,7 +3,8 @@
 This document is the **frontend contract** for realtime events delivered via **Pusher Channels**.
 
 - **Transport**: Pusher Channels (not SSE).
-- **Event name**: exactly the same strings as the legacy system webhooks/SSE event names.
+- **Event name**: mostly the same strings as the legacy system webhooks/SSE event names.
+  - New: `automation.run.*` events for automation-run UX (`started|selection|completed|failed`).
 - **Payload**: **the domain payload object only** (the same object that used to be `payload.data` in system webhooks, and `evt.data` in SSE envelopes).  
   There is **no wrapper** around it for Pusher.
 - **Chat streaming** remains SSE (`/api/*/chat`) and is **not** covered here.
@@ -25,13 +26,24 @@ All channel names are deterministic and contain no `:` characters.
 
 Routing rules:
 - If a payload contains **`audit_id`**: publish to `private-audit-{audit_id}`
+- If a payload contains **`audit_db_id`**: also publish to `private-audit-{audit_db_id}` (so UI can “notify → refetch” by DB id)
 - If a payload contains **`fiche_id`**: publish to `private-fiche-{fiche_id}`
-- If a payload contains **`jobId`**: publish to `private-job-{jobId}`
-- If none apply (or for `batch.*` and `notification`): publish to `private-global`
+- If a payload contains **`jobId`** or **`job_id`**: publish to `private-job-{jobId}`
+- If a payload contains **`batch_id`**: publish to `private-job-{batch_id}` (batch progress is treated as a “job” channel)
+- If none apply (or for `notification`): publish to `private-global`
 
 ---
 
 ## Audit events (`audit.*`)
+
+### Common fields (most `audit.*` payloads)
+
+- `audit_id` (string)
+  - In the normal audit pipeline, this is often a **tracking id** (not the DB id).
+  - In rerun payloads, `audit_id` is typically the **audit DB id** (because rerun HTTP routes take the DB id).
+- `audit_db_id` (string | optional): when present, this is the canonical DB id to use for `GET /api/audits/:audit_db_id`.
+- `event_id` (string | optional): Inngest event id (useful for correlating async runs).
+- `approach` (object | optional): `{ use_rlm: boolean; transcript_mode: "prompt" | "tools" }`
 
 ### `audit.started`
 - **Meaning**: an audit run has started.
@@ -47,7 +59,7 @@ Routing rules:
 
 ### `audit.fiche_fetch_started`
 - **Meaning**: audit pipeline started fetching fiche details (from cache or CRM).
-- **Channel(s)**: fiche
+- **Channel(s)**: audit + fiche
 - **Payload**:
   - `fiche_id` (string)
   - `from_cache` (boolean)
@@ -55,7 +67,7 @@ Routing rules:
 
 ### `audit.fiche_fetch_completed`
 - **Meaning**: fiche details are available for the audit.
-- **Channel(s)**: fiche
+- **Channel(s)**: audit + fiche
 - **Payload**:
   - `fiche_id` (string)
   - `recordings_count` (number)
@@ -64,8 +76,8 @@ Routing rules:
   - `status` = `"fetched"`
 
 ### `audit.config_loaded`
-- **Meaning**: an audit config was loaded (informational/global).
-- **Channel(s)**: global
+- **Meaning**: an audit config was loaded (informational).
+- **Channel(s)**: audit + fiche
 - **Payload**:
   - `config_id` (string)
   - `config_name` (string)
@@ -74,7 +86,7 @@ Routing rules:
 
 ### `audit.transcription_check`
 - **Meaning**: audit pipeline checked transcription completeness.
-- **Channel(s)**: fiche
+- **Channel(s)**: audit + fiche
 - **Payload**:
   - `fiche_id` (string)
   - `total_recordings` (number)
@@ -84,7 +96,7 @@ Routing rules:
 
 ### `audit.timeline_generated`
 - **Meaning**: audit timeline/summary text was generated from recordings.
-- **Channel(s)**: fiche
+- **Channel(s)**: audit + fiche
 - **Payload**:
   - `fiche_id` (string)
   - `recordings_count` (number)
@@ -117,8 +129,10 @@ Routing rules:
   - `status` = `"processing"`
 - **Payload (step rerun)** (distinguish by presence of `rerun_id`):
   - `rerun_id` (string)
+  - `rerun_scope` (optional): `"control_point"` when rerunning a single checkpoint (sub-step)
   - `audit_id` (string)
   - `step_position` (number)
+  - `control_point_index` (optional number; 1-based, only when `rerun_scope="control_point"`)
   - `started_at` (ISO datetime string)
   - `status` = `"rerunning"`
 
@@ -140,8 +154,10 @@ Routing rules:
   - `status` = `"completed"`
 - **Payload (step rerun)** (distinguish by presence of `rerun_id`):
   - `rerun_id` (string)
+  - `rerun_scope` (optional): `"control_point"` when rerunning a single checkpoint (sub-step)
   - `audit_id` (string)
   - `step_position` (number)
+  - `control_point_index` (optional number; 1-based, only when `rerun_scope="control_point"`)
   - `original` (unknown object)
   - `rerun` (unknown object)
   - `comparison` (unknown object)
@@ -218,6 +234,62 @@ Routing rules:
     - `failed_steps` (number)
 
 ---
+
+## Automation run events (`automation.run.*`)
+
+These events are dedicated to **automation run UX** (run started, selection, completion, failure).
+
+- **Channel**: `private-job-automation-run-{run_id}`
+  - Implemented as `private-job-{job_id}` where `job_id = "automation-run-{run_id}"`
+- **Payloads**: use snake_case fields (as emitted by the workflow).
+
+### `automation.run.started`
+- **Meaning**: an automation run record was created and marked as running.
+- **Channel(s)**: job
+- **Payload**:
+  - `job_id` (string) = `automation-run-{run_id}`
+  - `schedule_id` (string)
+  - `run_id` (string)
+  - `due_at` (ISO datetime string | null)
+  - `status` = `"running"`
+
+### `automation.run.selection`
+- **Meaning**: fiche selection has been resolved (manual ids or date/filter mode).
+- **Channel(s)**: job
+- **Payload** (stable subset):
+  - `job_id`, `schedule_id`, `run_id`
+  - `mode` (`"manual" | "date_range" | "filter"`)
+  - `dateRange` (string | null)
+  - `groupes` (string[] | optional)
+  - `groupes_count` (number)
+  - `onlyWithRecordings` (boolean)
+  - `onlyUnaudited` (boolean)
+  - `maxFiches` (number | null)
+  - `maxRecordingsPerFiche` (number | null)
+  - `useRlm` (boolean)
+  - `total_fiches` (number)
+
+### `automation.run.completed`
+- **Meaning**: automation run completed (success/partial/failed) OR ended early (no fiches/dates/etc).
+- **Channel(s)**: job
+- **Payload** (stable subset):
+  - `job_id`, `schedule_id`, `run_id`
+  - `status` (`"completed" | "partial" | "failed"`)
+  - `total_fiches`, `successful_fiches`, `failed_fiches`
+  - `ignored_fiches` (number | optional)
+  - `transcriptions_run` (number | optional)
+  - `audits_run` (number | optional)
+  - `duration_ms` (number | optional)
+  - `reason` (string | optional) — present for early returns (ex: `"no_fiches_manual"`)
+
+### `automation.run.failed`
+- **Meaning**: catastrophic failure (run marked failed).
+- **Channel(s)**: job
+- **Payload**:
+  - `job_id`, `schedule_id`, `run_id`
+  - `status` = `"failed"`
+  - `error` (string)
+  - `duration_ms` (number)
 
 ## Transcription events (`transcription.*`)
 
@@ -318,11 +390,14 @@ All transcription events are scoped to a fiche.
 
 ## Batch events (`batch.*`)
 
-Batch events are global (not tied to a single audit/fiche).
+Batch events are published to **global** and also to a **job channel** keyed by `batch_id`:
+
+- `private-global`
+- `private-job-{batch_id}`
 
 ### `batch.progress`
 - **Meaning**: progress update for a batch operation.
-- **Channel(s)**: global
+- **Channel(s)**: job + global
 - **Payload**:
   - `batch_id` (string)
   - `operation_type` (`"audit"` | `"transcription"`)
@@ -333,7 +408,7 @@ Batch events are global (not tied to a single audit/fiche).
 
 ### `batch.completed`
 - **Meaning**: batch operation finished.
-- **Channel(s)**: global
+- **Channel(s)**: job + global
 - **Payload**:
   - `batch_id` (string)
   - `operation_type` (`"audit"` | `"transcription"`)

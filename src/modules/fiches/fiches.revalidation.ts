@@ -11,8 +11,8 @@
 
 import { logger } from "../../shared/logger.js";
 import * as fichesApi from "./fiches.api.js";
-import * as fichesRepository from "./fiches.repository.js";
 import * as fichesCache from "./fiches.cache.js";
+import * as fichesRepository from "./fiches.repository.js";
 
 /**
  * Check if a date is today
@@ -101,13 +101,8 @@ export async function revalidateFichesForDateSync(date: string) {
       const results = await Promise.allSettled(
         batch.map(async (sale) => {
           try {
-            // Validate cle is present
-            if (!sale.cle) {
-              throw new Error(`Missing cle for fiche ${sale.id}`);
-            }
-
             // Fetch full fiche details
-            const ficheDetails = await fichesApi.fetchFicheDetails(sale.id, sale.cle);
+            const ficheDetails = await fichesApi.fetchFicheDetails(sale.id);
 
             // Validate information exists before caching
             if (!ficheDetails.information) {

@@ -15,7 +15,7 @@ export function requireEnv(name: string): string {
 
 export function readIsoDate(name: string): string | null {
   const v = process.env[name];
-  if (!v || v.trim().length === 0) return null;
+  if (!v || v.trim().length === 0) {return null;}
   const vv = v.trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(vv)) {
     throw new Error(`Invalid ${name}=${JSON.stringify(vv)}. Expected YYYY-MM-DD.`);

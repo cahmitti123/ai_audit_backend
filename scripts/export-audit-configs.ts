@@ -26,6 +26,7 @@ import "dotenv/config";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import type { Prisma } from "@prisma/client";
 import {
   Document,
   HeadingLevel,
@@ -33,9 +34,9 @@ import {
   Paragraph,
   TextRun,
 } from "docx";
-import type { Prisma } from "@prisma/client";
-import { prisma, disconnectDb } from "../src/shared/prisma.js";
+
 import { stringifyWithBigInt } from "../src/shared/bigint-serializer.js";
+import { disconnectDb,prisma } from "../src/shared/prisma.js";
 
 function pad2(n: number) {
   return String(n).padStart(2, "0");
@@ -66,12 +67,12 @@ function mdEscapeInline(text: string) {
 }
 
 function demoteMarkdownHeadings(markdown: string, by: number) {
-  if (by <= 0) return markdown;
+  if (by <= 0) {return markdown;}
   return markdown
     .split(/\r?\n/)
     .map((line) => {
       const match = line.match(/^(#{1,6})\s+/);
-      if (!match) return line;
+      if (!match) {return line;}
       const level = match[1].length;
       const newLevel = Math.min(6, level + by);
       return `${"#".repeat(newLevel)}${line.slice(level)}`;
@@ -197,7 +198,7 @@ function markdownToDocxParagraphs(markdown: string): Paragraph[] {
     }
 
     // Bullets: - item
-    const bulletMatch = line.match(/^\-\s+(.*)$/);
+    const bulletMatch = line.match(/^-\s+(.*)$/);
     if (bulletMatch) {
       paragraphs.push(
         new Paragraph({

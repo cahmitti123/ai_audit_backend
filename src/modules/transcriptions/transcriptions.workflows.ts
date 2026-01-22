@@ -4,42 +4,54 @@
  * Inngest workflow functions for transcription operations
  */
 
-import { inngest } from "../../inngest/client.js";
-import { NonRetriableError } from "inngest";
 import crypto from "crypto";
+import { NonRetriableError } from "inngest";
+
+import { inngest } from "../../inngest/client.js";
 import {
-  getFicheTranscriptionStatus,
-} from "./transcriptions.service.js";
-import type {
-  ExtendedTranscriptionResult,
-  BatchTranscriptionResult,
-  TranscriptionResult,
-} from "./transcriptions.types.js";
-import { isFullyTranscribed } from "./transcriptions.types.js";
-import {
+  CONCURRENCY,
   RATE_LIMITS,
   TIMEOUTS,
-  BATCH_CONFIG,
-  CONCURRENCY,
 } from "../../shared/constants.js";
 import {
   getInngestGlobalConcurrency,
   getInngestParallelismPerServer,
 } from "../../shared/inngest-concurrency.js";
-import { transcriptionWebhooks } from "../../shared/webhook.js";
-import { tryAcquireRedisLock, releaseRedisLock } from "../../shared/redis-lock.js";
-import { getRedisClient } from "../../shared/redis.js";
 import { prisma } from "../../shared/prisma.js";
-import { TranscriptionService } from "./transcriptions.elevenlabs.js";
+import { getRedisClient } from "../../shared/redis.js";
+import { releaseRedisLock,tryAcquireRedisLock } from "../../shared/redis-lock.js";
+import { transcriptionWebhooks } from "../../shared/webhook.js";
+import {
+  normalizeElevenLabsApiKey,
+  TranscriptionService,
+} from "./transcriptions.elevenlabs.js";
 import { updateRecordingTranscription } from "./transcriptions.repository.js";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
+import {
+  getFicheTranscriptionStatus,
+} from "./transcriptions.service.js";
+import type {
+  BatchTranscriptionResult,
+  ExtendedTranscriptionResult,
+  TranscriptionResult,
+} from "./transcriptions.types.js";
 
 function toNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
+
+type TranscriptionPlan = {
+  ficheCacheId: string; // BigInt -> string (JSON-safe)
+  totalRecordings: number;
+  alreadyTranscribed: number;
+  toTranscribe: Array<{ callId: string; recordingUrl: string }>;
+};
+
+type RecordingMeta = {
+  ficheCacheId: string;
+  hasTranscription: boolean;
+  transcriptionId: string | null;
+  recordingUrl: string | null;
+};
 
 /**
  * Transcribe Fiche Function
@@ -99,15 +111,19 @@ export const transcribeFicheFunction = inngest.createFunction(
       const startTime = typeof startTimeRaw === "number" ? startTimeRaw : Date.now();
 
       // Validate API key at function level (non-retriable error)
-      const apiKey = process.env.ELEVENLABS_API_KEY;
+      const apiKey = normalizeElevenLabsApiKey(process.env.ELEVENLABS_API_KEY);
       if (!apiKey) {
-        throw new NonRetriableError("ElevenLabs API key not configured");
+        throw new NonRetriableError(
+          "ElevenLabs API key not configured (set ELEVENLABS_API_KEY)"
+        );
       }
 
       logger.info("Starting transcription", { fiche_id, priority });
 
       // Load a JSON-safe plan from DB (we need recordingUrl to fan-out work per recording).
-      const plan = await step.run(`load-transcription-plan-${fiche_id}`, async () => {
+      const plan = await step.run(
+        `load-transcription-plan-${fiche_id}`,
+        async (): Promise<TranscriptionPlan> => {
         const fiche = await prisma.ficheCache.findUnique({
           where: { ficheId: fiche_id },
           select: {
@@ -144,26 +160,23 @@ export const transcribeFicheFunction = inngest.createFunction(
           alreadyTranscribed,
           toTranscribe,
         };
-      });
+        }
+      );
 
       // Send status check webhook (mirrors service behavior)
       await step.run(`send-transcription-status-check-${fiche_id}`, async () => {
         await transcriptionWebhooks.statusCheck(
           fiche_id,
-          toNumber((plan as any).totalRecordings, 0),
-          toNumber((plan as any).alreadyTranscribed, 0),
-          Array.isArray((plan as any).toTranscribe) ? (plan as any).toTranscribe.length : 0
+          plan.totalRecordings,
+          plan.alreadyTranscribed,
+          plan.toTranscribe.length
         );
         return { notified: true };
       });
 
-      const totalRecordings = toNumber((plan as any).totalRecordings, 0);
-      const alreadyTranscribed = toNumber((plan as any).alreadyTranscribed, 0);
-      const toTranscribe: Array<{ callId: string; recordingUrl: string }> = Array.isArray(
-        (plan as any).toTranscribe
-      )
-        ? ((plan as any).toTranscribe as Array<{ callId: string; recordingUrl: string }>)
-        : [];
+      const totalRecordings = plan.totalRecordings;
+      const alreadyTranscribed = plan.alreadyTranscribed;
+      const toTranscribe = plan.toTranscribe;
 
       if (totalRecordings === 0 || alreadyTranscribed === totalRecordings) {
         // Send workflow started webhook (even for already complete, to keep behaviour consistent)
@@ -333,7 +346,7 @@ export const transcribeFicheFunction = inngest.createFunction(
           data: {
             run_id: runId,
             fiche_id,
-            fiche_cache_id: (plan as any).ficheCacheId as string,
+            fiche_cache_id: plan.ficheCacheId,
             call_id: rec.callId,
             recording_url: rec.recordingUrl,
             recording_index: idx + 1,
@@ -387,15 +400,15 @@ export const transcribeFicheFunction = inngest.createFunction(
       }
 
       // Fallback: poll DB until all targeted recordings are transcribed (or timeout).
-      const rawFicheCacheId = (plan as any).ficheCacheId as unknown;
+      const rawFicheCacheId: unknown = plan.ficheCacheId;
       const parseFicheCacheId = (value: unknown): bigint | null => {
-        if (typeof value === "bigint") return value;
+        if (typeof value === "bigint") {return value;}
         if (typeof value === "number" && Number.isInteger(value) && value > 0) {
           return BigInt(value);
         }
         if (typeof value === "string") {
           const trimmed = value.trim();
-          if (!trimmed) return null;
+          if (!trimmed) {return null;}
           try {
             return BigInt(trimmed);
           } catch {
@@ -434,7 +447,7 @@ export const transcribeFicheFunction = inngest.createFunction(
         while (Date.now() < deadline) {
           const polled = await step.run(
             `poll-transcription-progress-${fiche_id}-${pollAttempt}`,
-            async () => {
+            async (): Promise<{ transcribedTarget: number }> => {
               // Safety: if there are no targets, we're done.
               if (targetCallIds.length === 0) {
                 return { transcribedTarget: 0 };
@@ -460,7 +473,7 @@ export const transcribeFicheFunction = inngest.createFunction(
             }
           );
 
-          transcribedTarget = toNumber((polled as any).transcribedTarget, 0);
+          transcribedTarget = toNumber(polled.transcribedTarget, 0);
 
           if (transcribedTarget !== prevTranscribedTarget) {
             prevTranscribedTarget = transcribedTarget;
@@ -619,7 +632,7 @@ export const transcribeRecordingFunction = inngest.createFunction(
       error?: string;
       transcription_id?: string;
     }) => {
-      if (!run_id || typeof run_id !== "string") return;
+      if (!run_id || typeof run_id !== "string") {return;}
       await step.sendEvent(`emit-recording-transcribed-${call_id}`, {
         name: "transcription/recording.transcribed",
         data: {
@@ -638,9 +651,11 @@ export const transcribeRecordingFunction = inngest.createFunction(
     };
 
     // Validate API key at worker level (non-retriable error)
-    const apiKey = process.env.ELEVENLABS_API_KEY;
+    const apiKey = normalizeElevenLabsApiKey(process.env.ELEVENLABS_API_KEY);
     if (!apiKey) {
-      throw new NonRetriableError("ElevenLabs API key not configured");
+      throw new NonRetriableError(
+        "ElevenLabs API key not configured (set ELEVENLABS_API_KEY)"
+      );
     }
 
     const lockKey = `lock:transcription:recording:${fiche_id}:${call_id}`;
@@ -662,7 +677,9 @@ export const transcribeRecordingFunction = inngest.createFunction(
     }
 
     try {
-      const rec = await step.run(`load-recording-${call_id}`, async () => {
+      const rec = await step.run(
+        `load-recording-${call_id}`,
+        async (): Promise<RecordingMeta | null> => {
         // Prefer the direct composite key lookup if we have fiche_cache_id.
         if (typeof fiche_cache_id === "string" && fiche_cache_id.length > 0) {
           const ficheCacheId = BigInt(fiche_cache_id);
@@ -681,7 +698,7 @@ export const transcribeRecordingFunction = inngest.createFunction(
             },
           });
 
-          if (!r) return null;
+          if (!r) {return null;}
           return {
             ficheCacheId: r.ficheCacheId.toString(),
             hasTranscription: r.hasTranscription,
@@ -703,14 +720,15 @@ export const transcribeRecordingFunction = inngest.createFunction(
           },
         });
 
-        if (!r) return null;
+        if (!r) {return null;}
         return {
           ficheCacheId: r.ficheCacheId.toString(),
           hasTranscription: r.hasTranscription,
           transcriptionId: r.transcriptionId,
           recordingUrl: r.recordingUrl,
         };
-      });
+        }
+      );
 
       if (!rec) {
         const msg = "Recording not found in database";
@@ -728,7 +746,7 @@ export const transcribeRecordingFunction = inngest.createFunction(
         return { success: false, fiche_id, call_id, error: msg };
       }
 
-      if ((rec as any).hasTranscription === true) {
+      if (rec.hasTranscription) {
         logger.info("Recording already transcribed; skipping", {
           fiche_id,
           call_id,
@@ -736,21 +754,21 @@ export const transcribeRecordingFunction = inngest.createFunction(
         await emitRecordingDone({
           ok: true,
           cached: true,
-          transcription_id: (rec as any).transcriptionId || undefined,
+          transcription_id: rec.transcriptionId || undefined,
         });
         return {
           success: true,
           fiche_id,
           call_id,
           cached: true,
-          transcription_id: (rec as any).transcriptionId || undefined,
+          transcription_id: rec.transcriptionId || undefined,
         };
       }
 
       const url =
         typeof recording_url === "string" && recording_url.length > 0
           ? recording_url
-          : ((rec as any).recordingUrl as string | undefined);
+          : rec.recordingUrl ?? undefined;
 
       if (!url) {
         const msg = "No recording URL available";
@@ -791,7 +809,7 @@ export const transcribeRecordingFunction = inngest.createFunction(
 
       await step.run(`update-recording-${call_id}`, async () => {
         await updateRecordingTranscription(
-          BigInt((rec as any).ficheCacheId),
+          BigInt(rec.ficheCacheId),
           call_id,
           transcriptionId,
           transcription.transcription.text,
@@ -921,7 +939,7 @@ export const finalizeFicheTranscriptionFunction = inngest.createFunction(
     const { remaining, meta } = await step.run(`update-meta-${run_id}-${call_id}`, async () => {
       const multi = redis.multi();
       multi.hIncrBy(metaKey, "processed", 1);
-      if (cached) multi.hIncrBy(metaKey, "cached", 1);
+      if (cached) {multi.hIncrBy(metaKey, "cached", 1);}
       if (!ok) {
         multi.hIncrBy(metaKey, "failed", 1);
         multi.sAdd(failedKey, call_id);

@@ -34,6 +34,11 @@
 - **Automation**:
   - Orchestrator: `automation/run`
   - Fan-out: `fiche/fetch` (details), `fiche/transcribe`, `audit/run`
+  - Safeguard: can ignore fiches with too many recordings (`ficheSelection.maxRecordingsPerFiche` or env `AUTOMATION_MAX_RECORDINGS_PER_FICHE`)
+
+### Fiche details fetching (important prerequisite)
+- Fiche “full details” fetch uses the gateway **by fiche_id** (`/api/fiches/by-id/:fiche_id`); the gateway refreshes `cle` internally.
+- Cache-miss is allowed: fiche details can be fetched/cached even if the fiche was never pre-cached via sales-list/date-range.
 
 ### Realtime pattern
 - Publish domain events via Pusher (see `src/shared/webhook.ts` and `src/shared/pusher.ts`)

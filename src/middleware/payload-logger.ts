@@ -4,9 +4,10 @@
  * Logs incoming request payload sizes for monitoring
  */
 
-import { Request, Response, NextFunction } from "express";
-import { logPayloadSize, PAYLOAD_LIMITS } from "../utils/payload-size.js";
+import type { NextFunction,Request, Response } from "express";
+
 import { logger } from "../shared/logger.js";
+import { logPayloadSize, PAYLOAD_LIMITS } from "../utils/payload-size.js";
 
 /**
  * Middleware to log request payload sizes

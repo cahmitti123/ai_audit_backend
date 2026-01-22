@@ -6,13 +6,13 @@
 
 import {
   getRecordingsByFiche,
-  updateRecordingTranscription,
   getUntranscribedRecordings,
+  updateRecordingTranscription,
 } from "../recordings/recordings.repository.js";
 
 // Re-export recordings functions for transcription use
 export {
   getRecordingsByFiche,
-  updateRecordingTranscription,
   getUntranscribedRecordings,
+  updateRecordingTranscription,
 };

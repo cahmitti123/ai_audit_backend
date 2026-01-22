@@ -21,7 +21,7 @@ export function createConcurrencyLimiter(concurrency: number): Limiter {
   const next = () => {
     activeCount--;
     const run = queue.shift();
-    if (run) run();
+    if (run) {run();}
   };
 
   const runLimited = async <T>(
@@ -43,8 +43,8 @@ export function createConcurrencyLimiter(concurrency: number): Limiter {
   return <T>(fn: () => Promise<T>) =>
     new Promise<T>((resolve, reject) => {
       const run = () => void runLimited(fn, resolve, reject);
-      if (activeCount < n) run();
-      else queue.push(run);
+      if (activeCount < n) {run();}
+      else {queue.push(run);}
     });
 }
 

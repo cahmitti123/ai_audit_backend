@@ -11,8 +11,9 @@
  */
 
 import { z } from "zod";
-import { logger } from "../../shared/logger.js";
+
 import { ValidationError } from "../../shared/errors.js";
+import { logger } from "../../shared/logger.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ENUMS
@@ -298,18 +299,46 @@ export const listAuditsQuerySchema = z.object({
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const runAuditInputSchema = z.object({
-  fiche_id: z.string().min(1, "Fiche ID is required"),
-  audit_config_id: z.number().int().positive().optional(),
-  use_latest: z.boolean().optional().default(true),
-  save_to_file: z.boolean().optional().default(false),
+  fiche_id: z.string().trim().min(1, "fiche_id is required"),
+  // Required for /api/audits/run and POST /api/audits (alias). Accept string/number and coerce.
+  audit_config_id: z.preprocess(
+    (v) => {
+      if (typeof v === "number") {return v;}
+      if (typeof v === "string" && v.trim()) {return Number.parseInt(v, 10);}
+      return v;
+    },
+    z.number().int().positive("audit_config_id must be a positive integer")
+  ),
+  user_id: z.string().trim().min(1).optional(),
+  use_rlm: z.boolean().optional(),
+  // Optional linkage/metadata (accepted on POST /api/audits alias; useful for automation)
+  automation_schedule_id: z
+    .string()
+    .trim()
+    .regex(/^\d+$/, "automation_schedule_id must be a positive integer string")
+    .optional(),
+  automation_run_id: z
+    .string()
+    .trim()
+    .regex(/^\d+$/, "automation_run_id must be a positive integer string")
+    .optional(),
+  trigger_source: z.string().trim().max(50).optional(),
 });
 
 export const batchAuditInputSchema = z.object({
-  fiche_ids: z
-    .array(z.string().min(1))
-    .min(1, "At least one fiche ID is required"),
-  audit_config_id: z.number().int().positive().optional(),
-  use_latest: z.boolean().optional().default(true),
+  fiche_ids: z.array(z.string().trim().min(1)).min(1, "fiche_ids is required"),
+  audit_config_id: z
+    .preprocess(
+      (v) => {
+        if (typeof v === "number") {return v;}
+        if (typeof v === "string" && v.trim()) {return Number.parseInt(v, 10);}
+        return v;
+      },
+      z.number().int().positive("audit_config_id must be a positive integer")
+    )
+    .optional(),
+  user_id: z.string().trim().min(1).optional(),
+  use_rlm: z.boolean().optional(),
 });
 
 /**
@@ -435,20 +464,25 @@ export const groupedAuditsResponseSchema = z.object({
 
 export const runAuditResponseSchema = z.object({
   success: z.boolean(),
-  data: z.object({
-    audit_id: z.string(),
-    fiche_id: z.string(),
-    score: z.number(),
-    niveau: auditNiveauEnum,
-    is_compliant: z.boolean(),
-    duration_ms: z.number(),
+  message: z.string(),
+  event_id: z.string(),
+  // Tracking audit id (also used for realtime channel routing)
+  audit_id: z.string(),
+  fiche_id: z.string(),
+  audit_config_id: z.number(),
+  metadata: z.object({
+    timestamp: z.string(),
+    status: z.string(),
   }),
 });
 
 export const batchAuditResponseSchema = z.object({
   success: z.boolean(),
   message: z.string(),
-  event_id: z.string(),
+  fiche_ids: z.array(z.string()),
+  audit_config_id: z.number().optional(),
+  batch_id: z.string(),
+  event_ids: z.array(z.string()),
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -661,11 +695,11 @@ export const parseListAuditsQuery = (
     }
     if (query.recordings_count_min) {
       const n = Number.parseInt(query.recordings_count_min, 10);
-      if (Number.isFinite(n)) filters.recordingsCountMin = n;
+      if (Number.isFinite(n)) {filters.recordingsCountMin = n;}
     }
     if (query.recordings_count_max) {
       const n = Number.parseInt(query.recordings_count_max, 10);
-      if (Number.isFinite(n)) filters.recordingsCountMax = n;
+      if (Number.isFinite(n)) {filters.recordingsCountMax = n;}
     }
     if (query.fetched_at_from) {
       filters.fetchedAtFrom = new Date(query.fetched_at_from);
@@ -689,27 +723,27 @@ export const parseListAuditsQuery = (
     }
     if (query.score_min) {
       const n = Number.parseFloat(query.score_min);
-      if (Number.isFinite(n)) filters.scoreMin = n;
+      if (Number.isFinite(n)) {filters.scoreMin = n;}
     }
     if (query.score_max) {
       const n = Number.parseFloat(query.score_max);
-      if (Number.isFinite(n)) filters.scoreMax = n;
+      if (Number.isFinite(n)) {filters.scoreMax = n;}
     }
     if (query.duration_min_ms) {
       const n = Number.parseInt(query.duration_min_ms, 10);
-      if (Number.isFinite(n)) filters.durationMinMs = n;
+      if (Number.isFinite(n)) {filters.durationMinMs = n;}
     }
     if (query.duration_max_ms) {
       const n = Number.parseInt(query.duration_max_ms, 10);
-      if (Number.isFinite(n)) filters.durationMaxMs = n;
+      if (Number.isFinite(n)) {filters.durationMaxMs = n;}
     }
     if (query.tokens_min) {
       const n = Number.parseInt(query.tokens_min, 10);
-      if (Number.isFinite(n)) filters.tokensMin = n;
+      if (Number.isFinite(n)) {filters.tokensMin = n;}
     }
     if (query.tokens_max) {
       const n = Number.parseInt(query.tokens_max, 10);
-      if (Number.isFinite(n)) filters.tokensMax = n;
+      if (Number.isFinite(n)) {filters.tokensMax = n;}
     }
     if (query.has_failed_steps !== undefined) {
       filters.hasFailedSteps = query.has_failed_steps === "true";

@@ -7,11 +7,12 @@
  * domain-driven architecture. Each module defines its own events.
  */
 
-import { Inngest, EventSchemas } from "inngest";
-import type { FichesEvents } from "../modules/fiches/fiches.events.js";
-import type { TranscriptionsEvents } from "../modules/transcriptions/transcriptions.events.js";
+import { EventSchemas,Inngest } from "inngest";
+
 import type { AuditsEvents } from "../modules/audits/audits.events.js";
 import type { AutomationEvents } from "../modules/automation/automation.events.js";
+import type { FichesEvents } from "../modules/fiches/fiches.events.js";
+import type { TranscriptionsEvents } from "../modules/transcriptions/transcriptions.events.js";
 import { logger } from "../shared/logger.js";
 
 /**

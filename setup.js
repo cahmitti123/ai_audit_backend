@@ -9,7 +9,7 @@
  * NOTE: Never copy real secrets from outside this repo.
  */
 
-import { copyFileSync, mkdirSync, existsSync } from "fs";
+import { copyFileSync, existsSync,mkdirSync } from "fs";
 import { resolve } from "path";
 
 console.log("\n🔧 Setup AI Audit System...\n");

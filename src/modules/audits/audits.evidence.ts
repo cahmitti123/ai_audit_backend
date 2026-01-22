@@ -8,7 +8,6 @@
  */
 
 import type {
-  TimelineRecording,
   AuditStepResult,
   ControlPoint,
   EvidenceCitation,
@@ -49,10 +48,10 @@ function normalizeForMatch(s: string): string {
 function buildTimelineChunkTextIndex(timeline: TimelineLike) {
   const map = new Map<number, Map<number, string>>();
   for (const rec of timeline) {
-    if (typeof rec.recording_index !== "number") continue;
+    if (typeof rec.recording_index !== "number") {continue;}
     const chunkMap = new Map<number, string>();
     for (const chunk of rec.chunks) {
-      if (typeof chunk.chunk_index !== "number") continue;
+      if (typeof chunk.chunk_index !== "number") {continue;}
       chunkMap.set(chunk.chunk_index, normalizeForMatch(String(chunk.full_text || "")));
     }
     map.set(rec.recording_index, chunkMap);
@@ -64,22 +63,26 @@ function isCitationValid(
   citation: Partial<EvidenceCitation>,
   index: Map<number, Map<number, string>>
 ): boolean {
-  if (typeof citation.recording_index !== "number") return false;
-  if (typeof citation.chunk_index !== "number") return false;
+  if (typeof citation.recording_index !== "number") {return false;}
+  if (typeof citation.chunk_index !== "number") {return false;}
   const recordingIndex = citation.recording_index;
   const chunkIndex = citation.chunk_index;
 
   const chunkMap = index.get(recordingIndex);
-  if (!chunkMap) return false;
+  if (!chunkMap) {return false;}
 
   const chunkText = chunkMap.get(chunkIndex);
-  if (!chunkText) return false;
+  if (!chunkText) {return false;}
 
   const quoted = normalizeForMatch(String(citation.texte || ""));
-  if (!quoted) return false;
+  if (!quoted) {return false;}
 
   // Very short quotes are too ambiguous; require a minimum length
-  if (quoted.length < 12) return false;
+  const minLen = Math.max(
+    0,
+    Number.parseInt(process.env.AUDIT_EVIDENCE_MIN_QUOTE_CHARS || "12", 10) || 12
+  );
+  if (quoted.length < minLen) {return false;}
 
   return chunkText.includes(quoted);
 }
@@ -94,8 +97,8 @@ function scoreFromControlPoints(points: Array<Pick<ControlPoint, "statut">>, wei
   }
 
   const total = applicable.reduce((sum, p) => {
-    if (p.statut === "PRESENT") return sum + 1;
-    if (p.statut === "PARTIEL") return sum + 0.5;
+    if (p.statut === "PRESENT") {return sum + 1;}
+    if (p.statut === "PARTIEL") {return sum + 0.5;}
     return sum + 0;
   }, 0);
 
@@ -105,8 +108,8 @@ function scoreFromControlPoints(points: Array<Pick<ControlPoint, "statut">>, wei
 }
 
 function conformeFromRatio(ratio: number): "CONFORME" | "PARTIEL" | "NON_CONFORME" {
-  if (ratio >= 0.85) return "CONFORME";
-  if (ratio >= 0.4) return "PARTIEL";
+  if (ratio >= 0.85) {return "CONFORME";}
+  if (ratio >= 0.4) {return "PARTIEL";}
   return "NON_CONFORME";
 }
 
@@ -114,8 +117,8 @@ function niveauFromConforme(
   conforme: "CONFORME" | "PARTIEL" | "NON_CONFORME",
   ratio: number
 ): "EXCELLENT" | "BON" | "ACCEPTABLE" | "INSUFFISANT" | "REJET" {
-  if (conforme === "CONFORME") return ratio >= 0.95 ? "EXCELLENT" : "BON";
-  if (conforme === "PARTIEL") return "ACCEPTABLE";
+  if (conforme === "CONFORME") {return ratio >= 0.95 ? "EXCELLENT" : "BON";}
+  if (conforme === "PARTIEL") {return "ACCEPTABLE";}
   return "INSUFFISANT";
 }
 
@@ -216,7 +219,7 @@ export function validateAndGateAuditStepResults(params: {
     const stepMins = new Set<string>();
     for (const cp of points) {
       for (const c of cp.citations || []) {
-        if (c.minutage) stepMins.add(String(c.minutage));
+        if (c.minutage) {stepMins.add(String(c.minutage));}
       }
     }
     step.minutages = Array.from(stepMins);

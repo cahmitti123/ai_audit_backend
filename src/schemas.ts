@@ -181,11 +181,11 @@ export type ChatMessage = z.infer<typeof ChatMessageSchema>;
 // Prefer importing directly from @modules/automation for new code.
 
 export {
-  // Schemas
-  scheduleTypeSchema as ScheduleTypeSchema,
-  ficheSelectionSchema as FicheSelectionSchema,
   createAutomationScheduleInputSchema as AutomationScheduleCreateSchema,
   updateAutomationScheduleInputSchema as AutomationScheduleUpdateSchema,
+  ficheSelectionSchema as FicheSelectionSchema,
+  // Schemas
+  scheduleTypeSchema as ScheduleTypeSchema,
   triggerAutomationInputSchema as TriggerAutomationSchema,
   // Note: Response schemas are not exported from automation module
   // They use the transformed API types instead
@@ -216,7 +216,9 @@ export const AutomationScheduleResponseSchema = z.object({
     groupes: z.array(z.string()).optional(),
     onlyWithRecordings: z.boolean().optional(),
     onlyUnaudited: z.boolean().optional(),
+    useRlm: z.boolean().optional(),
     maxFiches: z.number().int().positive().optional(),
+    maxRecordingsPerFiche: z.number().int().positive().optional(),
     ficheIds: z.array(z.string()).optional(),
   }),
   runTranscription: z.boolean(),
@@ -274,10 +276,10 @@ export type AuditStepResult = z.infer<typeof AuditStepSchema>;
 export type EnhancedQuery = z.infer<typeof EnhancedQuerySchema>;
 // Re-export types from automation module for backward compatibility
 export type {
-  ScheduleType,
-  FicheSelection,
   CreateAutomationScheduleInput as AutomationScheduleCreate,
   UpdateAutomationScheduleInput as AutomationScheduleUpdate,
+  FicheSelection,
+  ScheduleType,
   TriggerAutomationInput as TriggerAutomation,
 } from "./modules/automation/automation.schemas.js";
 

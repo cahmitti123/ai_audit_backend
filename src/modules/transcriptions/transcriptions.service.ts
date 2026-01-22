@@ -4,8 +4,11 @@
  * Business logic for transcription operations
  */
 
-import { TranscriptionService } from "./transcriptions.elevenlabs.js";
+import { logger } from "../../shared/logger.js";
+import { transcriptionWebhooks } from "../../shared/webhook.js";
+import { mapWithConcurrency } from "../../utils/concurrency.js";
 import { getCachedFiche } from "../fiches/fiches.repository.js";
+import { TranscriptionService } from "./transcriptions.elevenlabs.js";
 import {
   getRecordingsByFiche,
   updateRecordingTranscription,
@@ -14,9 +17,6 @@ import type {
   TranscriptionResult,
   TranscriptionStatus,
 } from "./transcriptions.types.js";
-import { transcriptionWebhooks } from "../../shared/webhook.js";
-import { mapWithConcurrency } from "../../utils/concurrency.js";
-import { logger } from "../../shared/logger.js";
 
 /**
  * Progress callback for transcription updates

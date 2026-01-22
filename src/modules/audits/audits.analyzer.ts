@@ -6,31 +6,37 @@
 
 import { openai } from "@ai-sdk/openai";
 import { generateObject, generateText, Output } from "ai";
+
+import type { TimelineRecording } from "../../schemas.js";
 import { AuditStepSchema } from "../../schemas.js";
+import { logger } from "../../shared/logger.js";
+import { auditWebhooks } from "../../shared/webhook.js";
+import { mapWithConcurrency } from "../../utils/concurrency.js";
 import {
   buildStepPrompt,
   buildStepPromptsWithTranscriptTools,
 } from "./audits.prompts.js";
-import { auditWebhooks } from "../../shared/webhook.js";
-import { logger } from "../../shared/logger.js";
-import { mapWithConcurrency } from "../../utils/concurrency.js";
-import {
-  getProductVerificationContext,
-  type ProductVerificationContext,
-} from "./audits.vector-store.js";
-import type { TimelineRecording } from "../../schemas.js";
 import { createTranscriptTools } from "./audits.transcript-tools.js";
 import type {
   AuditConfigForAnalysis,
   AuditStepDefinition,
   ProductLinkResult,
 } from "./audits.types.js";
+import {
+  getProductVerificationContext,
+  type ProductVerificationContext,
+} from "./audits.vector-store.js";
 
 export interface AuditOptions {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   textVerbosity?: TextVerbosity;
   maxRetries?: number;
+  /**
+   * Optional audit DB id (BigInt serialized as string) to attach to realtime events.
+   * Helps correlate step-level events with REST `GET /api/audits/:audit_id`.
+   */
+  auditDbId?: string;
   /**
    * Optional timeline (structured) used for transcript tools mode.
    * When provided and transcript mode is enabled, the analyzer can fetch evidence via tools
@@ -71,7 +77,7 @@ const DEFAULT_TRANSCRIPT_TOOL_LIMITS = {
 
 function getTranscriptMode(opts: AuditOptions): "prompt" | "tools" {
   const fromOpts = opts.transcriptMode;
-  if (fromOpts === "prompt" || fromOpts === "tools") return fromOpts;
+  if (fromOpts === "prompt" || fromOpts === "tools") {return fromOpts;}
   return "prompt";
 }
 
@@ -85,6 +91,25 @@ export async function analyzeStep(
   options: AuditOptions = {}
 ) {
   const opts = { ...DEFAULT_OPTIONS, ...options };
+
+  const transcriptModeRequested = getTranscriptMode(opts);
+  const canUseToolsRequested =
+    transcriptModeRequested === "tools" &&
+    Array.isArray(opts.timeline) &&
+    opts.timeline.length > 0;
+  const transcriptModeEffective = canUseToolsRequested ? "tools" : "prompt";
+
+  const auditDbId =
+    typeof opts.auditDbId === "string" && opts.auditDbId.trim().length > 0
+      ? opts.auditDbId.trim()
+      : undefined;
+  const webhookMeta = {
+    ...(auditDbId ? { audit_db_id: auditDbId } : {}),
+    approach: {
+      use_rlm: transcriptModeEffective === "tools",
+      transcript_mode: transcriptModeEffective,
+    },
+  } as const;
 
   const totalSteps = auditConfig.auditSteps?.length || step.position;
 
@@ -105,7 +130,8 @@ export async function analyzeStep(
     step.name,
     totalSteps,
     step.weight,
-    step.isCritical
+    step.isCritical,
+    webhookMeta
   );
 
   // Check if product verification is required
@@ -157,11 +183,8 @@ export async function analyzeStep(
     }
   }
 
-  const transcriptMode = getTranscriptMode(opts);
-  const canUseTools =
-    transcriptMode === "tools" &&
-    Array.isArray(opts.timeline) &&
-    opts.timeline.length > 0;
+  const transcriptMode = transcriptModeRequested;
+  const canUseTools = canUseToolsRequested;
 
   if (transcriptMode === "tools" && !canUseTools) {
     logger.warn("Transcript tools mode enabled but no timeline provided; falling back to prompt", {
@@ -271,7 +294,8 @@ export async function analyzeStep(
       step.weight,
       obj.conforme === "CONFORME",
       totalCitations,
-      result.usage.totalTokens
+      result.usage.totalTokens,
+      webhookMeta
     );
 
     return {
@@ -356,7 +380,8 @@ export async function analyzeStep(
     step.weight,
     result.object.conforme === "CONFORME",
     totalCitations,
-    result.usage.totalTokens
+    result.usage.totalTokens,
+    webhookMeta
   );
 
   return {
@@ -516,7 +541,7 @@ export async function analyzeAllSteps(
       failed: stepResults.filter((r) => !r.success).length,
       total_time_seconds: elapsed,
       total_tokens: stepResults.reduce((sum, r) => {
-        if (!r.success) return sum;
+        if (!r.success) {return sum;}
         return sum + (r.result.usage?.total_tokens || 0);
       }, 0),
     },

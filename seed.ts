@@ -1,4 +1,5 @@
 import { AuditSeverity } from "@prisma/client";
+
 import { prisma } from "./src/shared/prisma.js";
 
 async function main() {

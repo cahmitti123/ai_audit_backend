@@ -14,9 +14,9 @@
  * - Compare results and use best judgment
  */
 
-import { analyzeStep } from "./audits.analyzer.js";
-import { logger } from "../../shared/logger.js";
 import type { AuditStepResult } from "../../schemas.js";
+import { logger } from "../../shared/logger.js";
+import { analyzeStep } from "./audits.analyzer.js";
 import type {
   AuditConfigForAnalysis,
   AuditStepDefinition,

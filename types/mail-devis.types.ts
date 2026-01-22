@@ -210,7 +210,7 @@ export interface DocumentItem {
  * Helper to get document list
  */
 export function getDocumentsList(documents: Documents): DocumentItem[] {
-  return [
+  const list: DocumentItem[] = [
     {
       key: 'conditions_generales',
       label: 'Conditions Générales',
@@ -235,7 +235,9 @@ export function getDocumentsList(documents: Documents): DocumentItem[] {
       url: documents.exemples_remboursements,
       icon: '💰',
     },
-  ].filter((doc) => doc.url !== null);
+  ];
+
+  return list.filter((doc) => doc.url !== null);
 }
 
 /**

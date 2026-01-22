@@ -4,8 +4,9 @@
  * Database operations for recordings
  */
 
-import { prisma } from "../../shared/prisma.js";
 import type { Prisma } from "@prisma/client";
+
+import { prisma } from "../../shared/prisma.js";
 
 /**
  * Get all recordings for a fiche

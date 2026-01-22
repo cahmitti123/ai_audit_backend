@@ -10,6 +10,7 @@
 
 import type { ErrorRequestHandler } from "express";
 import { ZodError } from "zod";
+
 import { AppError, ValidationError } from "../shared/errors.js";
 import { fail } from "../shared/http.js";
 
@@ -25,7 +26,7 @@ function isBodyParserSyntaxError(error: unknown): boolean {
 }
 
 export const errorHandler: ErrorRequestHandler = (error, req, res, next) => {
-  if (res.headersSent) return next(error);
+  if (res.headersSent) {return next(error);}
 
   // Zod validation errors (request body/query/params parsing)
   if (error instanceof ZodError) {

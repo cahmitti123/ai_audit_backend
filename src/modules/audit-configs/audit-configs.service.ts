@@ -10,20 +10,19 @@
  * LAYER: Business Logic / Orchestration
  */
 
+import { NotFoundError, ValidationError } from "../../shared/errors.js";
+import { logger } from "../../shared/logger.js";
+import * as auditConfigsRepository from "./audit-configs.repository.js";
 import type {
-  AuditConfig,
   AuditConfigDetail,
-  AuditConfigSummary,
   AuditConfigStats,
+  AuditConfigSummary,
   AuditStep,
   CreateAuditConfigInput,
-  UpdateAuditConfigInput,
   CreateAuditStepInput,
+  UpdateAuditConfigInput,
   UpdateAuditStepInput,
 } from "./audit-configs.schemas.js";
-import * as auditConfigsRepository from "./audit-configs.repository.js";
-import { logger } from "../../shared/logger.js";
-import { NotFoundError, ValidationError } from "../../shared/errors.js";
 
 function isPrismaNotFoundError(error: unknown): boolean {
   return (
@@ -645,7 +644,7 @@ export async function validateAuditConfigForRun(
   }
 
   // Validate each step has required fields
-  config.steps.forEach((step, index) => {
+  config.steps.forEach((step) => {
     if (!step.name || step.name.trim() === "") {
       errors.push(`Step at position ${step.position} has no name`);
     }

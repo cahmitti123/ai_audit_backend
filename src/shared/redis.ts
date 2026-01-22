@@ -9,6 +9,7 @@
  */
 
 import { createClient, type RedisClientType } from "redis";
+
 import { logger } from "./logger.js";
 
 let client: RedisClientType | null = null;
@@ -20,7 +21,7 @@ function getRedisUrl(): string | null {
 }
 
 async function ensureConnected(c: RedisClientType): Promise<void> {
-  if (c.isOpen) return;
+  if (c.isOpen) {return;}
   if (!connectPromise) {
     connectPromise = c
       .connect()
@@ -39,7 +40,7 @@ async function ensureConnected(c: RedisClientType): Promise<void> {
  */
 export async function getRedisClient(): Promise<RedisClientType | null> {
   const url = getRedisUrl();
-  if (!url) return null;
+  if (!url) {return null;}
 
   if (!client) {
     client = createClient({ url });
@@ -62,7 +63,7 @@ export async function getRedisDedicatedClient(
   purpose: string
 ): Promise<RedisClientType | null> {
   const base = await getRedisClient();
-  if (!base) return null;
+  if (!base) {return null;}
 
   const dedicated = base.duplicate();
   dedicated.on("error", (err) => {
@@ -76,12 +77,12 @@ export async function getRedisDedicatedClient(
 }
 
 export async function disconnectRedis(): Promise<void> {
-  if (!client) return;
+  if (!client) {return;}
   try {
     if (client.isOpen) {
       await client.quit();
     }
-  } catch (err) {
+  } catch {
     // ignore
   } finally {
     client = null;

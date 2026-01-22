@@ -27,8 +27,9 @@ export async function getOrCreateAuditConversation(
     update: {},
     include: {
       messages: {
-        orderBy: { timestamp: "asc" },
-        take: 50, // Last 50 messages
+        // Fetch the newest 50; callers can reverse for chronological display.
+        orderBy: { timestamp: "desc" },
+        take: 50,
       },
     },
   });
@@ -45,7 +46,8 @@ export async function getOrCreateFicheConversation(ficheId: string) {
     },
     include: {
       messages: {
-        orderBy: { timestamp: "asc" },
+        // Fetch the newest 50; callers can reverse for chronological display.
+        orderBy: { timestamp: "desc" },
         take: 50,
       },
     },
@@ -59,7 +61,9 @@ export async function getOrCreateFicheConversation(ficheId: string) {
       },
       include: {
         messages: {
-          orderBy: { timestamp: "asc" },
+          // Fetch the newest 50; callers can reverse for chronological display.
+          orderBy: { timestamp: "desc" },
+          take: 50,
         },
       },
     });

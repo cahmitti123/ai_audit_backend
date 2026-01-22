@@ -1,7 +1,8 @@
 import request from "supertest";
-import { beforeEach, afterEach, describe, expect, it } from "vitest";
-import { makeApp } from "./test-app.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
 import { __resetPusherClientForTests } from "../src/shared/pusher.js";
+import { makeApp } from "./test-app.js";
 
 describe("Realtime (Pusher)", () => {
   const originalEnv: Partial<Record<string, string | undefined>> = {};

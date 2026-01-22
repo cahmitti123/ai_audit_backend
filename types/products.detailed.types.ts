@@ -643,6 +643,12 @@ export const EXAMPLE_FORMULE_DETAIL_RESPONSE: FormuleDetailResponse = {
         createdAt: "2025-11-24T15:30:58.081Z",
       },
     ],
+    _counts: {
+      garanties: 1,
+      categories: 1,
+      items: 3,
+      documents: 1,
+    },
   },
 };
 

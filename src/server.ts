@@ -5,9 +5,9 @@
  */
 
 import { createApp } from "./app.js";
+import { logger } from "./shared/logger.js";
 import { disconnectDb } from "./shared/prisma.js";
 import { disconnectRedis } from "./shared/redis.js";
-import { logger } from "./shared/logger.js";
 
 const app = createApp();
 // Default to 3002 to match README/Docker and the Inngest dev script URL

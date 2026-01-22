@@ -10,8 +10,9 @@
  * LAYER: Data Access
  */
 
-import { prisma } from "../../shared/prisma.js";
 import type { Prisma } from "@prisma/client";
+
+import { prisma } from "../../shared/prisma.js";
 import type { ListAuditsFilters } from "./audits.schemas.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -33,6 +34,7 @@ function sanitizeNullBytes(data: unknown): unknown {
 
   if (typeof data === "string") {
     // Remove null bytes from strings
+    // eslint-disable-next-line no-control-regex -- Intentionally remove null bytes for safe Postgres storage
     return data.replace(/\u0000/g, "");
   }
 
@@ -462,7 +464,7 @@ export async function saveAuditResult(auditResult: unknown, ficheCacheId: bigint
  */
 export async function getAuditsByFiche(
   ficheId: string,
-  includeDetails = false
+  _includeDetails = false
 ) {
   return await prisma.audit.findMany({
     where: {
@@ -646,17 +648,17 @@ function buildAuditWhere(filters: Partial<ListAuditsFilters>): Prisma.AuditWhere
   const and: Prisma.AuditWhereInput[] = [];
 
   // Visibility defaults
-  if (latestOnly) and.push({ isLatest: true });
-  if (!includeDeleted) and.push({ deletedAt: null });
+  if (latestOnly) {and.push({ isLatest: true });}
+  if (!includeDeleted) {and.push({ deletedAt: null });}
 
   // Filter by status
-  if (status && status.length > 0) and.push({ status: { in: status } });
+  if (status && status.length > 0) {and.push({ status: { in: status } });}
 
   // Filter by compliance
-  if (isCompliant !== undefined) and.push({ isCompliant });
+  if (isCompliant !== undefined) {and.push({ isCompliant });}
 
   // Filter by niveau
-  if (niveau && niveau.length > 0) and.push({ niveau: { in: niveau } });
+  if (niveau && niveau.length > 0) {and.push({ niveau: { in: niveau } });}
 
   // Filter by date range (createdAt)
   if (dateFrom || dateTo) {
@@ -700,8 +702,8 @@ function buildAuditWhere(filters: Partial<ListAuditsFilters>): Prisma.AuditWhere
 
   // Filter by failed steps presence
   if (hasFailedSteps !== undefined) {
-    if (hasFailedSteps) and.push({ failedSteps: { gt: 0 } });
-    else and.push({ OR: [{ failedSteps: { equals: 0 } }, { failedSteps: null }] });
+    if (hasFailedSteps) {and.push({ failedSteps: { gt: 0 } });}
+    else {and.push({ OR: [{ failedSteps: { equals: 0 } }, { failedSteps: null }] });}
   }
 
   // Filter by audit config IDs
@@ -710,7 +712,7 @@ function buildAuditWhere(filters: Partial<ListAuditsFilters>): Prisma.AuditWhere
       .map((id) => String(id).trim())
       .filter((id) => /^\d+$/.test(id))
       .map((id) => BigInt(id));
-    if (ids.length > 0) and.push({ auditConfigId: { in: ids } });
+    if (ids.length > 0) {and.push({ auditConfigId: { in: ids } });}
   }
 
   // Filter by automation ids
@@ -719,14 +721,14 @@ function buildAuditWhere(filters: Partial<ListAuditsFilters>): Prisma.AuditWhere
       .map((id) => String(id).trim())
       .filter((id) => /^\d+$/.test(id))
       .map((id) => BigInt(id));
-    if (ids.length > 0) and.push({ automationScheduleId: { in: ids } });
+    if (ids.length > 0) {and.push({ automationScheduleId: { in: ids } });}
   }
   if (automationRunIds && automationRunIds.length > 0) {
     const ids = automationRunIds
       .map((id) => String(id).trim())
       .filter((id) => /^\d+$/.test(id))
       .map((id) => BigInt(id));
-    if (ids.length > 0) and.push({ automationRunId: { in: ids } });
+    if (ids.length > 0) {and.push({ automationRunId: { in: ids } });}
   }
 
   // Filter by trigger source(s)
@@ -737,11 +739,11 @@ function buildAuditWhere(filters: Partial<ListAuditsFilters>): Prisma.AuditWhere
   // Fiche-level filters (groupe/prospect/etc)
   const ficheWhere: Prisma.FicheCacheWhereInput = {};
   const ficheAnd: Prisma.FicheCacheWhereInput[] = [];
-  if (ficheIds && ficheIds.length > 0) ficheWhere.ficheId = { in: ficheIds };
-  if (groupes && groupes.length > 0) ficheWhere.groupe = { in: groupes };
-  if (groupeQuery) ficheWhere.groupe = { contains: groupeQuery, mode: "insensitive" };
+  if (ficheIds && ficheIds.length > 0) {ficheWhere.ficheId = { in: ficheIds };}
+  if (groupes && groupes.length > 0) {ficheWhere.groupe = { in: groupes };}
+  if (groupeQuery) {ficheWhere.groupe = { contains: groupeQuery, mode: "insensitive" };}
   if (agenceQuery)
-    ficheWhere.agenceNom = { contains: agenceQuery, mode: "insensitive" };
+    {ficheWhere.agenceNom = { contains: agenceQuery, mode: "insensitive" };}
   if (prospectQuery) {
     ficheWhere.OR = [
       { prospectNom: { contains: prospectQuery, mode: "insensitive" } },
@@ -762,7 +764,7 @@ function buildAuditWhere(filters: Partial<ListAuditsFilters>): Prisma.AuditWhere
       },
     });
   }
-  if (hasRecordings !== undefined) ficheWhere.hasRecordings = hasRecordings;
+  if (hasRecordings !== undefined) {ficheWhere.hasRecordings = hasRecordings;}
   if (recordingsCountMin !== undefined || recordingsCountMax !== undefined) {
     ficheWhere.recordingsCount = {
       ...(recordingsCountMin !== undefined ? { gte: recordingsCountMin } : {}),
@@ -781,8 +783,8 @@ function buildAuditWhere(filters: Partial<ListAuditsFilters>): Prisma.AuditWhere
       ...(lastRevalidatedTo ? { lte: lastRevalidatedTo } : {}),
     };
   }
-  if (ficheAnd.length > 0) ficheWhere.AND = ficheAnd;
-  if (Object.keys(ficheWhere).length > 0) and.push({ ficheCache: ficheWhere });
+  if (ficheAnd.length > 0) {ficheWhere.AND = ficheAnd;}
+  if (Object.keys(ficheWhere).length > 0) {and.push({ ficheCache: ficheWhere });}
 
   // Free text search (ANDed with other filters)
   if (q) {
@@ -869,8 +871,8 @@ export async function groupAudits(params: {
       for (const r of rowsCompliance) {
         const k = String(r.status);
         const prev = complianceMap.get(k) ?? { compliant: 0, nonCompliant: 0 };
-        if (r.isCompliant) prev.compliant += r._count.id;
-        else prev.nonCompliant += r._count.id;
+        if (r.isCompliant) {prev.compliant += r._count.id;}
+        else {prev.nonCompliant += r._count.id;}
         complianceMap.set(k, prev);
       }
 
@@ -918,8 +920,8 @@ export async function groupAudits(params: {
       for (const r of rowsCompliance) {
         const k = String(r.niveau);
         const prev = complianceMap.get(k) ?? { compliant: 0, nonCompliant: 0 };
-        if (r.isCompliant) prev.compliant += r._count.id;
-        else prev.nonCompliant += r._count.id;
+        if (r.isCompliant) {prev.compliant += r._count.id;}
+        else {prev.nonCompliant += r._count.id;}
         complianceMap.set(k, prev);
       }
 
@@ -968,41 +970,63 @@ export async function groupAudits(params: {
         }) as unknown as Array<Record<string, unknown>>,
       ]);
 
-      const totalGroups = (await prisma.audit.groupBy({ by: [field], where } as any)).length;
+      type GroupByRow = Record<string, unknown>;
+
+      const toStringKey = (row: GroupByRow): string | null => {
+        const raw = row[field];
+        const v = typeof raw === "bigint" || typeof raw === "string" ? raw : null;
+        return toKey(v);
+      };
+
+      const getCountId = (row: GroupByRow): number => {
+        const count = row._count;
+        if (!isRecord(count)) {return 0;}
+        const id = count.id;
+        return typeof id === "number" && Number.isFinite(id) ? id : 0;
+      };
+
+      const toNumberOrNull = (value: unknown): number | null => {
+        if (value === null || value === undefined) {return null;}
+        const n = typeof value === "number" ? value : Number(value);
+        return Number.isFinite(n) ? n : null;
+      };
+
+      const totalGroups = (await prisma.audit.groupBy({ by: [field], where })).length;
 
       const complianceMap = new Map<string | null, { compliant: number; nonCompliant: number }>();
       for (const r of rowsCompliance) {
-        const key = (r as any)[field] ?? null;
-        const k = toKey(key as any) as string | null;
+        const k = toStringKey(r);
         const prev = complianceMap.get(k) ?? { compliant: 0, nonCompliant: 0 };
-        if ((r as any).isCompliant) prev.compliant += (r as any)._count.id as number;
-        else prev.nonCompliant += (r as any)._count.id as number;
+        const n = getCountId(r);
+        if (r.isCompliant === true) {prev.compliant += n;}
+        else {prev.nonCompliant += n;}
         complianceMap.set(k, prev);
       }
 
       const statusMap = new Map<string | null, Record<string, number>>();
       for (const r of rowsStatus) {
-        const key = (r as any)[field] ?? null;
-        const k = toKey(key as any) as string | null;
+        const k = toStringKey(r);
         const prev = statusMap.get(k) ?? {};
-        const st = String((r as any).status);
-        prev[st] = ((prev[st] ?? 0) as number) + ((r as any)._count.id as number);
+        const st = typeof r.status === "string" ? r.status : String(r.status ?? "unknown");
+        prev[st] = (prev[st] ?? 0) + getCountId(r);
         statusMap.set(k, prev);
       }
 
-      const groups = rowsAll.map((r: any) => {
-        const keyRaw = r[field] ?? null;
-        const key = toKey(keyRaw as any) as string | null;
+      const groups = rowsAll.map((r: GroupByRow) => {
+        const key = toStringKey(r);
         const c = complianceMap.get(key) ?? { compliant: 0, nonCompliant: 0 };
         const st = statusMap.get(key) ?? {};
+        const avgScore = isRecord(r._avg) ? toNumberOrNull(r._avg.scorePercentage) : null;
+        const minScore = isRecord(r._min) ? toNumberOrNull(r._min.scorePercentage) : null;
+        const maxScore = isRecord(r._max) ? toNumberOrNull(r._max.scorePercentage) : null;
         return {
           key,
-          count: r._count.id as number,
+          count: getCountId(r),
           compliantCount: c.compliant,
           nonCompliantCount: c.nonCompliant,
-          avgScore: r._avg.scorePercentage ? Number(r._avg.scorePercentage) : null,
-          minScore: r._min.scorePercentage ? Number(r._min.scorePercentage) : null,
-          maxScore: r._max.scorePercentage ? Number(r._max.scorePercentage) : null,
+          avgScore,
+          minScore,
+          maxScore,
           statusCounts: st,
         };
       });
@@ -1021,7 +1045,7 @@ export async function groupAudits(params: {
         select: { id: true, name: true, description: true },
       });
       const map = new Map<string, (typeof configs)[number]>();
-      for (const c of configs) map.set(c.id.toString(), c);
+      for (const c of configs) {map.set(c.id.toString(), c);}
 
       return {
         groups: groups.map((g) => ({
@@ -1051,7 +1075,7 @@ export async function groupAudits(params: {
         select: { id: true, name: true },
       });
       const map = new Map<string, (typeof schedules)[number]>();
-      for (const s of schedules) map.set(s.id.toString(), s);
+      for (const s of schedules) {map.set(s.id.toString(), s);}
 
       return {
         groups: groups.map((g) => ({
@@ -1079,7 +1103,7 @@ export async function groupAudits(params: {
         select: { id: true, status: true, startedAt: true, completedAt: true, scheduleId: true },
       });
       const map = new Map<string, (typeof runs)[number]>();
-      for (const r of runs) map.set(r.id.toString(), r);
+      for (const r of runs) {map.set(r.id.toString(), r);}
 
       return {
         groups: groups.map((g) => ({
@@ -1120,7 +1144,7 @@ export async function groupAudits(params: {
       },
     });
     const map = new Map<string, (typeof fiches)[number]>();
-    for (const f of fiches) map.set(f.id.toString(), f);
+    for (const f of fiches) {map.set(f.id.toString(), f);}
 
     return {
       groups: groups.map((g) => ({
@@ -1171,8 +1195,8 @@ export async function groupAudits(params: {
   }>();
 
   const keyForRow = (row: (typeof rows)[number]): string => {
-    if (groupBy === "groupe") return row.ficheCache.groupe ?? "UNKNOWN";
-    if (groupBy === "created_day") return row.createdAt.toISOString().slice(0, 10);
+    if (groupBy === "groupe") {return row.ficheCache.groupe ?? "UNKNOWN";}
+    if (groupBy === "created_day") {return row.createdAt.toISOString().slice(0, 10);}
     // score_bucket
     const n = Number(row.scorePercentage);
     const safe = Number.isFinite(n) ? n : 0;
@@ -1191,10 +1215,10 @@ export async function groupAudits(params: {
       statusCounts: {},
     };
     prev.count += 1;
-    if (row.isCompliant) prev.compliantCount += 1;
-    else prev.nonCompliantCount += 1;
+    if (row.isCompliant) {prev.compliantCount += 1;}
+    else {prev.nonCompliantCount += 1;}
     const score = Number(row.scorePercentage);
-    if (Number.isFinite(score)) prev.scores.push(score);
+    if (Number.isFinite(score)) {prev.scores.push(score);}
     prev.statusCounts[row.status] = (prev.statusCounts[row.status] ?? 0) + 1;
     groupsMap.set(key, prev);
   }
@@ -1260,16 +1284,14 @@ export async function getAuditsGroupedByFichesRaw(
     includeDeleted = false,
     sortBy = "created_at",
     sortOrder = "desc",
-    limit = 100,
-    offset = 0,
   } = filters;
 
   // Build where clause for audits
   const auditWhere: Prisma.AuditWhereInput = {};
   const auditAnd: Prisma.AuditWhereInput[] = [];
 
-  if (latestOnly) auditAnd.push({ isLatest: true });
-  if (!includeDeleted) auditAnd.push({ deletedAt: null });
+  if (latestOnly) {auditAnd.push({ isLatest: true });}
+  if (!includeDeleted) {auditAnd.push({ deletedAt: null });}
 
   // Filter by status
   if (status && status.length > 0) {
@@ -1328,8 +1350,8 @@ export async function getAuditsGroupedByFichesRaw(
 
   // Filter by failed steps presence
   if (hasFailedSteps !== undefined) {
-    if (hasFailedSteps) auditAnd.push({ failedSteps: { gt: 0 } });
-    else auditAnd.push({ OR: [{ failedSteps: { equals: 0 } }, { failedSteps: null }] });
+    if (hasFailedSteps) {auditAnd.push({ failedSteps: { gt: 0 } });}
+    else {auditAnd.push({ OR: [{ failedSteps: { equals: 0 } }, { failedSteps: null }] });}
   }
 
   // Filter by audit config IDs
@@ -1338,7 +1360,7 @@ export async function getAuditsGroupedByFichesRaw(
       .map((id) => String(id).trim())
       .filter((id) => /^\d+$/.test(id))
       .map((id) => BigInt(id));
-    if (ids.length > 0) auditAnd.push({ auditConfigId: { in: ids } });
+    if (ids.length > 0) {auditAnd.push({ auditConfigId: { in: ids } });}
   }
 
   // Filter by automation ids
@@ -1347,14 +1369,14 @@ export async function getAuditsGroupedByFichesRaw(
       .map((id) => String(id).trim())
       .filter((id) => /^\d+$/.test(id))
       .map((id) => BigInt(id));
-    if (ids.length > 0) auditAnd.push({ automationScheduleId: { in: ids } });
+    if (ids.length > 0) {auditAnd.push({ automationScheduleId: { in: ids } });}
   }
   if (automationRunIds && automationRunIds.length > 0) {
     const ids = automationRunIds
       .map((id) => String(id).trim())
       .filter((id) => /^\d+$/.test(id))
       .map((id) => BigInt(id));
-    if (ids.length > 0) auditAnd.push({ automationRunId: { in: ids } });
+    if (ids.length > 0) {auditAnd.push({ automationRunId: { in: ids } });}
   }
 
   if (triggerSources && triggerSources.length > 0) {
@@ -1520,14 +1542,14 @@ function extractControlPointFromRawResult(
   rawResult: unknown,
   controlPointIndex: number
 ): AuditControlPointSummary | null {
-  if (!Number.isFinite(controlPointIndex) || controlPointIndex <= 0) return null;
-  if (!isRecord(rawResult)) return null;
+  if (!Number.isFinite(controlPointIndex) || controlPointIndex <= 0) {return null;}
+  if (!isRecord(rawResult)) {return null;}
 
   const points = rawResult.points_controle;
-  if (!Array.isArray(points) || points.length < controlPointIndex) return null;
+  if (!Array.isArray(points) || points.length < controlPointIndex) {return null;}
 
   const cp = points[controlPointIndex - 1];
-  if (!isRecord(cp)) return null;
+  if (!isRecord(cp)) {return null;}
 
   const point = typeof cp.point === "string" ? cp.point : "";
   const statut = typeof cp.statut === "string" ? cp.statut : "UNKNOWN";
@@ -1559,7 +1581,7 @@ export async function getAuditStepControlPointSummary(
     },
   });
 
-  if (!row) return null;
+  if (!row) {return null;}
 
   return extractControlPointFromRawResult(row.rawResult as unknown, controlPointIndex);
 }
@@ -1586,7 +1608,7 @@ export async function applyHumanReviewToAuditStepResult(
     },
   });
 
-  if (!existing) return null;
+  if (!existing) {return null;}
 
   const nowIso = new Date().toISOString();
 
@@ -1620,7 +1642,7 @@ export async function applyHumanReviewToAuditStepResult(
     history.push(reviewEntry);
     raw.human_review = history;
     nextRawResult = raw;
-  } else if (existing.rawResult == null) {
+  } else if (existing.rawResult === null || existing.rawResult === undefined) {
     // Keep it minimal if rawResult is missing.
     nextRawResult = { human_review: [reviewEntry] };
   } else {
@@ -1670,18 +1692,18 @@ export async function applyHumanReviewToAuditControlPoint(
     },
   });
 
-  if (!existing) return null;
-  if (!Number.isFinite(controlPointIndex) || controlPointIndex <= 0) return null;
+  if (!existing) {return null;}
+  if (!Number.isFinite(controlPointIndex) || controlPointIndex <= 0) {return null;}
 
   // We can only edit control points when rawResult is present and object-shaped.
-  if (!isRecord(existing.rawResult)) return null;
+  if (!isRecord(existing.rawResult)) {return null;}
 
   const raw = { ...(existing.rawResult as Record<string, unknown>) };
   const pointsRaw = raw.points_controle;
-  if (!Array.isArray(pointsRaw) || pointsRaw.length < controlPointIndex) return null;
+  if (!Array.isArray(pointsRaw) || pointsRaw.length < controlPointIndex) {return null;}
 
   const cpRaw = pointsRaw[controlPointIndex - 1];
-  if (!isRecord(cpRaw)) return null;
+  if (!isRecord(cpRaw)) {return null;}
 
   const previous = {
     point: typeof cpRaw.point === "string" ? cpRaw.point : "",
@@ -1774,7 +1796,7 @@ export async function getAuditComplianceInputs(
     },
   });
 
-  if (!audit) return null;
+  if (!audit) {return null;}
 
   return {
     auditId: audit.id,

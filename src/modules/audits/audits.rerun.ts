@@ -4,17 +4,27 @@
  * Allows re-running a single audit step with optional custom prompt
  */
 
-import { generateTimeline } from "./audits.timeline.js";
-import { buildTimelineText } from "./audits.prompts.js";
-import { analyzeStep } from "./audits.analyzer.js";
-import { getAuditById } from "./audits.repository.js";
-import { getRecordingsByFiche } from "../recordings/recordings.repository.js";
-import { getCachedFiche } from "../fiches/fiches.repository.js";
+import type { Prisma } from "@prisma/client";
+
+import type { Transcription, TranscriptionWord } from "../../schemas.js";
+import { COMPLIANCE_THRESHOLDS } from "../../shared/constants.js";
+import { logger } from "../../shared/logger.js";
+import { prisma } from "../../shared/prisma.js";
 import { enrichRecording } from "../../utils/recording-parser.js";
 import { getAuditConfigById } from "../audit-configs/audit-configs.repository.js";
-import { logger } from "../../shared/logger.js";
+import { getCachedFiche } from "../fiches/fiches.repository.js";
 import type { FicheDetailsResponse } from "../fiches/fiches.schemas.js";
-import type { Transcription, TranscriptionWord, TimelineRecording } from "../../schemas.js";
+import { getRecordingsByFiche } from "../recordings/recordings.repository.js";
+import { analyzeStep } from "./audits.analyzer.js";
+import type { AnalyzedAuditStepResult } from "./audits.evidence.js";
+import { validateAndGateAuditStepResults } from "./audits.evidence.js";
+import { buildTimelineText } from "./audits.prompts.js";
+import {
+  getAuditById,
+  getAuditComplianceInputs,
+  updateAuditComplianceSummary,
+} from "./audits.repository.js";
+import { generateTimeline } from "./audits.timeline.js";
 import type { AuditConfigForAnalysis, AuditStepDefinition, ProductLinkResult } from "./audits.types.js";
 
 export interface RerunStepOptions {
@@ -48,6 +58,74 @@ export interface RerunStepResult {
     rerunAt: string;
     durationMs: number;
     tokensUsed: number;
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Remove null bytes (\u0000) from strings so Postgres can store them safely.
+ */
+function sanitizeNullBytes(data: unknown): unknown {
+  if (data === null || data === undefined) {return data;}
+  // eslint-disable-next-line no-control-regex -- Intentionally remove null bytes for safe Postgres storage
+  if (typeof data === "string") {return data.replace(/\u0000/g, "");}
+  if (Array.isArray(data)) {return data.map((v) => sanitizeNullBytes(v));}
+  if (typeof data === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
+      out[k] = sanitizeNullBytes(v);
+    }
+    return out;
+  }
+  return data;
+}
+
+function computeAuditComplianceFromSteps(params: {
+  stepResults: Array<{ isCritical: boolean; weight: number; score: number; conforme: string }>;
+}): {
+  scorePercentage: number;
+  niveau: string;
+  isCompliant: boolean;
+  criticalPassed: number;
+  criticalTotal: number;
+} {
+  const totalWeight = params.stepResults.reduce(
+    (sum, s) => sum + Math.max(0, Number(s.weight)),
+    0
+  );
+  const earnedWeight = params.stepResults.reduce((sum, s) => {
+    const maxWeight = Math.max(0, Number(s.weight));
+    const rawScore = Number(s.score);
+    const capped = Math.min(Math.max(0, rawScore), maxWeight);
+    return sum + capped;
+  }, 0);
+  const score = totalWeight > 0 ? (earnedWeight / totalWeight) * 100 : 0;
+
+  const criticalTotal = params.stepResults.filter((s) => Boolean(s.isCritical)).length;
+  const criticalPassed = params.stepResults.filter(
+    (s) => Boolean(s.isCritical) && s.conforme === "CONFORME"
+  ).length;
+
+  let niveau = "INSUFFISANT";
+  if (criticalPassed < criticalTotal) {
+    niveau = "REJET";
+  } else if (score >= COMPLIANCE_THRESHOLDS.EXCELLENT) {
+    niveau = "EXCELLENT";
+  } else if (score >= COMPLIANCE_THRESHOLDS.BON) {
+    niveau = "BON";
+  } else if (score >= COMPLIANCE_THRESHOLDS.ACCEPTABLE) {
+    niveau = "ACCEPTABLE";
+  }
+
+  return {
+    scorePercentage: Number(score.toFixed(2)),
+    niveau,
+    isCompliant: niveau !== "REJET",
+    criticalPassed,
+    criticalTotal,
   };
 }
 
@@ -318,23 +396,59 @@ export async function rerunAuditStep(
     { timeline }
   );
 
+  // Evidence gating (deterministic) to avoid hallucinated citations being persisted.
+  const gatingEnabled = process.env.AUDIT_EVIDENCE_GATING !== "0";
+  const gated = gatingEnabled
+    ? validateAndGateAuditStepResults({
+        stepResults: [rerunResult as unknown as AnalyzedAuditStepResult],
+        timeline,
+        enabled: true,
+      }).stepResults[0]
+    : rerunResult;
+
   const duration = Date.now() - startTime;
 
   // 9. Compare results
-  const rerunCitations = rerunResult.points_controle.reduce(
-    (sum, pc) => sum + pc.citations.length,
-    0
-  );
+  const rerunCitations = (() => {
+    if (!isRecord(gated)) {return 0;}
+    const points = gated.points_controle;
+    if (!Array.isArray(points)) {return 0;}
+    return points.reduce((sum, pc) => {
+      if (!isRecord(pc)) {return sum;}
+      const citations = pc.citations;
+      return sum + (Array.isArray(citations) ? citations.length : 0);
+    }, 0);
+  })();
+
+  const newScore = (() => {
+    if (!isRecord(gated)) {return 0;}
+    const raw = gated.score;
+    const n = typeof raw === "number" ? raw : Number(raw);
+    return Number.isFinite(n) ? n : 0;
+  })();
+
+  const newConforme = (() => {
+    if (!isRecord(gated)) {return "UNKNOWN";}
+    const c = gated.conforme;
+    return typeof c === "string" ? c : "UNKNOWN";
+  })();
+
+  const tokensUsed = (() => {
+    if (!isRecord(gated)) {return 0;}
+    const usage = gated.usage;
+    if (!isRecord(usage)) {return 0;}
+    const total = usage.total_tokens;
+    return typeof total === "number" && Number.isFinite(total) ? total : 0;
+  })();
+
   const comparison = {
-    scoreChanged: originalStepResult.score !== rerunResult.score,
-    conformeChanged: originalStepResult.conforme !== rerunResult.conforme,
-    citationsChanged:
-      originalStepResult.totalCitations !==
-      rerunCitations,
+    scoreChanged: originalStepResult.score !== newScore,
+    conformeChanged: originalStepResult.conforme !== newConforme,
+    citationsChanged: originalStepResult.totalCitations !== rerunCitations,
     originalScore: originalStepResult.score,
-    newScore: rerunResult.score,
+    newScore,
     originalConforme: originalStepResult.conforme,
-    newConforme: rerunResult.conforme,
+    newConforme,
   };
 
   logger.info("Re-run complete", {
@@ -354,12 +468,12 @@ export async function rerunAuditStep(
       commentaire: originalStepResult.commentaireGlobal,
       citations: originalStepResult.totalCitations,
     },
-    rerunStep: rerunResult,
+    rerunStep: gated as RerunAnalyzedStep,
     comparison,
     metadata: {
       rerunAt: new Date().toISOString(),
       durationMs: duration,
-      tokensUsed: rerunResult.usage?.total_tokens || 0,
+      tokensUsed,
     },
   };
 }
@@ -370,25 +484,158 @@ export async function rerunAuditStep(
 export async function saveRerunResult(
   options: RerunStepOptions,
   rerunResult: RerunStepResult,
-  updateAudit: boolean = false
+  updateAudit: boolean = false,
+  meta?: { rerunId?: string | null; eventId?: string | null }
 ): Promise<{ saved: boolean; auditUpdated: boolean }> {
-  // TODO: Create a RerunHistory table to track step re-runs
-  // For now, if updateAudit is true, we'd need to:
-  // 1. Update the specific step result
-  // 2. Recalculate overall compliance
-  // 3. Create new audit version (version++)
+  const toPrismaJsonValue = (value: unknown): Prisma.InputJsonValue => {
+    const json: unknown = JSON.parse(JSON.stringify(sanitizeNullBytes(value)));
+    return json as Prisma.InputJsonValue;
+  };
 
-  if (updateAudit) {
-    logger.warn("Audit update not implemented (rerun)", {
-      audit_id: String(options.auditId),
+  const existing = await prisma.auditStepResult.findUnique({
+    where: {
+      auditId_stepPosition: {
+        auditId: options.auditId,
+        stepPosition: options.stepPosition,
+      },
+    },
+  });
+
+  if (!existing) {
+    logger.warn("Audit step result not found for rerun save", {
+      audit_id: options.auditId.toString(),
       step_position: options.stepPosition,
     });
+    return { saved: false, auditUpdated: false };
   }
 
-  return {
-    saved: true,
-    auditUpdated: false,
+  const nowIso = new Date().toISOString();
+  const customPrompt =
+    (options.customPrompt && options.customPrompt.trim()
+      ? options.customPrompt.trim()
+      : undefined) ??
+    (options.customInstructions && options.customInstructions.trim()
+      ? options.customInstructions.trim()
+      : undefined);
+
+  const step = rerunResult.rerunStep;
+  const points = Array.isArray(step?.points_controle) ? step.points_controle : [];
+  const totalCitations = points.reduce(
+    (sum: number, pc: unknown) =>
+      sum + (isRecord(pc) && Array.isArray(pc.citations) ? pc.citations.length : 0),
+    0
+  );
+
+  const rawScore = Number(step?.score ?? 0);
+  const maxWeight = Math.max(0, Number(existing.weight));
+  const score = Math.min(Math.max(0, Math.round(rawScore)), maxWeight);
+
+  const trailEntry = {
+    at: nowIso,
+    kind: "step_rerun",
+    rerun_id: meta?.rerunId ?? null,
+    event_id: meta?.eventId ?? null,
+    step_position: options.stepPosition,
+    custom_prompt: customPrompt ?? null,
+    previous: {
+      score: existing.score,
+      conforme: existing.conforme,
+      total_citations: existing.totalCitations,
+    },
+    next: {
+      score,
+      conforme: String(step?.conforme ?? existing.conforme),
+      total_citations: totalCitations,
+    },
   };
+
+  // Persist new LLM output but preserve any existing audit trails.
+  let nextRaw: Record<string, unknown>;
+  if (isRecord(step)) {
+    nextRaw = { ...(step as Record<string, unknown>) };
+  } else {
+    nextRaw = { result: step as unknown };
+  }
+
+  if (isRecord(existing.rawResult)) {
+    const prev = existing.rawResult as Record<string, unknown>;
+
+    // Preserve human review entries, if any.
+    if (prev.human_review !== undefined && nextRaw.human_review === undefined) {
+      nextRaw.human_review = prev.human_review;
+    }
+
+    const existingHistory = prev.rerun_history;
+    const history: unknown[] = Array.isArray(existingHistory)
+      ? [...existingHistory]
+      : existingHistory
+        ? [existingHistory]
+        : [];
+    history.push(trailEntry);
+    nextRaw.rerun_history = history;
+  } else {
+    nextRaw.rerun_history = [trailEntry];
+  }
+
+  await prisma.auditStepResult.update({
+    where: {
+      auditId_stepPosition: {
+        auditId: options.auditId,
+        stepPosition: options.stepPosition,
+      },
+    },
+    data: {
+      traite: Boolean(step?.traite),
+      conforme: String(sanitizeNullBytes(String(step?.conforme ?? existing.conforme))),
+      score,
+      niveauConformite: String(
+        sanitizeNullBytes(String(step?.niveau_conformite ?? existing.niveauConformite))
+      ),
+      commentaireGlobal: String(
+        sanitizeNullBytes(String(step?.commentaire_global ?? existing.commentaireGlobal))
+      ),
+      motsClesTrouves: Array.isArray(step?.mots_cles_trouves)
+        ? step.mots_cles_trouves
+            .filter((v: unknown): v is string => typeof v === "string")
+            .map((s: string) => String(sanitizeNullBytes(s)))
+        : existing.motsClesTrouves,
+      minutages: Array.isArray(step?.minutages)
+        ? step.minutages
+            .filter((v: unknown): v is string => typeof v === "string")
+            .map((s: string) => String(sanitizeNullBytes(s)))
+        : existing.minutages,
+      erreursTranscriptionTolerees: Number.isFinite(step?.erreurs_transcription_tolerees)
+        ? Math.max(0, Math.round(step.erreurs_transcription_tolerees))
+        : existing.erreursTranscriptionTolerees,
+      totalCitations,
+      totalTokens: Number(step?.usage?.total_tokens ?? existing.totalTokens) || 0,
+      rawResult: toPrismaJsonValue(nextRaw),
+    },
+  });
+
+  if (!updateAudit) {
+    return { saved: true, auditUpdated: false };
+  }
+
+  const complianceInputs = await getAuditComplianceInputs(options.auditId);
+  if (complianceInputs) {
+    const compliance = computeAuditComplianceFromSteps({
+      stepResults: complianceInputs.stepResults,
+    });
+    try {
+      await updateAuditComplianceSummary(options.auditId, compliance);
+    } catch (err) {
+      // Best-effort: do not block storing the rerun.
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logger.warn("Failed to update audit compliance after rerun", {
+        audit_id: options.auditId.toString(),
+        step_position: options.stepPosition,
+        error: errorMessage,
+      });
+    }
+  }
+
+  return { saved: true, auditUpdated: true };
 }
 
 

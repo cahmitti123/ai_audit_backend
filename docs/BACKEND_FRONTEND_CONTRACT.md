@@ -15,6 +15,78 @@ Those files are **not present** in this backend workspace, so this document is *
 
 ---
 
+## Frontend migration notes (2026-01-21+)
+
+This section is the **high-signal summary of changes** that typically require frontend updates.
+
+### 1) Audit IDs (tracking vs DB id)
+
+You will see two different “audit id” concepts:
+
+- **`audit_db_id`**: the Postgres `audits.id` (BigInt, serialized as a string).  
+  Use this for REST calls like `GET /api/audits/:audit_id`.
+- **`audit_id` (tracking id)**: a string like `audit-{fiche_id}-{audit_config_id}-{timestamp}` used for some realtime payloads.
+
+**What changed**:
+- Realtime payloads now often include **`audit_db_id`** (when known), so the UI can refetch details via `GET /api/audits/:audit_db_id`.
+- Channel routing may publish to **both** audit channels when both IDs exist:
+  - `private-audit-{audit_id}` (tracking id)
+  - `private-audit-{audit_db_id}` (DB id)
+
+**Frontend recommendation**:
+- Treat `audit_db_id` as canonical for navigation + REST.
+- When subscribing for realtime, prefer `private-audit-{audit_db_id}` whenever you have it.
+
+### 2) Reruns now mutate stored audits (important)
+
+**What changed**:
+- `POST /api/audits/:audit_id/steps/:step_position/rerun` now **updates** the stored step result (`audit_step_results`) and recomputes audit compliance summary (`audits.*` score/niveau/critical).
+- Control-point rerun now **patches** `audit_step_results.raw_result.points_controle[i]`, recomputes step score/conforme deterministically, and recomputes audit compliance summary.
+- Both store an audit trail in `audit_step_results.raw_result.rerun_history`.
+
+**Frontend recommendation**:
+- Treat rerun as **“run async then refetch”**:
+  - Start a spinner after the rerun HTTP call returns `{ event_id }`
+  - Wait for `audit.step_completed` with `rerun_id` (and optionally `rerun_scope`) on `private-audit-{audit_db_id}`
+  - Refetch `GET /api/audits/:audit_db_id` to render the updated stored results
+
+### 3) Automation run realtime (new Pusher events)
+
+Automation runs now emit dedicated Pusher events on a job channel:
+
+- **Channel**: `private-job-automation-run-{run_id}`  
+  (implemented as `private-job-{job_id}` where `job_id = "automation-run-{run_id}"`)
+- **Events**:
+  - `automation.run.started`
+  - `automation.run.selection`
+  - `automation.run.completed`
+  - `automation.run.failed`
+
+**Frontend recommendation**:
+- After triggering automation, subscribe to `private-job-automation-run-{run_id}` to display selection + completion status without polling.
+
+### 4) Batch audits require Redis
+
+`POST /api/audits/batch` now hard-requires Redis for progress/finalization.
+
+**Frontend recommendation**:
+- Handle `503 SERVICE_UNAVAILABLE` and show “Batch audits unavailable (Redis not configured)”.
+
+### 5) Optional API token auth (can gate all `/api/*`)
+
+If `API_AUTH_TOKEN` or `API_AUTH_TOKENS` is configured, then all `/api/*` requests (including Pusher auth + chat streaming endpoints) require either:
+
+- `Authorization: Bearer <token>` **or**
+- `X-API-Key: <token>`
+
+(`GET /health` and `/api-docs*` stay public; `/api/inngest` is excluded.)
+
+### 6) Webhook URL SSRF guard (automation + progressive fetch)
+
+User-provided webhook URLs are validated server-side. In production, invalid/unsafe webhook URLs are rejected (HTTP `400`) unless explicitly allowlisted via `WEBHOOK_ALLOWED_ORIGINS`.
+
+---
+
 ## Global HTTP behavior
 
 ### Base paths
@@ -76,8 +148,20 @@ Notes:
 
 ### Auth / permissions
 
-**No authentication or authorization middleware is enforced in routes.**  
-Assume **public access** to all endpoints unless you add auth.
+This backend does **not** implement user/org auth (no JWT/session/tenant membership checks).
+
+However, it supports an **optional API token** middleware:
+
+- If `API_AUTH_TOKEN` or `API_AUTH_TOKENS` is set, then **all** `/api/*` routes require a token:
+  - `Authorization: Bearer <token>` or `X-API-Key: <token>`
+- Exceptions:
+  - `/api/inngest` is excluded (Inngest uses its own signing)
+  - `/health` and `/api-docs*` are not under `/api` and remain public
+
+If you enable the API token, the frontend must attach the token to:
+- normal REST calls
+- `/api/realtime/pusher/auth`
+- chat streaming endpoints (`/api/*/chat`)
 
 ---
 
@@ -130,10 +214,11 @@ Below is the **full list** of routes defined in `src/modules/*/*.routes.ts` plus
 
 - **Purpose**: Get fiche “full details” from DB cache; may fetch full details from CRM if only minimal sales-list cache exists.
 - **Query**:
-  - `refresh=true` (optional) forces CRM refresh (requires fiche already cached to get `cle`)
+  - `refresh=true` (optional) forces refresh from the gateway/CRM (does not require a cached `cle`; gateway refreshes internally)
 - **Response 200**: returns the cached/full fiche payload (BigInt-safe). Shape matches `FicheDetailsResponse` in `src/modules/fiches/fiches.schemas.ts`.
 - **Errors**:
-  - `400` (`code=VALIDATION_ERROR`): if fiche is not in cache (message: *“Fetch via date range endpoint first to get cle.”*), or if `refresh=true` but `cle` is missing.
+  - `404`: fiche not found (gateway/CRM)
+  - `502`: gateway/CRM error while fetching fiche details
   - `500`: other internal errors.
 
 ### GET `/api/fiches/:fiche_id(\\d+)/cache`
@@ -737,6 +822,12 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
   - `customInstructions` (string; alias)
 - **Response 200**:
   - `{ success:true, message:"Step re-run queued", event_id, audit_id, step_position }`
+- **Behavior (important)**:
+  - The rerun runs asynchronously (Inngest).
+  - When it completes, the backend **persists the rerun into the stored audit**:
+    - updates `audit_step_results` for that step (including `raw_result`)
+    - recomputes audit-level compliance summary (`audits.*` score/niveau/critical)
+  - Frontend should refetch `GET /api/audits/:audit_id` after receiving `audit.step_completed` with `rerun_id`.
 - **Errors**:
   - `400`: invalid step_position
 
@@ -754,6 +845,10 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
   - `{ success:true, message:"Control point re-run queued", event_id, audit_id, step_position, control_point_index }`
 - **Notes**:
   - Rebuilds transcript context from DB + includes previous control point result in the rerun prompt for better contextualisation.
+  - On completion, the backend **updates the stored audit** by patching `raw_result.points_controle[i]` and recomputing step score/conforme deterministically (then recomputes audit compliance summary).
+  - Realtime uses `audit.step_started` / `audit.step_completed` with `rerun_id` and:
+    - `rerun_scope: "control_point"`
+    - `control_point_index`
 - **Errors**:
   - `400`: invalid `step_position` or `control_point_index`
 
@@ -935,6 +1030,9 @@ Important: `POST /api/products/gammes` and `POST /api/products/formules` accept 
 ### GET `/api/audits/:audit_id/chat/history`
 
 - **Response 200**: `{ success:true, data:{ conversationId, ficheId, auditId, messages, messageCount } }`
+- **Note**:
+  - Returns the **most recent ~50 messages** for the conversation (DB query is `take: 50`), so the frontend should treat this as a window, not the full history.
+  - Messages are returned in chronological order (oldest → newest).
 
 ### POST `/api/audits/:audit_id/chat`
 ### POST `/api/fiches/:fiche_id/chat`
@@ -974,17 +1072,25 @@ This backend can publish realtime events via **Pusher Channels**.
   - Setup + overview: `docs/REALTIME.md`
   - Frontend event catalog: `docs/FRONTEND_PUSHER_EVENTS.md`
 - **Channels**:
-  - `private-audit-{auditId}`
+  - `private-audit-{auditId}` (may be tracking id or DB id)
+    - When payload contains `audit_db_id`, the backend may also publish to `private-audit-{audit_db_id}` for easy “notify → refetch”.
   - `private-fiche-{ficheId}`
-  - `private-job-{jobId}`
+  - `private-job-{jobId}` (derived from `jobId` or `job_id` in the payload)
+    - Progressive fetch uses a job id like `ck...`
+    - Automation runs use `job_id = "automation-run-{run_id}"` → channel `private-job-automation-run-{run_id}`
+    - Batch uses `batch_id` which is routed to `private-job-{batch_id}`
   - `private-global` (batch + notification + any unscoped events)
-- **Event names**: identical to existing webhook/SSE event names (e.g. `audit.progress`, `transcription.completed`, `fiches.progressive_fetch.progress`)
+- **Event names**: mostly identical to existing webhook/SSE event names (e.g. `audit.progress`, `transcription.completed`, `fiches.progressive_fetch.progress`)
+  - New: automation emits `automation.run.*` events for run-level UX (`started|selection|completed|failed`).
 - **Payloads**: Pusher publishes the existing **domain payload object** (the same object that used to live under `.data` in system webhook payloads / SSE envelopes). No additional wrapper is added.
 
 ### POST `/api/realtime/pusher/auth`
 
 - **Purpose**: sign subscriptions for **private/presence** channels (Pusher JS `authEndpoint`).
-- **Auth**: **no auth enforced today** (backend is public). The endpoint only validates channel naming.
+- **Auth**:
+  - If API token auth is **disabled**, this endpoint is public and only validates channel naming.
+  - If API token auth is **enabled**, you must include `Authorization: Bearer <token>` (or `X-API-Key`) or you will receive `401`.
+  - Note: this is **not user membership validation**; it’s only a shared-token gate + naming allowlist.
 - **Body**:
 
 ```json
@@ -1138,7 +1244,11 @@ export type RealtimeEventName =
   | "fiches.progressive_fetch.created"
   | "fiches.progressive_fetch.progress"
   | "fiches.progressive_fetch.complete"
-  | "fiches.progressive_fetch.failed";
+  | "fiches.progressive_fetch.failed"
+  | "automation.run.started"
+  | "automation.run.selection"
+  | "automation.run.completed"
+  | "automation.run.failed";
 
 // --------------------------------------------
 // Progressive fetch webhooks (/api/fiches/status/by-date-range?webhookUrl=...)
@@ -1212,6 +1322,130 @@ export type ProgressiveFetchPusherTerminalPayload = {
   datesCompleted: ISODateString[];
   datesRemaining: [];
   datesFailed: ISODateString[];
+};
+
+// --------------------------------------------
+// Automation (REST + realtime)
+// --------------------------------------------
+
+export type AutomationFicheSelectionDto = {
+  mode: "date_range" | "manual" | "filter";
+  dateRange?: "last_24h" | "yesterday" | "last_week" | "last_month" | "custom";
+  customStartDate?: ISODateString;
+  customEndDate?: ISODateString;
+  groupes?: string[];
+  onlyWithRecordings?: boolean;
+  onlyUnaudited?: boolean;
+  useRlm?: boolean;
+  maxFiches?: number;
+  maxRecordingsPerFiche?: number;
+  ficheIds?: string[];
+};
+
+export type AutomationScheduleDto = {
+  id: string;
+  name: string;
+  description: string | null;
+  isActive: boolean;
+  createdBy: string | null;
+  createdAt: ISODateTimeString;
+  updatedAt: ISODateTimeString;
+  scheduleType: "MANUAL" | "DAILY" | "WEEKLY" | "MONTHLY" | "CRON";
+  cronExpression: string | null;
+  timezone: string;
+  timeOfDay: string | null;
+  dayOfWeek: number | null;
+  dayOfMonth: number | null;
+  ficheSelection: AutomationFicheSelectionDto;
+  runTranscription: boolean;
+  skipIfTranscribed: boolean;
+  transcriptionPriority: string;
+  runAudits: boolean;
+  useAutomaticAudits: boolean;
+  specificAuditConfigs: number[];
+  continueOnError: boolean;
+  retryFailed: boolean;
+  maxRetries: number;
+  notifyOnComplete: boolean;
+  notifyOnError: boolean;
+  webhookUrl: string | null;
+  notifyEmails: string[];
+  externalApiKey: string | null;
+  lastRunAt: ISODateTimeString | null;
+  lastRunStatus: string | null;
+  totalRuns: number;
+  successfulRuns: number;
+  failedRuns: number;
+};
+
+export type AutomationRunDto = {
+  id: string;
+  scheduleId: string;
+  status: string;
+  startedAt: ISODateTimeString;
+  completedAt: ISODateTimeString | null;
+  durationMs: number | null;
+  totalFiches: number;
+  successfulFiches: number;
+  failedFiches: number;
+  transcriptionsRun: number;
+  auditsRun: number;
+  errorMessage: string | null;
+  errorDetails: unknown | null;
+  configSnapshot: unknown;
+  resultSummary: unknown | null;
+};
+
+// Realtime: automation run events are published on `private-job-automation-run-{run_id}`
+// (payload contains `job_id: "automation-run-{run_id}"`).
+
+export type AutomationRunStartedPusherPayload = {
+  job_id: string;
+  schedule_id: string;
+  run_id: string;
+  due_at: ISODateTimeString | null;
+  status: "running";
+};
+
+export type AutomationRunSelectionPusherPayload = {
+  job_id: string;
+  schedule_id: string;
+  run_id: string;
+  mode: "date_range" | "manual" | "filter";
+  dateRange: string | null;
+  groupes?: string[];
+  groupes_count: number;
+  onlyWithRecordings: boolean;
+  onlyUnaudited: boolean;
+  maxFiches: number | null;
+  maxRecordingsPerFiche: number | null;
+  useRlm: boolean;
+  total_fiches: number;
+};
+
+export type AutomationRunCompletedPusherPayload = {
+  job_id: string;
+  schedule_id: string;
+  run_id: string;
+  status: "completed" | "partial" | "failed";
+  total_fiches: number;
+  successful_fiches: number;
+  failed_fiches: number;
+  ignored_fiches?: number;
+  transcriptions_run?: number;
+  audits_run?: number;
+  duration_ms?: number;
+  // Present for early returns (no fiches, no dates, etc.)
+  reason?: string;
+};
+
+export type AutomationRunFailedPusherPayload = {
+  job_id: string;
+  schedule_id: string;
+  run_id: string;
+  status: "failed";
+  error: string;
+  duration_ms: number;
 };
 
 // --------------------------------------------

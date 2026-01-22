@@ -10,23 +10,22 @@
  * LAYER: Business Logic / Orchestration
  */
 
-import type {
-  FicheStatus,
-  RecordingStatus,
-  AuditStatusRecord,
-  SalesFiche,
-  SalesWithCallsResponse,
-  SalesResponseWithStatus,
-  DateRangeStatusResponse,
-  ProgressiveDateRangeResponse,
-} from "./fiches.schemas.js";
-import * as fichesRepository from "./fiches.repository.js";
-import * as fichesApi from "./fiches.api.js";
-import * as fichesCache from "./fiches.cache.js";
-import * as fichesRevalidation from "./fiches.revalidation.js";
 import { logger } from "../../shared/logger.js";
 import { prisma } from "../../shared/prisma.js";
 import { publishPusherEvent } from "../../shared/pusher.js";
+import * as fichesApi from "./fiches.api.js";
+import * as fichesCache from "./fiches.cache.js";
+import * as fichesRepository from "./fiches.repository.js";
+import * as fichesRevalidation from "./fiches.revalidation.js";
+import type {
+  AuditStatusRecord,
+  DateRangeStatusResponse,
+  FicheStatus,
+  ProgressiveDateRangeResponse,
+  RecordingStatus,
+  SalesResponseWithStatus,
+  SalesWithCallsResponse,
+} from "./fiches.schemas.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UTILITY HELPERS
@@ -174,13 +173,13 @@ export async function getFicheStatus(ficheId: string) {
  * Get status for multiple fiches
  */
 export async function getFichesStatus(ficheIds: string[]) {
-  const fichesCache = await fichesRepository.getFichesWithStatus(ficheIds);
+  const ficheRows = await fichesRepository.getFichesWithStatus(ficheIds);
 
   // Create a map of ficheId to status
   const statusMap: Record<string, FicheStatus> = {};
 
   for (const ficheId of ficheIds) {
-    const ficheCache = fichesCache.find((f) => f.ficheId === ficheId);
+    const ficheCache = ficheRows.find((f) => f.ficheId === ficheId);
 
     if (!ficheCache) {
       statusMap[ficheId] = createDefaultStatus();
@@ -205,13 +204,13 @@ export async function getFichesByDateWithStatus(date: string) {
   const startDate = new Date(date + "T00:00:00.000Z");
   const endDate = new Date(date + "T23:59:59.999Z");
 
-  const fichesCache = await fichesRepository.getFichesByDateRange(
+  const ficheRows = await fichesRepository.getFichesByDateRange(
     startDate,
     endDate
   );
 
   // Transform to status-focused format
-  const fichesWithStatus = fichesCache.map((ficheCache) => {
+  const fichesWithStatus = ficheRows.map((ficheCache) => {
     const transcriptionStatus = calculateTranscriptionStatus(
       ficheCache.recordings
     );
@@ -310,9 +309,9 @@ export async function getFichesByDateRangeWithStatus(
   const start = new Date(startDate + "T00:00:00.000Z");
   const end = new Date(endDate + "T23:59:59.999Z");
 
-  const fichesCache = await fichesRepository.getFichesByDateRange(start, end);
+  const ficheRows = await fichesRepository.getFichesByDateRange(start, end);
 
-  const fichesWithStatus = fichesCache.map((ficheCache) => {
+  const fichesWithStatus = ficheRows.map((ficheCache) => {
     const transcriptionStatus = calculateTranscriptionStatus(
       ficheCache.recordings
     );
@@ -503,11 +502,6 @@ export async function getFichesByDateRangeProgressive(
     ) => Promise<void>;
   }
 ): Promise<ProgressiveDateRangeResponse> {
-  // Create Date objects for legacy compatibility (some functions still expect Date objects)
-  // Use UTC to avoid timezone issues
-  const start = new Date(startDate + "T00:00:00.000Z");
-  const end = new Date(endDate + "T23:59:59.999Z");
-
   logger.info("Starting progressive fetch", { startDate, endDate });
   const forceRefresh = options?.forceRefresh === true;
 

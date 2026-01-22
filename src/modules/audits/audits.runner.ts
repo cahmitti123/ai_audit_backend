@@ -4,30 +4,32 @@
  * Orchestrates the complete audit pipeline
  */
 
-import { writeFileSync, mkdirSync, existsSync } from "fs";
-import { TranscriptionService } from "../transcriptions/transcriptions.elevenlabs.js";
-import { generateTimeline } from "./audits.timeline.js";
-import { analyzeAllSteps } from "./audits.analyzer.js";
-import { buildTimelineText } from "./audits.prompts.js";
+import "dotenv/config";
+
+import { existsSync,mkdirSync, writeFileSync } from "fs";
+
+import type { TimelineRecording } from "../../schemas.js";
+import {
+  COMPLIANCE_THRESHOLDS,
+} from "../../shared/constants.js";
+import { logger } from "../../shared/logger.js";
+import { enrichRecording } from "../../utils/recording-parser.js";
 import {
   getAuditConfigById,
   getLatestActiveConfig,
 } from "../audit-configs/audit-configs.repository.js";
-import { enrichRecording } from "../../utils/recording-parser.js";
-import { getCachedFiche } from "../fiches/fiches.repository.js";
-import { cacheFicheDetails } from "../fiches/fiches.cache.js";
 import { fetchFicheDetails } from "../fiches/fiches.api.js";
-import { saveAuditResult } from "./audits.repository.js";
+import { cacheFicheDetails } from "../fiches/fiches.cache.js";
+import { getCachedFiche } from "../fiches/fiches.repository.js";
+import type { FicheDetailsResponse } from "../fiches/fiches.schemas.js";
 import { updateRecordingTranscription } from "../recordings/recordings.repository.js";
-import {
-  COMPLIANCE_THRESHOLDS,
-  TIMELINE_CHUNK_SIZE,
-} from "../../shared/constants.js";
-import { logger } from "../../shared/logger.js";
-import "dotenv/config";
-import { FicheDetailsResponse } from "../fiches/fiches.schemas.js";
-import type { TimelineRecording } from "../../schemas.js";
+import { TranscriptionService } from "../transcriptions/transcriptions.elevenlabs.js";
+import { analyzeAllSteps } from "./audits.analyzer.js";
+import { buildTimelineText } from "./audits.prompts.js";
+import { saveAuditResult } from "./audits.repository.js";
+import { generateTimeline } from "./audits.timeline.js";
 import type { AuditConfigForAnalysis, ProductLinkResult } from "./audits.types.js";
+
 const DATA_DIR = "./data";
 
 type AuditAnalysisResults = Awaited<ReturnType<typeof analyzeAllSteps>>;
@@ -56,13 +58,13 @@ function enrichCitationsWithMetadata(
 
   // Iterate through all steps and their control points
   for (const step of auditResults.steps) {
-    if (!("points_controle" in step)) continue;
+    if (!("points_controle" in step)) {continue;}
     const points = (step as { points_controle?: unknown }).points_controle;
-    if (!Array.isArray(points)) continue;
+    if (!Array.isArray(points)) {continue;}
 
     for (const controlPoint of points) {
       const citations = (controlPoint as { citations?: unknown }).citations;
-      if (!Array.isArray(citations)) continue;
+      if (!Array.isArray(citations)) {continue;}
 
       for (const citation of citations as Array<{ recording_index: number; recording_date?: string; recording_time?: string; recording_url?: string }>) {
         // Look up recording metadata using recording_index
@@ -188,16 +190,10 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
       logger.warn("Cached data is sales list only; fetching full details", {
         fiche_id: options.ficheId,
       });
-      const cle = ficheData.cle;
-      if (!cle) {
-        throw new Error(
-          `Cannot fetch fiche ${options.ficheId}: missing cle parameter`
-        );
-      }
 
       // Note: Product verification check will happen after config is loaded
       // For now, fetch without mail_devis (will refetch later if needed)
-      ficheData = await fetchFicheDetails(options.ficheId, cle);
+      ficheData = await fetchFicheDetails(options.ficheId);
       const refreshedCache = await cacheFicheDetails(ficheData as FicheDetailsResponse);
       ficheCacheId = refreshedCache.id;
       logger.info("Fiche refreshed with full details", {
@@ -206,9 +202,10 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
       });
     }
   } else {
-    throw new Error(
-      `Fiche ${options.ficheId} not found in cache. Fetch via date range endpoint first to get cle.`
-    );
+    logger.info("Cache miss; fetching fiche details from API", { fiche_id: options.ficheId });
+    ficheData = await fetchFicheDetails(options.ficheId);
+    const refreshedCache = await cacheFicheDetails(ficheData as FicheDetailsResponse);
+    ficheCacheId = refreshedCache.id;
   }
 
   if (!ficheData.information) {
@@ -237,7 +234,7 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
   let auditConfig: AuditConfigForAnalysis;
   if (options.useLatest) {
     const latest = await getLatestActiveConfig();
-    if (!latest) throw new Error("No active audit configuration found");
+    if (!latest) {throw new Error("No active audit configuration found");}
     auditConfig = {
       id: latest.id.toString(),
       name: latest.name,
@@ -250,7 +247,7 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
       throw new Error("auditConfigId required when useLatest is false");
     }
     const config = await getAuditConfigById(BigInt(options.auditConfigId));
-    if (!config) throw new Error(`Audit config ${options.auditConfigId} not found`);
+    if (!config) {throw new Error(`Audit config ${options.auditConfigId} not found`);}
     auditConfig = {
       id: config.id.toString(),
       name: config.name,
@@ -389,7 +386,7 @@ export async function runAudit(options: AuditOptions): Promise<AuditResult> {
   // Cap each step's score at its maximum weight
   const earnedWeight = auditResults.steps.reduce((sum, s) => {
     const score = (s as { score?: unknown }).score;
-    if (typeof score !== "number") return sum;
+    if (typeof score !== "number") {return sum;}
     const metaWeight = (s as { step_metadata?: { weight?: unknown } }).step_metadata?.weight;
     const maxWeight = typeof metaWeight === "number" ? metaWeight : score;
     return sum + Math.min(score, maxWeight);

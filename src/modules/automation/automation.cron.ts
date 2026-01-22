@@ -57,9 +57,9 @@ export function cronMatches(
     dayOfWeek: number; // 0-6 (Sun-Sat)
   }
 ): boolean {
-  if (!spec.minute.matches(parts.minute)) return false;
-  if (!spec.hour.matches(parts.hour)) return false;
-  if (!spec.month.matches(parts.month)) return false;
+  if (!spec.minute.matches(parts.minute)) {return false;}
+  if (!spec.hour.matches(parts.hour)) {return false;}
+  if (!spec.month.matches(parts.month)) {return false;}
 
   const domAny = spec.dayOfMonth.isAny;
   const dowAny = spec.dayOfWeek.isAny;
@@ -67,9 +67,9 @@ export function cronMatches(
   const domMatches = spec.dayOfMonth.matches(parts.dayOfMonth);
   const dowMatches = spec.dayOfWeek.matches(parts.dayOfWeek);
 
-  if (domAny && dowAny) return true;
-  if (domAny && !dowAny) return dowMatches;
-  if (!domAny && dowAny) return domMatches;
+  if (domAny && dowAny) {return true;}
+  if (domAny && !dowAny) {return dowMatches;}
+  if (!domAny && dowAny) {return domMatches;}
   // Both restricted -> OR semantics
   return domMatches || dowMatches;
 }
@@ -89,17 +89,17 @@ function parseCronField(
 
   const addValue = (v: number) => {
     let value = v;
-    if (options?.allow7ForSunday && max === 7 && value === 7) value = 0;
-    if (value < min || value > max) return;
+    if (options?.allow7ForSunday && max === 7 && value === 7) {value = 0;}
+    if (value < min || value > max) {return;}
     // Normalize 7->0 for day-of-week when applicable
-    if (options?.allow7ForSunday && max === 7 && value === 7) value = 0;
+    if (options?.allow7ForSunday && max === 7 && value === 7) {value = 0;}
     allowed.add(value);
   };
 
   const addRange = (start: number, end: number, step = 1) => {
     const s = Math.max(min, start);
     const e = Math.min(max, end);
-    for (let v = s; v <= e; v += step) addValue(v);
+    for (let v = s; v <= e; v += step) {addValue(v);}
   };
 
   const tokens = raw.split(",").map((t) => t.trim()).filter(Boolean);

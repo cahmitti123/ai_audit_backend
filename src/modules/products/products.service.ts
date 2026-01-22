@@ -4,15 +4,15 @@
  * Business logic for insurance products
  */
 
-import * as productsRepository from "./products.repository.js";
 import { NotFoundError, ValidationError } from "../../shared/errors.js";
+import * as productsRepository from "./products.repository.js";
 import type {
-  CreateGroupe,
-  CreateGamme,
   CreateFormule,
-  UpdateGroupe,
-  UpdateGamme,
+  CreateGamme,
+  CreateGroupe,
   UpdateFormule,
+  UpdateGamme,
+  UpdateGroupe,
 } from "./products.schemas.js";
 
 // ============================================

@@ -12,8 +12,10 @@ This repo includes:
 1. Create `.env`:
 
 ```bash
-cp .env.docker.example .env
+cp .env.example .env
 ```
+
+Env variable reference: `docs/env.md`.
 
 2. Start:
 
@@ -81,9 +83,11 @@ cd /opt
 git clone <YOUR_REPO_URL> ai-audit
 cd ai-audit
 
-cp .env.production.example .env.production
+cp .env.example .env.production
 nano .env.production
 ```
+
+Env variable reference: `docs/env.md`.
 
 Fill in at least:
 

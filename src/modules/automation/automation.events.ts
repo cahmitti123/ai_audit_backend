@@ -16,6 +16,9 @@ export type AutomationEvents = {
   "automation/run": {
     schedule_id: number | string;
     override_fiche_selection?: FicheSelection;
+    // Optional: when dispatched by the scheduler, this is the computed due time (ISO string).
+    // Used to correlate and to mark schedules as "running" at the correct scheduled time.
+    due_at?: string;
   };
 
   /**

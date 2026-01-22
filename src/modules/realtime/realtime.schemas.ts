@@ -5,8 +5,9 @@
  */
 
 import { z } from "zod";
-import { logger } from "../../shared/logger.js";
+
 import { ValidationError } from "../../shared/errors.js";
+import { logger } from "../../shared/logger.js";
 
 export const pusherAuthInputSchema = z.object({
   socket_id: z.string().trim().min(1),

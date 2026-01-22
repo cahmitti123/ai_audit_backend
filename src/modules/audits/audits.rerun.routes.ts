@@ -4,12 +4,13 @@
  * API endpoints for re-running individual audit steps
  */
 
-import { Router, type Request, type Response } from "express";
-import { logger } from "../../shared/logger.js";
-import { jsonResponse } from "../../shared/bigint-serializer.js";
+import { type Request, type Response,Router } from "express";
+
 import { inngest } from "../../inngest/client.js";
 import { asyncHandler } from "../../middleware/async-handler.js";
+import { jsonResponse } from "../../shared/bigint-serializer.js";
 import { ValidationError } from "../../shared/errors.js";
+import { logger } from "../../shared/logger.js";
 
 export const auditRerunRouter = Router();
 
@@ -92,7 +93,13 @@ export const auditRerunRouter = Router();
 auditRerunRouter.post(
   "/:audit_id/steps/:step_position/rerun",
   asyncHandler(async (req: Request, res: Response) => {
-    const auditId = req.params.audit_id;
+    const auditIdRaw = req.params.audit_id;
+    let auditId = "";
+    try {
+      auditId = BigInt(auditIdRaw).toString();
+    } catch {
+      throw new ValidationError("Invalid audit_id");
+    }
     const stepPosition = Number.parseInt(req.params.step_position, 10);
 
     if (!Number.isFinite(stepPosition) || stepPosition <= 0) {
@@ -214,7 +221,13 @@ auditRerunRouter.post(
 auditRerunRouter.post(
   "/:audit_id/steps/:step_position/control-points/:control_point_index/rerun",
   asyncHandler(async (req: Request, res: Response) => {
-    const auditId = req.params.audit_id;
+    const auditIdRaw = req.params.audit_id;
+    let auditId = "";
+    try {
+      auditId = BigInt(auditIdRaw).toString();
+    } catch {
+      throw new ValidationError("Invalid audit_id");
+    }
     const stepPosition = Number.parseInt(req.params.step_position, 10);
     const controlPointIndex = Number.parseInt(req.params.control_point_index, 10);
 

@@ -10,15 +10,15 @@
  * LAYER: Orchestration
  */
 
-import { logger } from "../../shared/logger.js";
-import { CACHE_EXPIRATION_HOURS } from "../../shared/constants.js";
-import { enrichRecording, type RecordingLike } from "../../utils/recording-parser.js";
-import type { FicheDetailsResponse } from "./fiches.schemas.js";
-import * as fichesRepository from "./fiches.repository.js";
-import * as fichesApi from "./fiches.api.js";
-import { prisma } from "../../shared/prisma.js";
 import type { Prisma } from "@prisma/client";
-import { ValidationError } from "../../shared/errors.js";
+
+import { CACHE_EXPIRATION_HOURS } from "../../shared/constants.js";
+import { logger } from "../../shared/logger.js";
+import { prisma } from "../../shared/prisma.js";
+import { enrichRecording, type RecordingLike } from "../../utils/recording-parser.js";
+import * as fichesApi from "./fiches.api.js";
+import * as fichesRepository from "./fiches.repository.js";
+import type { FicheDetailsResponse } from "./fiches.schemas.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -27,17 +27,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
   const json: unknown = JSON.parse(JSON.stringify(value));
   return json as Prisma.InputJsonValue;
-}
-
-function getCleFromRawData(rawData: Record<string, unknown>): string | null {
-  const cle = rawData.cle;
-  if (typeof cle === "string" && cle) return cle;
-  const info = rawData.information;
-  if (isRecord(info)) {
-    const cle2 = info.cle;
-    if (typeof cle2 === "string" && cle2) return cle2;
-  }
-  return null;
 }
 
 /**
@@ -58,8 +47,8 @@ export async function getFicheWithCache(
     const rawData = cached.rawData;
     const isExpired = cached.expiresAt <= new Date();
 
-    // If cache is minimal (sales list only) OR expired, we can still refresh using `cle`
-    // from cached rawData. Expiration is a "freshness" hint, not a hard requirement.
+    // If cache is minimal (sales list only) OR expired, refresh from API.
+    // Expiration is a "freshness" hint, not a hard requirement.
     if (rawData._salesListOnly === true || isExpired) {
       logger.info(
         rawData._salesListOnly === true
@@ -74,34 +63,37 @@ export async function getFicheWithCache(
         }
       );
 
-      const cle = getCleFromRawData(rawData);
-      if (!cle) {
-        logger.error("No cle found in cached data", { fiche_id: ficheId });
+      try {
+        const ficheData = await fichesApi.fetchFicheDetails(ficheId);
 
-        // If we have full details but no cle, return stale cached data rather than failing.
+        // Best-effort cache write: even if DB is temporarily unavailable,
+        // return the fetched fiche details to the caller.
+        try {
+          await cacheFicheDetails(ficheData, { salesDate: cached.salesDate || undefined });
+        } catch (persistErr) {
+          logger.error("Failed to persist refreshed fiche to cache; returning data anyway", {
+            fiche_id: ficheId,
+            error: persistErr instanceof Error ? persistErr.message : String(persistErr),
+          });
+        }
+
+        return ficheData;
+      } catch (err) {
+        // If we already have full details in cache, prefer returning stale cached data over failing.
         if (rawData._salesListOnly !== true) {
+          logger.warn("Failed to refresh fiche; returning cached data", {
+            fiche_id: ficheId,
+            error: err instanceof Error ? err.message : String(err),
+          });
           return cached.rawData as unknown as FicheDetailsResponse;
         }
 
-        throw new ValidationError(
-          `Cannot fetch fiche ${ficheId}: missing cle parameter in cached data`
-        );
-      }
-
-      const ficheData = await fichesApi.fetchFicheDetails(ficheId, cle);
-
-      // Best-effort cache write: even if DB is temporarily unavailable,
-      // return the fetched fiche details to the caller.
-      try {
-        await cacheFicheDetails(ficheData, { salesDate: cached.salesDate || undefined });
-      } catch (err) {
-        logger.error("Failed to persist refreshed fiche to cache; returning data anyway", {
+        logger.error("Failed to fetch fiche details (cache miss/incomplete cache)", {
           fiche_id: ficheId,
           error: err instanceof Error ? err.message : String(err),
         });
+        throw err;
       }
-
-      return ficheData;
     }
 
     logger.debug("Fiche retrieved from cache (full details)", {
@@ -114,10 +106,20 @@ export async function getFicheWithCache(
 
   logger.info("Cache miss, fetching from API", { fiche_id: ficheId });
 
-  // Cannot fetch without cle - fiches should come from sales list first
-  throw new ValidationError(
-    `Fiche ${ficheId} not found in cache. Fetch via date range endpoint first to get cle.`
-  );
+  const ficheData = await fichesApi.fetchFicheDetails(ficheId);
+
+  // Best-effort cache write: even if DB is temporarily unavailable,
+  // return the fetched fiche details to the caller.
+  try {
+    await cacheFicheDetails(ficheData);
+  } catch (err) {
+    logger.error("Failed to persist fetched fiche to cache; returning data anyway", {
+      fiche_id: ficheId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  return ficheData;
 }
 
 /**
@@ -129,28 +131,14 @@ export async function refreshFicheFromApi(ficheId: string) {
     fiche_id: ficheId,
   });
 
-  // Get cached data to extract cle
   const cached = await fichesRepository.getCachedFiche(ficheId);
 
-  if (!cached) {
-    throw new ValidationError(`Cannot refresh fiche ${ficheId}: not in cache`);
-  }
-
-  const rawData = cached.rawData;
-  const cle = getCleFromRawData(rawData);
-
-  if (!cle) {
-    throw new ValidationError(
-      `Cannot refresh fiche ${ficheId}: missing cle parameter`
-    );
-  }
-
-  // Always fetch from API with cle
-  const ficheData = await fichesApi.fetchFicheDetails(ficheId, cle);
+  // Fetch from API (gateway handles `cle` refresh internally)
+  const ficheData = await fichesApi.fetchFicheDetails(ficheId);
 
   // Update cache
   await cacheFicheDetails(ficheData, {
-    salesDate: cached.salesDate || undefined,
+    salesDate: cached?.salesDate || undefined,
   });
 
   logger.info("Fiche refreshed and cached successfully", {
@@ -252,7 +240,7 @@ export async function cacheFicheDetails(
 export async function cacheFicheSalesSummary(
   ficheData: {
     id: string;
-    cle: string; // Security key - required for fetching full details later
+    cle?: string | null; // Security key (optional; gateway can refresh internally)
     nom: string;
     prenom: string;
     email: string;
@@ -301,7 +289,7 @@ export async function cacheFicheSalesSummary(
 
   const summaryRawData = {
     id: ficheData.id,
-    cle: ficheData.cle, // ← IMPORTANT: Store cle for later detail fetching
+    cle: typeof ficheData.cle === "string" && ficheData.cle ? ficheData.cle : null,
     nom: ficheData.nom,
     prenom: ficheData.prenom,
     telephone: ficheData.telephone,
@@ -322,10 +310,12 @@ export async function cacheFicheSalesSummary(
       ? (() => {
           // Preserve existing full details.
           const merged: Record<string, unknown> = { ...existingRaw };
-          merged.cle = ficheData.cle;
-          const info = merged.information;
-          if (isRecord(info)) {
-            info.cle = ficheData.cle;
+          if (typeof ficheData.cle === "string" && ficheData.cle) {
+            merged.cle = ficheData.cle;
+            const info = merged.information;
+            if (isRecord(info)) {
+              info.cle = ficheData.cle;
+            }
           }
           return merged;
         })()

@@ -10,23 +10,25 @@
  * LAYER: Presentation (HTTP)
  */
 
-import { Router, type Request, type Response } from "express";
+import { type Request, type Response,Router } from "express";
+
 import { inngest } from "../../inngest/client.js";
-import * as auditsService from "./audits.service.js";
-import {
-  validateRunAuditInput,
-  validateBatchAuditInput,
-  parseListAuditsQuery,
-  type ListAuditsQuery,
-  validateReviewAuditStepResultInput,
-  validateReviewAuditControlPointInput,
-  validateUpdateAuditInput,
-  controlPointStatutEnum,
-} from "./audits.schemas.js";
-import { jsonResponse } from "../../shared/bigint-serializer.js";
-import { logger } from "../../shared/logger.js";
 import { asyncHandler } from "../../middleware/async-handler.js";
-import { ValidationError } from "../../shared/errors.js";
+import { jsonResponse } from "../../shared/bigint-serializer.js";
+import { AppError, ValidationError } from "../../shared/errors.js";
+import { logger } from "../../shared/logger.js";
+import { getRedisClient } from "../../shared/redis.js";
+import {
+  controlPointStatutEnum,
+  type ListAuditsQuery,
+  parseListAuditsQuery,
+  validateBatchAuditInput,
+  validateReviewAuditControlPointInput,
+  validateReviewAuditStepResultInput,
+  validateRunAuditInput,
+  validateUpdateAuditInput,
+} from "./audits.schemas.js";
+import * as auditsService from "./audits.service.js";
 
 export const auditsRouter = Router();
 
@@ -239,25 +241,20 @@ auditsRouter.post(
         ? (body as Record<string, unknown>)
         : {};
 
+    const useRlmRaw = Object.prototype.hasOwnProperty.call(data, "use_rlm")
+      ? data.use_rlm
+      : Object.prototype.hasOwnProperty.call(data, "useRlm")
+        ? data.useRlm
+        : undefined;
+
     // Backwards-compatible: accept either `audit_id` (legacy) or `audit_config_id` (preferred)
     const auditConfigRaw = data.audit_config_id ?? data.audit_id;
-    const fiche_id = data.fiche_id;
-    const user_id = data.user_id;
-    const automation_schedule_id = data.automation_schedule_id;
-    const automation_run_id = data.automation_run_id;
-    const trigger_source = data.trigger_source;
-    const useRlmRaw =
-      Object.prototype.hasOwnProperty.call(data, "use_rlm")
-        ? data.use_rlm
-        : Object.prototype.hasOwnProperty.call(data, "useRlm")
-          ? data.useRlm
-          : undefined;
-    const use_rlm = typeof useRlmRaw === "boolean" ? useRlmRaw : undefined;
+    const ficheIdStrRaw =
+      typeof data.fiche_id === "string" ? data.fiche_id : String(data.fiche_id ?? "");
+    const auditConfigIdRaw = Number.parseInt(String(auditConfigRaw ?? ""), 10);
+    const ficheIdStr = ficheIdStrRaw.trim();
 
-    const auditConfigId = Number.parseInt(String(auditConfigRaw ?? ""), 10);
-    const ficheIdStr = typeof fiche_id === "string" ? fiche_id : String(fiche_id ?? "");
-
-    if (!Number.isFinite(auditConfigId) || auditConfigId <= 0 || !ficheIdStr) {
+    if (!Number.isFinite(auditConfigIdRaw) || auditConfigIdRaw <= 0 || !ficheIdStr) {
       return res.status(400).json({
         success: false,
         error: "Missing required parameters",
@@ -265,11 +262,30 @@ auditsRouter.post(
       });
     }
 
-    const eventId = `audit-${ficheIdStr}-${auditConfigId}-${Date.now()}`;
+    const parsed = validateRunAuditInput({
+      fiche_id: ficheIdStr,
+      audit_config_id: auditConfigIdRaw,
+      user_id: data.user_id,
+      use_rlm: typeof useRlmRaw === "boolean" ? useRlmRaw : undefined,
+      automation_schedule_id: data.automation_schedule_id,
+      automation_run_id: data.automation_run_id,
+      trigger_source: data.trigger_source,
+    });
+
+    const ficheId = parsed.fiche_id;
+    const auditConfigId = parsed.audit_config_id;
+    const user_id = parsed.user_id;
+    const use_rlm = parsed.use_rlm;
+    const automation_schedule_id = parsed.automation_schedule_id;
+    const automation_run_id = parsed.automation_run_id;
+    const trigger_source = parsed.trigger_source;
+
+    const now = Date.now();
+    const eventId = `audit-${ficheId}-${auditConfigId}-${now}`;
     const { ids } = await inngest.send({
       name: "audit/run",
       data: {
-        fiche_id: ficheIdStr,
+        fiche_id: ficheId,
         audit_config_id: auditConfigId,
         ...(typeof user_id === "string" && user_id ? { user_id } : {}),
         ...(typeof use_rlm === "boolean" ? { use_rlm } : {}),
@@ -290,7 +306,8 @@ auditsRouter.post(
       success: true,
       message: "Audit queued for processing",
       event_id: ids[0],
-      fiche_id: ficheIdStr,
+      audit_id: eventId,
+      fiche_id: ficheId,
       audit_config_id: auditConfigId,
       metadata: {
         timestamp: new Date().toISOString(),
@@ -506,7 +523,7 @@ auditsRouter.get(
     const filters = parseListAuditsQuery(req.query as unknown as ListAuditsQuery);
     const result = await auditsService.groupAudits({
       filters,
-      groupBy: groupByRaw as any,
+      groupBy: groupByRaw as (typeof allowed)[number],
       bucketSize,
     });
 
@@ -591,23 +608,20 @@ auditsRouter.post(
         ? (body as Record<string, unknown>)
         : {};
 
-    // Backwards-compatible: accept either `audit_id` (legacy) or `audit_config_id` (preferred)
+    const useRlmRaw = Object.prototype.hasOwnProperty.call(data, "use_rlm")
+      ? data.use_rlm
+      : Object.prototype.hasOwnProperty.call(data, "useRlm")
+        ? data.useRlm
+        : undefined;
+
     const auditConfigRaw = data.audit_config_id ?? data.audit_id;
-    const fiche_id = data.fiche_id;
-    const user_id = data.user_id;
-    const useRlmRaw =
-      Object.prototype.hasOwnProperty.call(data, "use_rlm")
-        ? data.use_rlm
-        : Object.prototype.hasOwnProperty.call(data, "useRlm")
-          ? data.useRlm
-          : undefined;
-    const use_rlm = typeof useRlmRaw === "boolean" ? useRlmRaw : undefined;
+    const ficheIdStrRaw =
+      typeof data.fiche_id === "string" ? data.fiche_id : String(data.fiche_id ?? "");
+    const auditConfigIdRaw = Number.parseInt(String(auditConfigRaw ?? ""), 10);
+    const ficheIdStr = ficheIdStrRaw.trim();
 
-    const auditConfigId = Number.parseInt(String(auditConfigRaw ?? ""), 10);
-    const ficheIdStr = typeof fiche_id === "string" ? fiche_id : String(fiche_id ?? "");
-
-    // Validation
-    if (!Number.isFinite(auditConfigId) || auditConfigId <= 0 || !ficheIdStr) {
+    // Preserve legacy error message contract (tests + clients rely on it)
+    if (!Number.isFinite(auditConfigIdRaw) || auditConfigIdRaw <= 0 || !ficheIdStr) {
       return res.status(400).json({
         success: false,
         error: "Missing required parameters",
@@ -615,18 +629,34 @@ auditsRouter.post(
       });
     }
 
-    logger.info("Queuing audit", {
+    // Backwards-compatible: accept either `audit_id` (legacy) or `audit_config_id` (preferred)
+    const parsed = validateRunAuditInput({
       fiche_id: ficheIdStr,
+      audit_config_id: auditConfigIdRaw,
+      user_id: data.user_id,
+      use_rlm: typeof useRlmRaw === "boolean" ? useRlmRaw : undefined,
+      // Keep schema-compatible optional fields (ignored by workflow if empty)
+      trigger_source: "api",
+    });
+
+    const ficheId = parsed.fiche_id;
+    const auditConfigId = parsed.audit_config_id;
+    const user_id = parsed.user_id;
+    const use_rlm = parsed.use_rlm;
+
+    logger.info("Queuing audit", {
+      fiche_id: ficheId,
       audit_config_id: auditConfigId,
       has_user_id: Boolean(user_id),
     });
 
     // Send event to Inngest (async processing)
-    const eventId = `audit-${ficheIdStr}-${auditConfigId}-${Date.now()}`;
+    const now = Date.now();
+    const eventId = `audit-${ficheId}-${auditConfigId}-${now}`;
     const { ids } = await inngest.send({
       name: "audit/run",
       data: {
-        fiche_id: ficheIdStr,
+        fiche_id: ficheId,
         audit_config_id: auditConfigId,
         ...(typeof user_id === "string" && user_id ? { user_id } : {}),
         ...(typeof use_rlm === "boolean" ? { use_rlm } : {}),
@@ -639,7 +669,8 @@ auditsRouter.post(
       success: true,
       message: "Audit queued for processing",
       event_id: ids[0],
-      fiche_id: ficheIdStr,
+      audit_id: eventId,
+      fiche_id: ficheId,
       audit_config_id: auditConfigId,
       metadata: {
         timestamp: new Date().toISOString(),
@@ -729,7 +760,8 @@ auditsRouter.post(
     });
 
     // Send event to Inngest
-    const eventId = `audit-${fiche_id}-${latestConfig.id}-${Date.now()}`;
+    const now = Date.now();
+    const eventId = `audit-${fiche_id}-${latestConfig.id}-${now}`;
     const { ids } = await inngest.send({
       name: "audit/run",
       data: {
@@ -746,8 +778,9 @@ auditsRouter.post(
       success: true,
       message: "Audit queued for processing",
       event_id: ids[0],
-      fiche_id,
-      audit_config_id: latestConfig.id.toString(),
+      audit_id: eventId,
+      fiche_id: fiche_id.toString(),
+      audit_config_id: Number(latestConfig.id),
       audit_config_name: latestConfig.name,
       metadata: {
         timestamp: new Date().toISOString(),
@@ -803,48 +836,46 @@ auditsRouter.post(
       typeof body === "object" && body !== null
         ? (body as Record<string, unknown>)
         : {};
-    const fiche_ids = data.fiche_ids;
-    const audit_config_id_raw = data.audit_config_id;
-    const user_id_raw = data.user_id;
     const useRlmRaw =
       Object.prototype.hasOwnProperty.call(data, "use_rlm")
         ? data.use_rlm
         : Object.prototype.hasOwnProperty.call(data, "useRlm")
           ? data.useRlm
           : undefined;
-    const use_rlm = typeof useRlmRaw === "boolean" ? useRlmRaw : undefined;
+    const parsed = validateBatchAuditInput({
+      fiche_ids: data.fiche_ids,
+      audit_config_id: data.audit_config_id,
+      user_id: data.user_id,
+      use_rlm: typeof useRlmRaw === "boolean" ? useRlmRaw : undefined,
+    });
 
-    if (!fiche_ids || !Array.isArray(fiche_ids)) {
-      return res.status(400).json({
-        success: false,
-        error: "Invalid request - fiche_ids array required",
-      });
+    const ficheIds = parsed.fiche_ids;
+    const audit_config_id = parsed.audit_config_id;
+    const user_id = parsed.user_id;
+    const use_rlm = parsed.use_rlm;
+
+    // Batch progress/completion tracking requires Redis. Fail fast if not configured.
+    let redisOk = false;
+    try {
+      const redis = await getRedisClient();
+      redisOk = Boolean(redis);
+    } catch {
+      redisOk = false;
     }
-
-    const ficheIds = fiche_ids
-      .map((v) => (typeof v === "string" ? v : String(v ?? "")))
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    const audit_config_id =
-      typeof audit_config_id_raw === "number" && Number.isFinite(audit_config_id_raw)
-        ? audit_config_id_raw
-        : typeof audit_config_id_raw === "string" && audit_config_id_raw.trim()
-          ? Number.parseInt(audit_config_id_raw, 10)
-          : undefined;
-
-    const user_id =
-      typeof user_id_raw === "string"
-        ? user_id_raw.trim() || undefined
-        : user_id_raw !== undefined && user_id_raw !== null
-          ? String(user_id_raw)
-          : undefined;
+    if (!redisOk) {
+      throw new AppError(
+        "Redis not configured (set REDIS_URL) — batch audits require Redis for progress/completion tracking.",
+        503,
+        "SERVICE_UNAVAILABLE"
+      );
+    }
 
     // Send batch event with deduplication ID
     const batchId = `batch-${Date.now()}-${ficheIds.length}`;
     const { ids } = await inngest.send({
       name: "audit/batch",
       data: {
+        batch_id: batchId,
         fiche_ids: ficheIds,
         audit_config_id,
         user_id,
@@ -858,15 +889,15 @@ auditsRouter.post(
 
     logger.info("Queued batch audit", {
       batch_id: batchId,
-      fiche_count: fiche_ids.length,
+      fiche_count: ficheIds.length,
       audit_config_id: audit_config_id ?? null,
       has_user_id: Boolean(user_id),
     });
 
     return res.json({
       success: true,
-      message: `Batch audit queued for ${fiche_ids.length} fiches`,
-      fiche_ids,
+      message: `Batch audit queued for ${ficheIds.length} fiches`,
+      fiche_ids: ficheIds,
       audit_config_id,
       batch_id: batchId,
       event_ids: ids,

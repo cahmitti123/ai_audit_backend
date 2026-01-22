@@ -4,39 +4,38 @@
  * Creates and configures the Express app with all routes and middleware
  */
 
-import express from "express";
-import cors from "cors";
-import swaggerUi from "swagger-ui-express";
-import { serve } from "inngest/express";
 import "dotenv/config";
 
-// Inngest
-import { inngest } from "./inngest/client.js";
-import { functions } from "./inngest/index.js";
-
-// Module routers
-import { fichesRouter } from "./modules/fiches/index.js";
-import { recordingsRouter } from "./modules/recordings/index.js";
-import { transcriptionsRouter } from "./modules/transcriptions/index.js";
-import { auditConfigsRouter } from "./modules/audit-configs/index.js";
-import { auditsRouter, auditRerunRouter } from "./modules/audits/index.js";
-import { automationRouter } from "./modules/automation/index.js";
-import { chatRouter } from "./modules/chat/index.js";
-import { productsRouter } from "./modules/products/index.js";
-import { realtimeRouter } from "./modules/realtime/index.js";
-
-// Error handling
-import { notFoundHandler } from "./middleware/not-found.js";
-import { errorHandler } from "./middleware/error-handler.js";
+import cors from "cors";
+import express from "express";
+import { serve } from "inngest/express";
+import swaggerUi from "swagger-ui-express";
 
 // Middleware
 // import {
 //   payloadSizeLogger,
 //   payloadSizeResponseLogger,
 // } from "./middleware/payload-logger.js";
-
 // Config
 import { swaggerSpec } from "./config/swagger.js";
+// Inngest
+import { inngest } from "./inngest/client.js";
+import { functions } from "./inngest/index.js";
+// Optional API auth
+import { apiAuthMiddleware } from "./middleware/api-auth.js";
+import { errorHandler } from "./middleware/error-handler.js";
+// Error handling
+import { notFoundHandler } from "./middleware/not-found.js";
+import { auditConfigsRouter } from "./modules/audit-configs/index.js";
+import { auditRerunRouter,auditsRouter } from "./modules/audits/index.js";
+import { automationRouter } from "./modules/automation/index.js";
+import { chatRouter } from "./modules/chat/index.js";
+// Module routers
+import { fichesRouter } from "./modules/fiches/index.js";
+import { productsRouter } from "./modules/products/index.js";
+import { realtimeRouter } from "./modules/realtime/index.js";
+import { recordingsRouter } from "./modules/recordings/index.js";
+import { transcriptionsRouter } from "./modules/transcriptions/index.js";
 
 export function createApp() {
   const app = express();
@@ -62,6 +61,9 @@ export function createApp() {
     })
   );
   app.use(express.json({ limit: "50mb" })); // Increase limit for Inngest workflows with large timelines
+
+  // Optional API authentication (disabled unless API_AUTH_TOKEN(S) is set)
+  app.use(apiAuthMiddleware);
 
   // Payload size monitoring middleware (logs request/response sizes)
   // Disabled for performance

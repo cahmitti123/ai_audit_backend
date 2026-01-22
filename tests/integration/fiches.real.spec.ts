@@ -1,11 +1,12 @@
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { cacheFicheSalesSummary } from "../../src/modules/fiches/fiches.cache.js";
+// Real ops helpers (DB + external CRM API)
+import { disconnectDb,prisma } from "../../src/shared/prisma.js";
+import type { RecordingLike } from "../../src/utils/recording-parser.js";
 import { makeApp } from "../test-app.js";
 import { isIntegrationEnabled, readIsoDate } from "./_integration.env.js";
-
-// Real ops helpers (DB + external CRM API)
-import { prisma, disconnectDb } from "../../src/shared/prisma.js";
-import { cacheFicheSalesSummary } from "../../src/modules/fiches/fiches.cache.js";
 
 const describeIntegration = isIntegrationEnabled() ? describe : describe.skip;
 
@@ -22,7 +23,7 @@ async function findMissingSalesDateAfter(
   for (let i = 1; i <= maxLookaheadDays; i++) {
     const candidate = addDaysUtc(startIsoDate, i);
     const count = await prisma.ficheCache.count({ where: { salesDate: candidate } });
-    if (count === 0) return candidate;
+    if (count === 0) {return candidate;}
   }
   throw new Error(
     `Could not find any missing salesDate after ${startIsoDate} within ${maxLookaheadDays} days. ` +
@@ -54,13 +55,13 @@ async function findRecentSalesDateWithFiches(app: ReturnType<typeof makeApp>) {
     }
 
     const fiches = res.body?.fiches;
-    if (!Array.isArray(fiches) || fiches.length === 0) continue;
+    if (!Array.isArray(fiches) || fiches.length === 0) {continue;}
 
     const firstWithCle = (fiches as Array<Record<string, unknown>>).find((f) => {
       const cle = f.cle;
       return typeof cle === "string" && cle.trim().length > 0;
     });
-    if (firstWithCle) return iso;
+    if (firstWithCle) {return iso;}
   }
 
   throw new Error(
@@ -143,7 +144,7 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
             ? firstWithCle.date_modification
             : null,
         recordings: Array.isArray(firstWithCle.recordings)
-          ? (firstWithCle.recordings as any[])
+          ? (firstWithCle.recordings as RecordingLike[])
           : undefined,
       },
       { salesDate: date }
@@ -197,7 +198,7 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
     const fiches = res.body.fiches as Array<Record<string, unknown>>;
     const match = fiches.find((f) => f.id === ficheId);
     expect(match).toBeTruthy();
-    expect((match as any).status).toEqual(
+    expect(match?.status).toEqual(
       expect.objectContaining({
         hasData: true,
       })

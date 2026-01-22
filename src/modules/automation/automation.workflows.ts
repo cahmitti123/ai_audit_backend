@@ -4,23 +4,21 @@
  * Inngest workflow functions for automated audit processing
  */
 
-import { inngest } from "../../inngest/client.js";
 import { NonRetriableError } from "inngest";
-import * as automationRepository from "./automation.repository.js";
-import * as automationService from "./automation.service.js";
+
+import { inngest } from "../../inngest/client.js";
+import { publishPusherEvent } from "../../shared/pusher.js";
+import type { RecordingLike } from "../../utils/recording-parser.js";
 import * as automationApi from "./automation.api.js";
-import { validateFicheSelection } from "./automation.schemas.js";
-import { TIMEOUTS } from "../../shared/constants.js";
-import { runAuditFunction } from "../audits/audits.workflows.js";
-import { fetchFicheFunction } from "../fiches/fiches.workflows.js";
-import { transcribeFicheFunction } from "../transcriptions/transcriptions.workflows.js";
+import * as automationRepository from "./automation.repository.js";
 import type {
   AutomationLogLevel,
   FicheSelection,
   ScheduleType,
   TranscriptionPriority,
 } from "./automation.schemas.js";
-import type { RecordingLike } from "../../utils/recording-parser.js";
+import { validateFicheSelection } from "./automation.schemas.js";
+import * as automationService from "./automation.service.js";
 
 type WorkflowSchedule = {
   id: string;
@@ -53,6 +51,7 @@ type ActiveScheduleSerializable = {
   dayOfWeek: number | null;
   dayOfMonth: number | null;
   lastRunAt: string | null;
+  lastRunStatus: string | null;
 };
 
 type DueSchedule = {
@@ -92,7 +91,7 @@ function toScheduleType(value: unknown): ScheduleType {
 
 function toBigIntId(value: number | string): bigint {
   const raw = String(value).trim();
-  if (!raw) throw new NonRetriableError("Missing schedule_id");
+  if (!raw) {throw new NonRetriableError("Missing schedule_id");}
   try {
     return BigInt(raw);
   } catch {
@@ -106,32 +105,32 @@ function getStringField(obj: Record<string, unknown>, key: string): string | nul
 }
 
 function getFicheId(value: unknown): string | null {
-  if (!isRecord(value)) return null;
+  if (!isRecord(value)) {return null;}
   const a = getStringField(value, "ficheId");
-  if (a) return a;
+  if (a) {return a;}
   const b = getStringField(value, "fiche_id");
-  if (b) return b;
+  if (b) {return b;}
   const c = getStringField(value, "id");
-  if (c) return c;
+  if (c) {return c;}
   const n = value.id;
-  if (typeof n === "number" && Number.isFinite(n)) return String(n);
+  if (typeof n === "number" && Number.isFinite(n)) {return String(n);}
   return null;
 }
 
 function toSalesSummaryCacheInput(value: unknown): {
   id: string;
-  cle: string;
+  cle: string | null;
   nom: string;
   prenom: string;
   email: string;
   telephone: string;
   recordings?: RecordingLike[];
 } | null {
-  if (!isRecord(value)) return null;
+  if (!isRecord(value)) {return null;}
 
   const id = getFicheId(value);
+  if (!id) {return null;}
   const cle = getStringField(value, "cle");
-  if (!id || !cle) return null;
 
   const recordingsRaw = value.recordings;
   const recordings = Array.isArray(recordingsRaw)
@@ -140,7 +139,7 @@ function toSalesSummaryCacheInput(value: unknown): {
 
   return {
     id,
-    cle,
+    cle: cle || null,
     nom: getStringField(value, "nom") || "",
     prenom: getStringField(value, "prenom") || "",
     email: getStringField(value, "email") || "",
@@ -150,8 +149,8 @@ function toSalesSummaryCacheInput(value: unknown): {
 }
 
 function toLogContext(metadata: unknown): Record<string, unknown> | undefined {
-  if (metadata === undefined) return undefined;
-  if (isRecord(metadata)) return metadata;
+  if (metadata === undefined) {return undefined;}
+  if (isRecord(metadata)) {return metadata;}
   return { metadata };
 }
 
@@ -175,7 +174,11 @@ export const runAutomationFunction = inngest.createFunction(
   },
   { event: "automation/run" },
   async ({ event, step, logger }) => {
-    const { schedule_id, override_fiche_selection } = event.data;
+    const { schedule_id, override_fiche_selection, due_at } = event.data as unknown as {
+      schedule_id: number | string;
+      override_fiche_selection?: FicheSelection;
+      due_at?: string;
+    };
     const scheduleId = toBigIntId(schedule_id);
 
     // Capture start time in a step to persist it across Inngest checkpoints
@@ -243,13 +246,14 @@ export const runAutomationFunction = inngest.createFunction(
     // Step 2: Create automation run record
     const runIdString = await step.run("create-run-record", async () => {
       const run = await automationRepository.createAutomationRun(
-        BigInt(schedule_id),
+        scheduleId,
         {
           schedule: {
             name: schedule.name,
             scheduleType: schedule.scheduleType,
           },
           overrides: override_fiche_selection || null,
+          due_at: typeof due_at === "string" ? due_at : null,
         }
       );
       return String(run.id); // Convert BigInt to string for serialization
@@ -257,6 +261,40 @@ export const runAutomationFunction = inngest.createFunction(
 
     const runId = BigInt(runIdString);
     logger.info("Run record created", { run_id: runIdString });
+
+    // Mark schedule as "running" even for manual triggers (prevents overlapping scheduled runs).
+    // If due_at is provided (scheduler dispatch), use it; otherwise use "now".
+    await step.run("mark-schedule-running", async () => {
+      try {
+        const dueAtDate =
+          typeof due_at === "string" && Number.isFinite(Date.parse(due_at))
+            ? new Date(due_at)
+            : new Date();
+        await automationRepository.markAutomationScheduleTriggered(scheduleId, dueAtDate);
+        return { ok: true };
+      } catch (err: unknown) {
+        logger.warn("Failed to mark schedule as running", {
+          schedule_id: String(schedule_id),
+          error: errorMessage(err),
+        });
+        return { ok: false, error: errorMessage(err) };
+      }
+    });
+
+    const realtimeJobId = `automation-run-${runIdString}`;
+    await step.run("realtime-run-started", async () => {
+      await publishPusherEvent({
+        event: "automation.run.started",
+        payload: {
+          job_id: realtimeJobId,
+          schedule_id: String(schedule_id),
+          run_id: runIdString,
+          due_at: typeof due_at === "string" ? due_at : null,
+          status: "running",
+        },
+      });
+      return { ok: true };
+    });
 
     // Helper to add logs
     const log = async (
@@ -271,10 +309,10 @@ export const runAutomationFunction = inngest.createFunction(
         metadata
       );
       const ctx = toLogContext(metadata);
-      if (level === "debug") logger.debug(message, ctx);
-      else if (level === "warning") logger.warn(message, ctx);
-      else if (level === "error") logger.error(message, ctx);
-      else logger.info(message, ctx);
+      if (level === "debug") {logger.debug(message, ctx);}
+      else if (level === "warning") {logger.warn(message, ctx);}
+      else if (level === "error") {logger.error(message, ctx);}
+      else {logger.info(message, ctx);}
     };
 
     try {
@@ -283,8 +321,16 @@ export const runAutomationFunction = inngest.createFunction(
       // Be tolerant of older/hand-crafted payloads that may send `maxFiches: null`.
       // Convert it to `undefined` so Zod can apply defaults and validate.
       const selection = validateFicheSelection(
-        isRecord(rawSelection) && rawSelection.maxFiches === null
-          ? { ...rawSelection, maxFiches: undefined }
+        isRecord(rawSelection) &&
+          (rawSelection.maxFiches === null ||
+            rawSelection.maxRecordingsPerFiche === null)
+          ? {
+              ...rawSelection,
+              ...(rawSelection.maxFiches === null ? { maxFiches: undefined } : {}),
+              ...(rawSelection.maxRecordingsPerFiche === null
+                ? { maxRecordingsPerFiche: undefined }
+                : {}),
+            }
           : rawSelection
       );
       const apiKey = schedule.externalApiKey || undefined;
@@ -323,6 +369,38 @@ export const runAutomationFunction = inngest.createFunction(
 
         ficheIds = manualResult.ficheIds;
 
+        await step.run("realtime-selection", async () => {
+          const groupes =
+            Array.isArray(selection.groupes) && selection.groupes.length <= 10
+              ? selection.groupes
+              : undefined;
+          await publishPusherEvent({
+            event: "automation.run.selection",
+            payload: {
+              job_id: realtimeJobId,
+              schedule_id: String(schedule_id),
+              run_id: runIdString,
+              mode: selection.mode,
+              dateRange: selection.dateRange ?? null,
+              ...(groupes ? { groupes } : {}),
+              groupes_count: Array.isArray(selection.groupes)
+                ? selection.groupes.length
+                : 0,
+              onlyWithRecordings: Boolean(selection.onlyWithRecordings),
+              onlyUnaudited: Boolean(selection.onlyUnaudited),
+              maxFiches:
+                typeof selection.maxFiches === "number" ? selection.maxFiches : null,
+              maxRecordingsPerFiche:
+                typeof selection.maxRecordingsPerFiche === "number"
+                  ? selection.maxRecordingsPerFiche
+                  : null,
+              useRlm: Boolean((selection as unknown as { useRlm?: unknown }).useRlm),
+              total_fiches: ficheIds.length,
+            },
+          });
+          return { ok: true };
+        });
+
         if (ficheIds.length === 0) {
           await log("warning", "No fiches in manual selection");
           await step.run("update-run-no-fiches", async () => {
@@ -336,9 +414,40 @@ export const runAutomationFunction = inngest.createFunction(
               resultSummary: { message: "No fiches found", ficheIds: [] },
             });
             await automationRepository.updateScheduleStats(
-              BigInt(schedule_id),
+              scheduleId,
               "success"
             );
+          });
+
+          await step.sendEvent("emit-automation-completed-no-fiches", {
+            name: "automation/completed",
+            data: {
+              schedule_id,
+              run_id: String(runId),
+              status: "completed",
+              total_fiches: 0,
+              successful_fiches: 0,
+              failed_fiches: 0,
+              duration_ms: Date.now() - startTime!,
+            },
+            id: `automation-completed-${runIdString}-no-fiches`,
+          });
+
+          await step.run("realtime-run-finished", async () => {
+            await publishPusherEvent({
+              event: "automation.run.completed",
+              payload: {
+                job_id: realtimeJobId,
+                schedule_id: String(schedule_id),
+                run_id: runIdString,
+                status: "completed",
+                total_fiches: 0,
+                successful_fiches: 0,
+                failed_fiches: 0,
+                reason: "no_fiches_manual",
+              },
+            });
+            return { ok: true };
           });
 
           return {
@@ -381,9 +490,40 @@ export const runAutomationFunction = inngest.createFunction(
               resultSummary: { message: "No dates to query", ficheIds: [] },
             });
             await automationRepository.updateScheduleStats(
-              BigInt(schedule_id),
+              scheduleId,
               "success"
             );
+          });
+
+          await step.sendEvent("emit-automation-completed-no-dates", {
+            name: "automation/completed",
+            data: {
+              schedule_id,
+              run_id: String(runId),
+              status: "completed",
+              total_fiches: 0,
+              successful_fiches: 0,
+              failed_fiches: 0,
+              duration_ms: Date.now() - startTime!,
+            },
+            id: `automation-completed-${runIdString}-no-dates`,
+          });
+
+          await step.run("realtime-run-finished", async () => {
+            await publishPusherEvent({
+              event: "automation.run.completed",
+              payload: {
+                job_id: realtimeJobId,
+                schedule_id: String(schedule_id),
+                run_id: runIdString,
+                status: "completed",
+                total_fiches: 0,
+                successful_fiches: 0,
+                failed_fiches: 0,
+                reason: "no_dates",
+              },
+            });
+            return { ok: true };
           });
 
           return {
@@ -455,16 +595,51 @@ export const runAutomationFunction = inngest.createFunction(
                   );
 
                   // Cache them (sales-list summary)
-                  for (const fiche of fiches) {
-                    const cacheInput = toSalesSummaryCacheInput(fiche);
-                    if (!cacheInput) continue;
-                    await cacheFicheSalesSummary(cacheInput, {
-                      salesDate: convertDate(date),
-                      lastRevalidatedAt: revalidatedAt,
-                    });
-                  }
+                  const cacheConcurrency = Math.max(
+                    1,
+                    Number(process.env.FICHE_SALES_CACHE_CONCURRENCY || 10)
+                  );
+                  const { mapWithConcurrency } = await import("../../utils/concurrency.js");
 
-                  await log("info", `Revalidated ${date} (${fiches.length} fiches)`);
+                  type CacheOneResult =
+                    | { ok: true; ficheId: string; hasCle: boolean }
+                    | { ok: false; error: string };
+
+                  const perFicheCache = await mapWithConcurrency<unknown, CacheOneResult>(
+                    fiches,
+                    cacheConcurrency,
+                    async (fiche) => {
+                      try {
+                        const cacheInput = toSalesSummaryCacheInput(fiche);
+                        if (!cacheInput) {return { ok: false, error: "missing fiche id" };}
+                        await cacheFicheSalesSummary(cacheInput, {
+                          salesDate: convertDate(date),
+                          lastRevalidatedAt: revalidatedAt,
+                        });
+                        return {
+                          ok: true,
+                          ficheId: cacheInput.id,
+                          hasCle: typeof cacheInput.cle === "string" && cacheInput.cle.length > 0,
+                        };
+                      } catch (err: unknown) {
+                        return {
+                          ok: false,
+                          error: err instanceof Error ? err.message : String(err),
+                        };
+                      }
+                    }
+                  );
+
+                  const cached = perFicheCache.filter(
+                    (r): r is { ok: true; ficheId: string; hasCle: boolean } => r.ok
+                  );
+                  const missingCleCount = cached.filter((r) => !r.hasCle).length;
+
+                  await log("info", `Revalidated ${date} (${fiches.length} fiches)`, {
+                    cached: cached.length,
+                    cacheConcurrency,
+                    missingCle: missingCleCount,
+                  });
                   return { date, count: fiches.length };
                 })
               );
@@ -514,6 +689,44 @@ export const runAutomationFunction = inngest.createFunction(
         // Date-range lists are often "sales list only" until we fetch fiche details.
         // We'll fetch fiche details in the next step and then determine which fiches truly have recordings.
         let filteredFiches: unknown[] = allFiches;
+
+        // Optional DB-level filters (applied on the post-revalidation DB snapshot)
+        if (Array.isArray(selection.groupes) && selection.groupes.length > 0) {
+          const allowed = new Set(
+            selection.groupes
+              .map((g) => (typeof g === "string" ? g.trim() : ""))
+              .filter(Boolean)
+          );
+          if (allowed.size > 0) {
+            const before = filteredFiches.length;
+            filteredFiches = filteredFiches.filter((fiche) => {
+              if (!isRecord(fiche)) {return false;}
+              const g = getStringField(fiche, "groupe");
+              return typeof g === "string" && allowed.has(g);
+            });
+            await log("info", `Filtered fiches by groupes (${allowed.size})`, {
+              before,
+              after: filteredFiches.length,
+              groupes: Array.from(allowed),
+            });
+          }
+        }
+
+        if (selection.onlyUnaudited === true) {
+          const before = filteredFiches.length;
+          filteredFiches = filteredFiches.filter((fiche) => {
+            if (!isRecord(fiche)) {return false;}
+            const audit = fiche.audit;
+            if (!isRecord(audit)) {return true;}
+            const total = (audit as { total?: unknown }).total;
+            return typeof total === "number" ? total === 0 : true;
+          });
+          await log("info", "Filtered fiches: onlyUnaudited=true", {
+            before,
+            after: filteredFiches.length,
+          });
+        }
+
         if (selection.onlyWithRecordings) {
           await log(
             "info",
@@ -535,6 +748,38 @@ export const runAutomationFunction = inngest.createFunction(
         ficheIds = Array.from(new Set(extractedIds));
         
         await log("info", `Final: ${ficheIds.length} fiches to process`);
+
+        await step.run("realtime-selection", async () => {
+          const groupes =
+            Array.isArray(selection.groupes) && selection.groupes.length <= 10
+              ? selection.groupes
+              : undefined;
+          await publishPusherEvent({
+            event: "automation.run.selection",
+            payload: {
+              job_id: realtimeJobId,
+              schedule_id: String(schedule_id),
+              run_id: runIdString,
+              mode: selection.mode,
+              dateRange: selection.dateRange ?? null,
+              ...(groupes ? { groupes } : {}),
+              groupes_count: Array.isArray(selection.groupes)
+                ? selection.groupes.length
+                : 0,
+              onlyWithRecordings: Boolean(selection.onlyWithRecordings),
+              onlyUnaudited: Boolean(selection.onlyUnaudited),
+              maxFiches:
+                typeof selection.maxFiches === "number" ? selection.maxFiches : null,
+              maxRecordingsPerFiche:
+                typeof selection.maxRecordingsPerFiche === "number"
+                  ? selection.maxRecordingsPerFiche
+                  : null,
+              useRlm: Boolean((selection as unknown as { useRlm?: unknown }).useRlm),
+              total_fiches: ficheIds.length,
+            },
+          });
+          return { ok: true };
+        });
       }
 
       // Step 4: Check if we have fiches to process
@@ -556,9 +801,40 @@ export const runAutomationFunction = inngest.createFunction(
             },
           });
           await automationRepository.updateScheduleStats(
-            BigInt(schedule_id),
+            scheduleId,
             "success"
           );
+        });
+
+        await step.sendEvent("emit-automation-completed-no-fiches-found", {
+          name: "automation/completed",
+          data: {
+            schedule_id,
+            run_id: String(runId),
+            status: "completed",
+            total_fiches: 0,
+            successful_fiches: 0,
+            failed_fiches: 0,
+            duration_ms: Date.now() - startTime!,
+          },
+          id: `automation-completed-${runIdString}-no-fiches-found`,
+        });
+
+        await step.run("realtime-run-finished", async () => {
+          await publishPusherEvent({
+            event: "automation.run.completed",
+            payload: {
+              job_id: realtimeJobId,
+              schedule_id: String(schedule_id),
+              run_id: runIdString,
+              status: "completed",
+              total_fiches: 0,
+              successful_fiches: 0,
+              failed_fiches: 0,
+              reason: "no_fiches_found",
+            },
+          });
+          return { ok: true };
         });
 
         return {
@@ -581,6 +857,11 @@ export const runAutomationFunction = inngest.createFunction(
       const results = {
         successful: [] as string[],
         failed: [] as { ficheId: string; error: string }[],
+        ignored: [] as Array<{
+          ficheId: string;
+          reason: string;
+          recordingsCount?: number;
+        }>,
         transcriptions: 0,
         audits: 0,
       };
@@ -593,7 +874,7 @@ export const runAutomationFunction = inngest.createFunction(
 
       await step.sendEvent(
         "fan-out-fiche-fetches",
-        ficheIds.map((ficheId, idx) => ({
+        ficheIds.map((ficheId) => ({
           name: "fiche/fetch",
           data: {
             fiche_id: ficheId,
@@ -619,6 +900,15 @@ export const runAutomationFunction = inngest.createFunction(
       const ficheDetailsStarted = Date.now();
       let lastReady = 0;
       let stableCount = 0;
+      let ficheDetailsStallRetries = 0;
+      const maxRetriesRaw = schedule.maxRetries;
+      const maxFicheDetailsStallRetries =
+        schedule.retryFailed &&
+        typeof maxRetriesRaw === "number" &&
+        Number.isFinite(maxRetriesRaw) &&
+        maxRetriesRaw > 0
+          ? Math.floor(maxRetriesRaw)
+          : 0;
       let lastSnapshot: Array<{
         ficheId: string;
         exists: boolean;
@@ -659,10 +949,19 @@ export const runAutomationFunction = inngest.createFunction(
               }
               const raw = r.rawData ?? null;
               const isSalesListOnly = isRecord(raw) && raw._salesListOnly === true;
+              const rawRecordings = isRecord(raw)
+                ? (raw as { recordings?: unknown }).recordings
+                : undefined;
+              const derivedRecordingsCount =
+                typeof r.recordingsCount === "number"
+                  ? r.recordingsCount
+                  : Array.isArray(rawRecordings)
+                  ? rawRecordings.length
+                  : null;
               return {
                 ficheId: id,
                 exists: true,
-                recordingsCount: r.recordingsCount ?? null,
+                recordingsCount: derivedRecordingsCount,
                 hasRecordings: Boolean(r.hasRecordings),
                 isSalesListOnly,
               };
@@ -679,11 +978,26 @@ export const runAutomationFunction = inngest.createFunction(
           `Fiche details progress: ${ready}/${ficheIds.length}`
         );
 
-        if (ready === ficheIds.length) break;
+        if (ready === ficheIds.length) {break;}
 
         if (ready === lastReady) {
           stableCount++;
-          if (stableCount >= 3) break; // likely some failed; proceed with what we have
+          if (stableCount >= 3) {
+            if (
+              maxFicheDetailsStallRetries > 0 &&
+              ficheDetailsStallRetries < maxFicheDetailsStallRetries
+            ) {
+              ficheDetailsStallRetries++;
+              stableCount = 0;
+              await log("warning", "Fiche details stalled; extending wait", {
+                ready,
+                total: ficheIds.length,
+                stall_retry: `${ficheDetailsStallRetries}/${maxFicheDetailsStallRetries}`,
+              });
+            } else {
+              break; // likely some failed; proceed with what we have
+            }
+          }
         } else {
           stableCount = 0;
           lastReady = ready;
@@ -699,6 +1013,19 @@ export const runAutomationFunction = inngest.createFunction(
       const ficheFetchFailures: Array<{ ficheId: string; error: string }> = [];
       const fichesWithRecordings: string[] = [];
       const fichesWithoutRecordings: string[] = [];
+      const ignoredTooManyRecordings: Array<{ ficheId: string; recordingsCount: number }> =
+        [];
+
+      // Ignore fiches with too many recordings (protects transcription/audit fan-out).
+      const maxRecordingsPerFicheEnv = Number(
+        process.env.AUTOMATION_MAX_RECORDINGS_PER_FICHE || 0
+      );
+      const maxRecordingsPerFiche =
+        typeof selection.maxRecordingsPerFiche === "number"
+          ? selection.maxRecordingsPerFiche
+          : Number.isFinite(maxRecordingsPerFicheEnv) && maxRecordingsPerFicheEnv > 0
+          ? Math.floor(maxRecordingsPerFicheEnv)
+          : 0;
 
       for (const snap of lastSnapshot) {
         if (!snap.exists || snap.isSalesListOnly) {
@@ -711,11 +1038,82 @@ export const runAutomationFunction = inngest.createFunction(
           continue;
         }
 
-        if ((snap.recordingsCount ?? 0) > 0 || snap.hasRecordings) {
+        const recordingsCount =
+          typeof snap.recordingsCount === "number" && Number.isFinite(snap.recordingsCount)
+            ? snap.recordingsCount
+            : null;
+
+        const hasAnyRecordings = (recordingsCount ?? 0) > 0 || snap.hasRecordings;
+
+        if (hasAnyRecordings) {
+          if (
+            maxRecordingsPerFiche > 0 &&
+            typeof recordingsCount === "number" &&
+            recordingsCount > maxRecordingsPerFiche
+          ) {
+            ignoredTooManyRecordings.push({
+              ficheId: snap.ficheId,
+              recordingsCount,
+            });
+            continue;
+          }
+
           fichesWithRecordings.push(snap.ficheId);
         } else {
           fichesWithoutRecordings.push(snap.ficheId);
         }
+      }
+
+      if (ignoredTooManyRecordings.length > 0) {
+        const ignoredSet = new Set(ignoredTooManyRecordings.map((f) => f.ficheId));
+        ficheIds = ficheIds.filter((id) => !ignoredSet.has(id));
+
+        for (const f of ignoredTooManyRecordings) {
+          results.ignored.push({
+            ficheId: f.ficheId,
+            reason: `Too many recordings (${f.recordingsCount} > ${maxRecordingsPerFiche})`,
+            recordingsCount: f.recordingsCount,
+          });
+        }
+
+        await log("warning", "Ignoring fiches with too many recordings", {
+          maxRecordingsPerFiche,
+          ignored: ignoredTooManyRecordings,
+        });
+
+        // Keep run totals accurate after removing ignored fiches.
+        await step.run("update-run-total-after-ignores", async () => {
+          await automationRepository.updateAutomationRun(runId, {
+            totalFiches: ficheIds.length,
+          });
+        });
+      }
+
+      // If the schedule requested "onlyWithRecordings", drop fiches that ended up with 0 recordings
+      // (after fetching full details) and track them as ignored.
+      if (selection.onlyWithRecordings === true && fichesWithoutRecordings.length > 0) {
+        const ignoredSet = new Set(fichesWithoutRecordings);
+        const before = ficheIds.length;
+        ficheIds = ficheIds.filter((id) => !ignoredSet.has(id));
+
+        for (const ficheId of fichesWithoutRecordings) {
+          results.ignored.push({
+            ficheId,
+            reason: "No recordings",
+          });
+        }
+
+        await log("info", "onlyWithRecordings=true: ignoring fiches without recordings", {
+          before,
+          after: ficheIds.length,
+          ignored: fichesWithoutRecordings.length,
+        });
+
+        await step.run("update-run-total-after-only-with-recordings", async () => {
+          await automationRepository.updateAutomationRun(runId, {
+            totalFiches: ficheIds.length,
+          });
+        });
       }
 
       // Merge failures into run results
@@ -725,35 +1123,132 @@ export const runAutomationFunction = inngest.createFunction(
         total: ficheIds.length,
         withRecordings: fichesWithRecordings.length,
         withoutRecordings: fichesWithoutRecordings.length,
+        ignored_too_many_recordings: ignoredTooManyRecordings.length,
         failed: results.failed.length,
+        maxRecordingsPerFiche: maxRecordingsPerFiche || undefined,
       });
 
-      // STEP 2: Fan out ALL transcriptions at once
-      if (schedule.runTranscription && fichesWithRecordings.length > 0) {
+      const canContinueAfterFicheFetch =
+        schedule.continueOnError || results.failed.length === 0;
+
+      if (!canContinueAfterFicheFetch && (schedule.runTranscription || schedule.runAudits)) {
         await log(
-          "info",
-          `Sending ${fichesWithRecordings.length} transcription events (FULL FAN-OUT)`
+          "warning",
+          "Aborting remaining stages due to failures (continueOnError=false)",
+          { failed: results.failed.length }
+        );
+      }
+
+      // STEP 2: Fan out transcriptions (optionally skip already-transcribed fiches)
+      if (schedule.runTranscription && fichesWithRecordings.length > 0 && canContinueAfterFicheFetch) {
+        const transcriptionTargets = [...fichesWithRecordings];
+
+        // Load fiche cache IDs once (JSON-safe) so we can poll recordings efficiently without per-fiche DB queries.
+        const cacheRows = await step.run(
+          `load-fiche-cache-ids-transcriptions-${runIdString}`,
+          async () => {
+            const { prisma } = await import("../../shared/prisma.js");
+            const rows = await prisma.ficheCache.findMany({
+              where: { ficheId: { in: transcriptionTargets } },
+              select: { ficheId: true, id: true },
+            });
+            return rows.map((r) => ({ ficheId: r.ficheId, ficheCacheId: r.id.toString() }));
+          }
         );
 
-        await step.sendEvent(
-          "fan-out-all-transcriptions",
-          fichesWithRecordings.map((ficheId, idx) => ({
-            name: "fiche/transcribe",
-            data: {
-              fiche_id: ficheId,
-              priority:
-                (schedule.transcriptionPriority as "normal" | "high" | "low") ||
-                "normal",
-              // Automation doesn't need each fiche-level transcription orchestrator to block;
-              // we wait/poll at the automation level (and audits also ensure transcription when needed).
-              wait_for_completion: false,
-            },
-            // Deterministic id: avoid duplicate transcription dispatch on retries
-            id: `automation-${runIdString}-transcribe-${ficheId}`,
-          }))
+        const cacheIdByFicheId = new Map(
+          cacheRows.map((r) => [r.ficheId, r.ficheCacheId] as const)
         );
+        const missingCacheIds = transcriptionTargets.filter((id) => !cacheIdByFicheId.has(id));
+        if (missingCacheIds.length > 0) {
+          await log("error", "Missing fiche cache rows for transcription polling", {
+            missing: missingCacheIds.length,
+          });
+          for (const ficheId of missingCacheIds) {
+            results.failed.push({
+              ficheId,
+              error: "Missing fiche cache row (cannot poll transcription status)",
+            });
+          }
+        }
 
-        // Durable wait (no in-step busy polling): poll status with `step.run` + `step.sleep`.
+        const transcriptionTargetsWithCache = transcriptionTargets.filter((id) =>
+          cacheIdByFicheId.has(id)
+        );
+        const targetCount = transcriptionTargetsWithCache.length;
+
+        // Pre-check current completion so we can skip already-complete fiches when configured.
+        const pre = await step.run(`prefilter-transcriptions-${runIdString}`, async () => {
+          const { prisma } = await import("../../shared/prisma.js");
+          const cacheIds = transcriptionTargetsWithCache
+            .map((ficheId) => cacheIdByFicheId.get(ficheId))
+            .filter((v): v is string => typeof v === "string" && v.length > 0)
+            .map((idStr) => BigInt(idStr));
+
+          const rows = await prisma.recording.groupBy({
+            by: ["ficheCacheId", "hasTranscription"],
+            where: { ficheCacheId: { in: cacheIds } },
+            _count: { _all: true },
+          });
+
+          const agg = new Map<string, { total: number; transcribed: number }>();
+          for (const r of rows) {
+            const key = r.ficheCacheId.toString();
+            const current = agg.get(key) || { total: 0, transcribed: 0 };
+            const n = typeof r._count?._all === "number" ? r._count._all : 0;
+            current.total += n;
+            if (r.hasTranscription) {current.transcribed += n;}
+            agg.set(key, current);
+          }
+
+          const alreadyComplete: string[] = [];
+          const toTranscribe: string[] = [];
+
+          for (const ficheId of transcriptionTargetsWithCache) {
+            const cacheId = cacheIdByFicheId.get(ficheId);
+            const counts = cacheId ? agg.get(cacheId) : undefined;
+            const total = counts?.total ?? 0;
+            const transcribed = counts?.transcribed ?? 0;
+            const complete = total > 0 && transcribed === total;
+            if (complete) {alreadyComplete.push(ficheId);}
+            else {toTranscribe.push(ficheId);}
+          }
+
+          return {
+            target: transcriptionTargetsWithCache.length,
+            alreadyCompleteCount: alreadyComplete.length,
+            toTranscribe,
+          };
+        });
+
+        const toTranscribe = schedule.skipIfTranscribed ? pre.toTranscribe : transcriptionTargetsWithCache;
+
+        await log("info", `Sending ${toTranscribe.length} transcription events`, {
+          target: transcriptionTargetsWithCache.length,
+          skipIfTranscribed: schedule.skipIfTranscribed,
+          alreadyComplete: pre.alreadyCompleteCount,
+        });
+
+        if (toTranscribe.length > 0) {
+          await step.sendEvent(
+            "fan-out-transcriptions",
+            toTranscribe.map((ficheId) => ({
+              name: "fiche/transcribe",
+              data: {
+                fiche_id: ficheId,
+                priority:
+                  (schedule.transcriptionPriority as "normal" | "high" | "low") ||
+                  "normal",
+                // Automation doesn't need each fiche-level transcription orchestrator to block;
+                // we wait/poll at the automation level (and audits also ensure transcription when needed).
+                wait_for_completion: false,
+              },
+              id: `automation-${runIdString}-transcribe-${ficheId}`,
+            }))
+          );
+        }
+
+        // Durable wait (no in-step busy polling): poll recording table snapshot with `step.run` + `step.sleep`.
         const transcriptionMaxWaitMs = Math.max(
           60_000,
           Number(process.env.AUTOMATION_TRANSCRIPTION_MAX_WAIT_MS || 15 * 60 * 1000)
@@ -765,24 +1260,57 @@ export const runAutomationFunction = inngest.createFunction(
 
         const transcriptionStarted = Date.now();
         let lastCompleted = 0;
-        let stableCount = 0;
+        let transcriptionStableCount = 0;
         let transcriptionPollAttempt = 0;
+        let retryAttempt = 0;
+
+        const maxTranscriptionRetriesRaw = schedule.maxRetries;
+        const maxRetries =
+          schedule.retryFailed &&
+          typeof maxTranscriptionRetriesRaw === "number" &&
+          Number.isFinite(maxTranscriptionRetriesRaw) &&
+          maxTranscriptionRetriesRaw > 0
+            ? Math.floor(maxTranscriptionRetriesRaw)
+            : 0;
 
         while (Date.now() - transcriptionStarted < transcriptionMaxWaitMs) {
           const completedRaw = await step.run(
             `poll-transcriptions-${runIdString}-${transcriptionPollAttempt}`,
             async () => {
-              const { getFicheTranscriptionStatus } = await import(
-                "../transcriptions/transcriptions.service.js"
-              );
+              const { prisma } = await import("../../shared/prisma.js");
+              const cacheIds = transcriptionTargetsWithCache
+                .map((ficheId) => cacheIdByFicheId.get(ficheId))
+                .filter((v): v is string => typeof v === "string" && v.length > 0)
+                .map((idStr) => BigInt(idStr));
 
-              const statuses = await Promise.all(
-                fichesWithRecordings.map((id) => getFicheTranscriptionStatus(id))
-              );
-              return statuses.filter((s) => s.total && s.transcribed === s.total)
-                .length;
+              const rows = await prisma.recording.groupBy({
+                by: ["ficheCacheId", "hasTranscription"],
+                where: { ficheCacheId: { in: cacheIds } },
+                _count: { _all: true },
+              });
+
+              const agg = new Map<string, { total: number; transcribed: number }>();
+              for (const r of rows) {
+                const key = r.ficheCacheId.toString();
+                const current = agg.get(key) || { total: 0, transcribed: 0 };
+                const n = typeof r._count?._all === "number" ? r._count._all : 0;
+                current.total += n;
+                if (r.hasTranscription) {current.transcribed += n;}
+                agg.set(key, current);
+              }
+
+              let completed = 0;
+              for (const ficheId of transcriptionTargetsWithCache) {
+                const cacheId = cacheIdByFicheId.get(ficheId);
+                const counts = cacheId ? agg.get(cacheId) : undefined;
+                const total = counts?.total ?? 0;
+                const transcribed = counts?.transcribed ?? 0;
+                if (total > 0 && transcribed === total) {completed++;}
+              }
+              return completed;
             }
           );
+
           const completed =
             typeof completedRaw === "number" && Number.isFinite(completedRaw)
               ? completedRaw
@@ -790,11 +1318,11 @@ export const runAutomationFunction = inngest.createFunction(
 
           await log(
             "info",
-            `Transcription progress: ${completed}/${fichesWithRecordings.length}`
+            `Transcription progress: ${completed}/${targetCount}`
           );
 
-          if (completed === fichesWithRecordings.length) {
-            results.transcriptions = completed;
+          if (completed >= targetCount) {
+            results.transcriptions = targetCount;
             await log(
               "info",
               `All transcriptions complete in ${Math.round(
@@ -805,18 +1333,77 @@ export const runAutomationFunction = inngest.createFunction(
           }
 
           if (completed === lastCompleted) {
-            stableCount++;
-            if (stableCount >= 3) {
+            transcriptionStableCount++;
+          } else {
+            transcriptionStableCount = 0;
+            lastCompleted = completed;
+          }
+
+          // If progress stalls, optionally retry by re-dispatching `fiche/transcribe` for incomplete fiches.
+          if (transcriptionStableCount >= 3 && maxRetries > 0 && retryAttempt < maxRetries) {
+            const retryNo = retryAttempt + 1;
+            const incomplete = await step.run(
+              `find-incomplete-transcriptions-${runIdString}-retry-${retryNo}`,
+              async () => {
+                const { prisma } = await import("../../shared/prisma.js");
+                const cacheIds = transcriptionTargetsWithCache
+                  .map((ficheId) => cacheIdByFicheId.get(ficheId))
+                  .filter((v): v is string => typeof v === "string" && v.length > 0)
+                  .map((idStr) => BigInt(idStr));
+
+                const rows = await prisma.recording.groupBy({
+                  by: ["ficheCacheId", "hasTranscription"],
+                  where: { ficheCacheId: { in: cacheIds } },
+                  _count: { _all: true },
+                });
+
+                const agg = new Map<string, { total: number; transcribed: number }>();
+                for (const r of rows) {
+                  const key = r.ficheCacheId.toString();
+                  const current = agg.get(key) || { total: 0, transcribed: 0 };
+                  const n = typeof r._count?._all === "number" ? r._count._all : 0;
+                  current.total += n;
+                  if (r.hasTranscription) {current.transcribed += n;}
+                  agg.set(key, current);
+                }
+
+                return transcriptionTargetsWithCache.filter((ficheId) => {
+                  const cacheId = cacheIdByFicheId.get(ficheId);
+                  const counts = cacheId ? agg.get(cacheId) : undefined;
+                  const total = counts?.total ?? 0;
+                  const transcribed = counts?.transcribed ?? 0;
+                  return !(total > 0 && transcribed === total);
+                });
+              }
+            );
+
+            if (incomplete.length === 0) {
+              // Defensive: if the DB snapshot says no incompletes, exit the loop.
               results.transcriptions = completed;
-              await log(
-                "info",
-                `Transcriptions stable at ${completed}/${fichesWithRecordings.length} - continuing`
-              );
               break;
             }
-          } else {
-            stableCount = 0;
-            lastCompleted = completed;
+
+            retryAttempt = retryNo;
+            transcriptionStableCount = 0;
+
+            await log("warning", `Retrying transcriptions (${retryNo}/${maxRetries})`, {
+              incomplete: incomplete.length,
+            });
+
+            await step.sendEvent(
+              `retry-transcriptions-${retryNo}`,
+              incomplete.map((ficheId) => ({
+                name: "fiche/transcribe",
+                data: {
+                  fiche_id: ficheId,
+                  priority:
+                    (schedule.transcriptionPriority as "normal" | "high" | "low") ||
+                    "normal",
+                  wait_for_completion: false,
+                },
+                id: `automation-${runIdString}-transcribe-${ficheId}-retry-${retryNo}`,
+              }))
+            );
           }
 
           transcriptionPollAttempt++;
@@ -830,25 +1417,45 @@ export const runAutomationFunction = inngest.createFunction(
           results.transcriptions = lastCompleted;
         }
 
-        if (results.transcriptions < fichesWithRecordings.length) {
+        if (results.transcriptions < targetCount) {
           await log(
             "warning",
-            `Transcription timeout/stall - completed ${results.transcriptions}/${fichesWithRecordings.length}`
+            `Transcription timeout/stall - completed ${results.transcriptions}/${targetCount}`
           );
 
           // Mark remaining fiches as failed to avoid reporting a false "completed" run.
           const incomplete = await step.run(
             `find-incomplete-transcriptions-${runIdString}`,
             async () => {
-              const { getFicheTranscriptionStatus } = await import(
-                "../transcriptions/transcriptions.service.js"
-              );
-              const statuses = await Promise.all(
-                fichesWithRecordings.map((id) => getFicheTranscriptionStatus(id))
-              );
-              return statuses
-                .filter((s) => !(s.total && s.transcribed === s.total))
-                .map((s) => s.ficheId);
+              const { prisma } = await import("../../shared/prisma.js");
+              const cacheIds = transcriptionTargetsWithCache
+                .map((ficheId) => cacheIdByFicheId.get(ficheId))
+                .filter((v): v is string => typeof v === "string" && v.length > 0)
+                .map((idStr) => BigInt(idStr));
+
+              const rows = await prisma.recording.groupBy({
+                by: ["ficheCacheId", "hasTranscription"],
+                where: { ficheCacheId: { in: cacheIds } },
+                _count: { _all: true },
+              });
+
+              const agg = new Map<string, { total: number; transcribed: number }>();
+              for (const r of rows) {
+                const key = r.ficheCacheId.toString();
+                const current = agg.get(key) || { total: 0, transcribed: 0 };
+                const n = typeof r._count?._all === "number" ? r._count._all : 0;
+                current.total += n;
+                if (r.hasTranscription) {current.transcribed += n;}
+                agg.set(key, current);
+              }
+
+              return transcriptionTargetsWithCache.filter((ficheId) => {
+                const cacheId = cacheIdByFicheId.get(ficheId);
+                const counts = cacheId ? agg.get(cacheId) : undefined;
+                const total = counts?.total ?? 0;
+                const transcribed = counts?.transcribed ?? 0;
+                return !(total > 0 && transcribed === total);
+              });
             }
           );
 
@@ -862,7 +1469,18 @@ export const runAutomationFunction = inngest.createFunction(
       }
 
       // STEP 3: Fan out ALL audits at once
-      if (schedule.runAudits && fichesWithRecordings.length > 0) {
+      const canContinueToAudits =
+        schedule.continueOnError || results.failed.length === 0;
+
+      if (schedule.runAudits && !canContinueToAudits) {
+        await log(
+          "warning",
+          "Skipping audit stage due to failures (continueOnError=false)",
+          { failed: results.failed.length }
+        );
+      }
+
+      if (schedule.runAudits && fichesWithRecordings.length > 0 && canContinueToAudits) {
         const auditConfigIds = await step.run(
           "resolve-all-audit-configs",
           async (): Promise<number[]> => {
@@ -872,8 +1490,8 @@ export const runAutomationFunction = inngest.createFunction(
               // Avoid fancy type predicates here — `step.run` serialization and older data
               // can produce unexpected types; do explicit runtime checks.
               for (const maybeId of schedule.specificAuditConfigs as unknown[]) {
-                if (typeof maybeId !== "number") continue;
-                if (!Number.isFinite(maybeId) || maybeId <= 0) continue;
+                if (typeof maybeId !== "number") {continue;}
+                if (!Number.isFinite(maybeId) || maybeId <= 0) {continue;}
                 configIds.push(maybeId);
               }
             }
@@ -884,7 +1502,7 @@ export const runAutomationFunction = inngest.createFunction(
               for (const cfg of automaticConfigs as Array<{ id: unknown }>) {
                 // Prisma returns BigInt IDs; normalize to number for workflow calculations.
                 const n = typeof cfg.id === "bigint" ? Number(cfg.id) : Number(cfg.id);
-                if (!Number.isFinite(n) || n <= 0) continue;
+                if (!Number.isFinite(n) || n <= 0) {continue;}
                 configIds.push(n);
               }
             }
@@ -906,10 +1524,24 @@ export const runAutomationFunction = inngest.createFunction(
         const auditConfigIdsClean: number[] = [];
         if (Array.isArray(auditConfigIds)) {
           for (const maybeId of auditConfigIds as unknown[]) {
-            if (typeof maybeId !== "number") continue;
-            if (!Number.isFinite(maybeId) || maybeId <= 0) continue;
+            if (typeof maybeId !== "number") {continue;}
+            if (!Number.isFinite(maybeId) || maybeId <= 0) {continue;}
             auditConfigIdsClean.push(maybeId);
           }
+        }
+
+        if (auditConfigIdsClean.length === 0) {
+          await log("error", "No audit configs resolved; skipping audit stage", {
+            useAutomaticAudits: schedule.useAutomaticAudits,
+            specificAuditConfigs: schedule.specificAuditConfigs.length,
+          });
+          for (const ficheId of fichesWithRecordings) {
+            results.failed.push({
+              ficheId,
+              error: "No audit configs resolved",
+            });
+          }
+          // Nothing else to do in audit stage; finalization will mark the run as failed/partial.
         }
 
         const auditTasks = fichesWithRecordings.flatMap((ficheId) =>
@@ -927,7 +1559,7 @@ export const runAutomationFunction = inngest.createFunction(
 
           await step.sendEvent(
             "fan-out-all-audits",
-            auditTasks.map(({ ficheId, configId }, idx) => ({
+            auditTasks.map(({ ficheId, configId }) => ({
               name: "audit/run",
               data: {
                 fiche_id: ficheId,
@@ -935,6 +1567,7 @@ export const runAutomationFunction = inngest.createFunction(
                 automation_schedule_id: String(schedule_id),
                 automation_run_id: String(runIdString),
                 trigger_source: "automation",
+                use_rlm: Boolean(selection.useRlm),
               },
               // Deterministic id: avoid duplicate audit dispatch on retries
               id: `automation-${runIdString}-audit-${ficheId}-${configId}`,
@@ -953,7 +1586,16 @@ export const runAutomationFunction = inngest.createFunction(
 
           const auditWaitStarted = Date.now();
           let lastDone = 0;
-          let stableCount = 0;
+          let auditStableCount = 0;
+          let auditStallRetries = 0;
+          const maxAuditRetriesRaw = schedule.maxRetries;
+          const maxAuditStallRetries =
+            schedule.retryFailed &&
+            typeof maxAuditRetriesRaw === "number" &&
+            Number.isFinite(maxAuditRetriesRaw) &&
+            maxAuditRetriesRaw > 0
+              ? Math.floor(maxAuditRetriesRaw)
+              : 0;
           let auditPollAttempt = 0;
 
           let completedAudits = 0;
@@ -1014,17 +1656,27 @@ export const runAutomationFunction = inngest.createFunction(
             }
 
             if (doneAudits === lastDone) {
-              stableCount++;
-              if (stableCount >= 3) {
-                results.audits = doneAudits;
-                await log(
-                  "info",
-                  `Audits stable at ${doneAudits}/${auditTasks.length} - continuing`
-                );
-                break;
+              auditStableCount++;
+              if (auditStableCount >= 3) {
+                if (maxAuditStallRetries > 0 && auditStallRetries < maxAuditStallRetries) {
+                  auditStallRetries++;
+                  auditStableCount = 0;
+                  await log("warning", "Audits stalled; extending wait", {
+                    done: doneAudits,
+                    total: auditTasks.length,
+                    stall_retry: `${auditStallRetries}/${maxAuditStallRetries}`,
+                  });
+                } else {
+                  results.audits = doneAudits;
+                  await log(
+                    "info",
+                    `Audits stable at ${doneAudits}/${auditTasks.length} - proceeding`
+                  );
+                  break;
+                }
               }
             } else {
-              stableCount = 0;
+              auditStableCount = 0;
               lastDone = doneAudits;
             }
 
@@ -1093,7 +1745,7 @@ export const runAutomationFunction = inngest.createFunction(
             const status = isRecord(row) && typeof row.status === "string" ? row.status : null;
             const cfg = isRecord(row) && typeof row.audit_config_id === "string" ? row.audit_config_id : null;
             const err = isRecord(row) && typeof row.error === "string" ? row.error : null;
-            if (!ficheId || !status || !cfg) continue;
+            if (!ficheId || !status || !cfg) {continue;}
 
             let agg = perFiche.get(ficheId);
             if (!agg) {
@@ -1101,10 +1753,10 @@ export const runAutomationFunction = inngest.createFunction(
               perFiche.set(ficheId, agg);
             }
 
-            if (status === "completed") agg.completed.add(cfg);
+            if (status === "completed") {agg.completed.add(cfg);}
             if (status === "failed") {
               agg.failed.add(cfg);
-              if (err) agg.errors.push(err);
+              if (err) {agg.errors.push(err);}
             }
           }
 
@@ -1141,7 +1793,7 @@ export const runAutomationFunction = inngest.createFunction(
       // Deduplicate failures (same fiche can fail multiple stages) and compute successful list.
       const failedByFiche = new Map<string, { ficheId: string; error: string }>();
       for (const f of results.failed) {
-        if (!f || typeof f.ficheId !== "string" || f.ficheId.length === 0) continue;
+        if (!f || typeof f.ficheId !== "string" || f.ficheId.length === 0) {continue;}
         if (!failedByFiche.has(f.ficheId)) {
           failedByFiche.set(f.ficheId, f);
         }
@@ -1170,13 +1822,14 @@ export const runAutomationFunction = inngest.createFunction(
           resultSummary: {
             successful: results.successful,
             failed: results.failed,
+            ignored: results.ignored,
             transcriptions: results.transcriptions,
             audits: results.audits,
           },
         });
 
         await automationRepository.updateScheduleStats(
-          BigInt(schedule_id),
+          scheduleId,
           finalStatus === "completed" ? "success" : finalStatus
         );
       });
@@ -1196,6 +1849,7 @@ export const runAutomationFunction = inngest.createFunction(
             total_fiches: ficheIds.length,
             successful_fiches: results.successful.length,
             failed_fiches: results.failed.length,
+            ignored_fiches: results.ignored.length,
             transcriptions_run: results.transcriptions,
             audits_run: results.audits,
             failures: results.failed,
@@ -1221,6 +1875,7 @@ Summary:
 - Total Fiches: ${ficheIds.length}
 - Successful: ${results.successful.length}
 - Failed: ${results.failed.length}
+- Ignored: ${results.ignored.length}
 - Transcriptions: ${results.transcriptions}
 - Audits: ${results.audits}
 - Duration: ${Math.round(durationMs / 1000)}s
@@ -1248,6 +1903,40 @@ ${
         duration_ms: durationMs,
       });
 
+      await step.sendEvent("emit-automation-completed", {
+        name: "automation/completed",
+        data: {
+          schedule_id,
+          run_id: String(runId),
+          status: finalStatus,
+          total_fiches: ficheIds.length,
+          successful_fiches: results.successful.length,
+          failed_fiches: results.failed.length,
+          duration_ms: durationMs,
+        },
+        id: `automation-completed-${runIdString}`,
+      });
+
+      await step.run("realtime-run-finished", async () => {
+        await publishPusherEvent({
+          event: "automation.run.completed",
+          payload: {
+            job_id: realtimeJobId,
+            schedule_id: String(schedule_id),
+            run_id: runIdString,
+            status: finalStatus,
+            total_fiches: ficheIds.length,
+            successful_fiches: results.successful.length,
+            failed_fiches: results.failed.length,
+            ignored_fiches: results.ignored.length,
+            transcriptions_run: results.transcriptions,
+            audits_run: results.audits,
+            duration_ms: durationMs,
+          },
+        });
+        return { ok: true };
+      });
+
       return {
         success: true,
         schedule_id,
@@ -1256,6 +1945,7 @@ ${
         total_fiches: ficheIds.length,
         successful_fiches: results.successful.length,
         failed_fiches: results.failed.length,
+        ignored_fiches: results.ignored.length,
         transcriptions_run: results.transcriptions,
         audits_run: results.audits,
         duration_ms: durationMs,
@@ -1288,6 +1978,31 @@ ${
         await log("error", `Automation failed: ${msg}`, {
           error: msg,
         });
+      });
+
+      await step.sendEvent("emit-automation-failed", {
+        name: "automation/failed",
+        data: {
+          schedule_id,
+          run_id: String(runId),
+          error: msg,
+        },
+        id: `automation-failed-${runIdString}`,
+      });
+
+      await step.run("realtime-run-failed", async () => {
+        await publishPusherEvent({
+          event: "automation.run.failed",
+          payload: {
+            job_id: realtimeJobId,
+            schedule_id: String(schedule_id),
+            run_id: runIdString,
+            status: "failed",
+            error: msg,
+            duration_ms: durationMs,
+          },
+        });
+        return { ok: true };
       });
 
       // Send error notification
@@ -1365,6 +2080,7 @@ export const scheduledAutomationCheck = inngest.createFunction(
         dayOfWeek: s.dayOfWeek,
         dayOfMonth: s.dayOfMonth,
         lastRunAt: s.lastRunAt ? new Date(s.lastRunAt).toISOString() : null,
+        lastRunStatus: typeof s.lastRunStatus === "string" ? s.lastRunStatus : null,
       }));
     }
     );
@@ -1386,6 +2102,31 @@ export const scheduledAutomationCheck = inngest.createFunction(
         // Skip MANUAL schedules
         if (schedule.scheduleType === "MANUAL") {
           continue;
+        }
+
+        // Prevent overlapping runs: if the schedule is currently marked "running", skip it,
+        // unless it looks stale (e.g., worker crashed). Stale threshold is based on the
+        // automation finish timeout (2h) with a small grace period.
+        if (schedule.lastRunStatus === "running") {
+          const lastRunAt = schedule.lastRunAt ? new Date(schedule.lastRunAt) : null;
+          const ageMs = lastRunAt ? now.getTime() - lastRunAt.getTime() : Number.POSITIVE_INFINITY;
+          const staleMs = 2 * 60 * 60 * 1000 + 15 * 60 * 1000; // 2h + 15m grace
+
+          if (Number.isFinite(ageMs) && ageMs >= staleMs) {
+            logger.warn("Schedule appears stuck (running too long); allowing retrigger", {
+              schedule_id: schedule.id,
+              name: schedule.name,
+              lastRunAt: schedule.lastRunAt,
+              age_minutes: Math.round(ageMs / 60000),
+            });
+          } else {
+            logger.info("Skipping schedule: already running", {
+              schedule_id: schedule.id,
+              name: schedule.name,
+              lastRunAt: schedule.lastRunAt,
+            });
+            continue;
+          }
         }
 
         // Check if schedule needs required fields
@@ -1422,7 +2163,7 @@ export const scheduledAutomationCheck = inngest.createFunction(
           dayOfMonth: schedule.dayOfMonth,
         });
 
-        if (!cronExpression) continue;
+        if (!cronExpression) {continue;}
 
         // Find due time within window using cron matching (timezone aware)
         let dueAt: Date | null = null;
@@ -1442,7 +2183,7 @@ export const scheduledAutomationCheck = inngest.createFunction(
           continue;
         }
 
-        if (!dueAt) continue;
+        if (!dueAt) {continue;}
 
         const lastRunAt = schedule.lastRunAt ? new Date(schedule.lastRunAt) : null;
         const shouldRun = !lastRunAt || lastRunAt < dueAt;
@@ -1477,6 +2218,7 @@ export const scheduledAutomationCheck = inngest.createFunction(
           name: "automation/run" as const,
           data: {
             schedule_id: schedule.id,
+            due_at: schedule.dueAt,
           },
           // Idempotent per schedule + due time (safe chars only)
           id: Number.isFinite(dueAtMs)

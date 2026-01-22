@@ -10,26 +10,27 @@
  * LAYER: Presentation (Background Jobs)
  */
 
-import { inngest } from "../../inngest/client.js";
 import { NonRetriableError } from "inngest";
-import * as fichesApi from "./fiches.api.js";
-import * as fichesCache from "./fiches.cache.js";
-import * as fichesRepository from "./fiches.repository.js";
-import * as fichesWebhooks from "./fiches.webhooks.js";
-import { enrichRecording } from "../../utils/recording-parser.js";
-import { RATE_LIMITS, TIMEOUTS, CONCURRENCY } from "../../shared/constants.js";
+
+import { inngest } from "../../inngest/client.js";
+import { CONCURRENCY,RATE_LIMITS, TIMEOUTS } from "../../shared/constants.js";
 import {
   getInngestGlobalConcurrency,
   getInngestParallelismPerServer,
 } from "../../shared/inngest-concurrency.js";
 import { prisma } from "../../shared/prisma.js";
 import { publishPusherEvent } from "../../shared/pusher.js";
+import { enrichRecording } from "../../utils/recording-parser.js";
+import * as fichesApi from "./fiches.api.js";
+import * as fichesCache from "./fiches.cache.js";
+import * as fichesRepository from "./fiches.repository.js";
 import type {
   FicheDetailsResponse,
   Recording,
   SalesFicheWithRecordings,
   SalesWithCallsResponse,
 } from "./fiches.schemas.js";
+import * as fichesWebhooks from "./fiches.webhooks.js";
 
 // Type definitions for step returns
 type CacheCheckResultNotFound = {
@@ -61,28 +62,13 @@ function isSalesListOnlyRawData(value: unknown): boolean {
   return isRecord(value) && value._salesListOnly === true;
 }
 
-function getCleFromRawData(rawData: unknown): string | null {
-  if (!isRecord(rawData)) return null;
-
-  const cle = rawData.cle;
-  if (typeof cle === "string" && cle) return cle;
-
-  const info = rawData.information;
-  if (isRecord(info)) {
-    const cle2 = info.cle;
-    if (typeof cle2 === "string" && cle2) return cle2;
-  }
-
-  return null;
-}
-
 function getProgressiveFetchDayContext(event: unknown): {
   jobId?: string;
   date?: string;
 } {
-  if (!isRecord(event)) return {};
+  if (!isRecord(event)) {return {};}
   const data = event.data;
-  if (!isRecord(data)) return {};
+  if (!isRecord(data)) {return {};}
   const jobId = typeof data.jobId === "string" ? data.jobId : undefined;
   const date = typeof data.date === "string" ? data.date : undefined;
   return { jobId, date };
@@ -273,25 +259,8 @@ export const fetchFicheFunction = inngest.createFunction(
         fiche_id,
       });
 
-      // Get cached data to extract cle
-      const cached = await prisma.ficheCache.findUnique({
-        where: { ficheId: fiche_id },
-      });
-
-      if (!cached) {
-        throw new Error(
-          `Fiche ${fiche_id} not in cache - cannot fetch without cle`
-        );
-      }
-
-      const cle = getCleFromRawData(cached.rawData);
-
-      if (!cle) {
-        throw new Error(`Missing cle parameter for fiche ${fiche_id}`);
-      }
-
       try {
-        const data = await fichesApi.fetchFicheDetails(fiche_id, cle);
+        const data = await fichesApi.fetchFicheDetails(fiche_id);
 
         logger.info("API fetch successful", {
           fiche_id,
@@ -733,10 +702,10 @@ export const cacheSalesListFunction = inngest.createFunction(
     const cacheResult = await step.run(
       "cache-fiches-with-recordings",
       async () => {
-        const salesData = salesResult.data;
+        const salesPayload = salesResult.data;
 
         logger.info("Caching fiches with recordings", {
-          count: salesData.fiches.length,
+          count: salesPayload.fiches.length,
         });
 
         const cacheConcurrency = Math.max(
@@ -755,16 +724,18 @@ export const cacheSalesListFunction = inngest.createFunction(
         const perFicheResults = await mapWithConcurrency<
           SalesFicheWithRecordings,
           CacheOneResult
-        >(salesData.fiches as SalesFicheWithRecordings[], cacheConcurrency, async (fiche) => {
-          if (!fiche.cle) {
-            return { ok: false, ficheId: fiche.id, error: "Missing cle" };
-          }
-
+        >(
+          salesPayload.fiches as SalesFicheWithRecordings[],
+          cacheConcurrency,
+          async (fiche) => {
           try {
+            if (!fiche.cle) {
+              logger.warn("Sales fiche missing cle; caching anyway", { fiche_id: fiche.id });
+            }
             const cached = await fichesCache.cacheFicheSalesSummary(
               {
                 id: fiche.id,
-                cle: fiche.cle,
+                cle: fiche.cle ?? null,
                 nom: fiche.nom,
                 prenom: fiche.prenom,
                 email: fiche.email,
@@ -804,11 +775,11 @@ export const cacheSalesListFunction = inngest.createFunction(
         const totalCached = cachedFicheIds.length;
         const totalFailed = failedFicheIds.length;
         const batchesProcessed = Math.ceil(
-          salesData.fiches.length / Math.max(1, cacheConcurrency)
+          salesPayload.fiches.length / Math.max(1, cacheConcurrency)
         );
 
         logger.info("All fiches cached", {
-          total: salesData.fiches.length,
+          total: salesPayload.fiches.length,
           cached: totalCached,
           failed: totalFailed,
         });
@@ -817,10 +788,10 @@ export const cacheSalesListFunction = inngest.createFunction(
           success: true,
           startDate,
           endDate,
-          total_fiches: salesData.fiches.length,
+          total_fiches: salesPayload.fiches.length,
           cached_count: totalCached,
           failed_count: totalFailed,
-          success_rate: `${totalCached}/${salesData.fiches.length}`,
+          success_rate: `${totalCached}/${salesPayload.fiches.length}`,
           batches_processed: batchesProcessed,
           batch_size: cacheConcurrency,
           cached_fiche_ids: cachedFicheIds,
@@ -1040,19 +1011,17 @@ export const progressiveFetchDayFunction = inngest.createFunction(
       await step.run("cache-sales-summaries", async () => {
         const { mapWithConcurrency } = await import("../../utils/concurrency.js");
         await mapWithConcurrency(salesData.fiches, cacheConcurrency, async (fiche) => {
-          // Skip fiches without cle (can't fetch details later)
           if (!fiche.cle) {
-            logger.warn("Fiche missing cle, skipping", {
+            logger.warn("Fiche missing cle; caching anyway", {
               fiche_id: fiche.id,
               date,
             });
-            return;
           }
 
           await fichesCache.cacheFicheSalesSummary(
             {
               id: fiche.id,
-              cle: fiche.cle,
+              cle: fiche.cle ?? null,
               nom: fiche.nom,
               prenom: fiche.prenom,
               email: fiche.email,

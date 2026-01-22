@@ -4,14 +4,14 @@
  * Génération des prompts optimisés pour GPT-5
  */
 
-import type { ProductVerificationContext } from "./audits.vector-store.js";
-import { formatVerificationContextForPrompt } from "./audits.vector-store.js";
 import type { TimelineRecording } from "../../schemas.js";
 import type {
   AuditConfigForAnalysis,
   AuditStepDefinition,
   ProductLinkResult,
 } from "./audits.types.js";
+import type { ProductVerificationContext } from "./audits.vector-store.js";
+import { formatVerificationContextForPrompt } from "./audits.vector-store.js";
 
 export function buildAnalysisRules(): string {
   return `═══════════════════════════════════════════════════════════════════════════════
@@ -136,11 +136,11 @@ export function buildTimelineExcerptText(
   for (const rec of timeline) {
     for (const chunk of rec.chunks || []) {
       const textNorm = normalize(chunk.full_text || "");
-      if (!textNorm) continue;
+      if (!textNorm) {continue;}
 
       let score = 0;
       for (const term of terms) {
-        if (textNorm.includes(term)) score++;
+        if (textNorm.includes(term)) {score++;}
       }
       if (score > 0) {
         scored.push({ recording_index: rec.recording_index, chunk_index: chunk.chunk_index, score });
@@ -153,7 +153,7 @@ export function buildTimelineExcerptText(
   const selected = new Map<number, Set<number>>();
   const take = scored.slice(0, maxChunks);
   for (const c of take) {
-    if (!selected.has(c.recording_index)) selected.set(c.recording_index, new Set());
+    if (!selected.has(c.recording_index)) {selected.set(c.recording_index, new Set());}
     const set = selected.get(c.recording_index)!;
     set.add(c.chunk_index);
     for (let d = 1; d <= neighbor; d++) {
@@ -167,7 +167,7 @@ export function buildTimelineExcerptText(
     for (const rec of timeline) {
       const set = new Set<number>();
       for (const ch of rec.chunks || []) {
-        if (set.size >= 2) break;
+        if (set.size >= 2) {break;}
         set.add(ch.chunk_index);
       }
       selected.set(rec.recording_index, set);
@@ -186,7 +186,7 @@ export function buildTimelineExcerptText(
 
   for (const recording of timeline) {
     const wanted = selected.get(recording.recording_index);
-    if (!wanted || wanted.size === 0) continue;
+    if (!wanted || wanted.size === 0) {continue;}
 
     text += `\n${"=".repeat(80)}\n`;
     text += `Enregistrement #${recording.recording_index + 1}\n`;
@@ -342,7 +342,7 @@ les informations correctes et complètes au client.
 
 `;
 
-    formule.garantiesParsed.forEach((garantie, gIndex: number) => {
+    formule.garantiesParsed.forEach((garantie) => {
       // Add intro text if available (important context)
       if (
         garantie.introText &&

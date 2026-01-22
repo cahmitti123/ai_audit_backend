@@ -19,7 +19,7 @@ export type AuditsEvents = {
      * Optional per-request toggle for RLM-style transcript tools mode.
      * - true: use transcript tools (out-of-prompt evidence lookup)
      * - false: legacy prompt stuffing
-     * - undefined: use server default (env)
+     * - undefined: treated as false (prompt mode default)
      */
     use_rlm?: boolean;
   };
@@ -51,7 +51,13 @@ export type AuditsEvents = {
   };
   "audit/completed": {
     fiche_id: string;
+    /**
+     * Legacy field name: this currently contains the DB audit id (BigInt as string).
+     * Prefer `audit_db_id` and `audit_tracking_id` when present.
+     */
     audit_id: string;
+    audit_db_id?: string;
+    audit_tracking_id?: string;
     audit_config_id: number;
     score: number;
     niveau: string;
@@ -63,8 +69,15 @@ export type AuditsEvents = {
     audit_config_id: number;
     error: string;
     retry_count: number;
+    audit_db_id?: string;
+    audit_tracking_id?: string;
   };
   "audit/batch": {
+    /**
+     * Optional batch tracking id (used for realtime progress payloads and Redis state).
+     * If not provided, the workflow derives one.
+     */
+    batch_id?: string;
     fiche_ids: string[];
     audit_config_id?: number;
     user_id?: string;

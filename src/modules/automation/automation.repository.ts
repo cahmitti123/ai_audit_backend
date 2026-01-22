@@ -12,9 +12,10 @@
  * LAYER: Data (Database operations)
  */
 
-import { prisma } from "../../shared/prisma.js";
-import { serializeBigInt } from "../../shared/bigint-serializer.js";
 import type { Prisma } from "@prisma/client";
+
+import { serializeBigInt } from "../../shared/bigint-serializer.js";
+import { prisma } from "../../shared/prisma.js";
 import type {
   CreateAutomationScheduleInput,
   UpdateAutomationScheduleInput,
@@ -308,7 +309,7 @@ export async function updateScheduleStats(
     where: { id: scheduleId },
   });
 
-  if (!schedule) return;
+  if (!schedule) {return;}
 
   await prisma.automationSchedule.update({
     where: { id: scheduleId },

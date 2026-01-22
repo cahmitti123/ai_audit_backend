@@ -4,8 +4,9 @@
  * Database operations for insurance products
  */
 
-import { prisma } from "../../shared/prisma.js";
 import type { Prisma } from "@prisma/client";
+
+import { prisma } from "../../shared/prisma.js";
 
 // ============================================
 // Groupes Repository
@@ -49,7 +50,7 @@ export async function getGroupeById(id: bigint) {
     },
   });
 
-  if (!groupe) return null;
+  if (!groupe) {return null;}
 
   // Add counts to each gamme
   const gammesWithCounts = groupe.gammes.map(gamme => ({
@@ -164,7 +165,7 @@ export async function getGammeById(id: bigint) {
     },
   });
 
-  if (!gamme) return null;
+  if (!gamme) {return null;}
 
   // Calculate counts
   const formulesCount = gamme.formules.length;
@@ -293,7 +294,7 @@ export async function getFormuleById(id: bigint) {
     },
   });
 
-  if (!formule) return null;
+  if (!formule) {return null;}
 
   // Calculate counts
   const garantiesCount = formule.garantiesParsed.length;
@@ -358,7 +359,14 @@ export async function searchProducts(query: string, options?: {
   skip?: number;
   take?: number;
 }) {
-  const searchTerm = `%${query}%`;
+  const skip =
+    typeof options?.skip === "number" && Number.isFinite(options.skip)
+      ? Math.max(0, Math.trunc(options.skip))
+      : 0;
+  const take =
+    typeof options?.take === "number" && Number.isFinite(options.take)
+      ? Math.min(50, Math.max(1, Math.trunc(options.take)))
+      : 10;
   
   // Search across groupes, gammes, and formules
   const [groupes, gammes, formules] = await Promise.all([
@@ -369,7 +377,8 @@ export async function searchProducts(query: string, options?: {
           { code: { contains: query, mode: "insensitive" } },
         ],
       },
-      take: 10,
+      skip,
+      take,
     }),
     prisma.gamme.findMany({
       where: {
@@ -381,7 +390,8 @@ export async function searchProducts(query: string, options?: {
       include: {
         groupe: true,
       },
-      take: 10,
+      skip,
+      take,
     }),
     prisma.formule.findMany({
       where: {
@@ -398,7 +408,8 @@ export async function searchProducts(query: string, options?: {
           },
         },
       },
-      take: 10,
+      skip,
+      take,
     }),
   ]);
 
@@ -448,11 +459,11 @@ export async function findFormuleByNames(params: {
     const t = b;
     const n = s.length;
     const m = t.length;
-    if (n === 0) return m;
-    if (m === 0) return n;
+    if (n === 0) {return m;}
+    if (m === 0) {return n;}
 
     const dp = new Array<number>(m + 1);
-    for (let j = 0; j <= m; j++) dp[j] = j;
+    for (let j = 0; j <= m; j++) {dp[j] = j;}
 
     for (let i = 1; i <= n; i++) {
       let prev = dp[0];
@@ -474,9 +485,9 @@ export async function findFormuleByNames(params: {
   const similarity = (aRaw: string, bRaw: string) => {
     const a = normalize(aRaw);
     const b = normalize(bRaw);
-    if (!a || !b) return 0;
-    if (a === b) return 1;
-    if (a.includes(b) || b.includes(a)) return 0.92;
+    if (!a || !b) {return 0;}
+    if (a === b) {return 1;}
+    if (a.includes(b) || b.includes(a)) {return 0.92;}
     const dist = levenshtein(a, b);
     return 1 - dist / Math.max(a.length, b.length);
   };
@@ -560,7 +571,7 @@ export async function findFormuleByNames(params: {
     }))
     .sort((a, b) => b.score - a.score)[0];
 
-  if (!bestGroupe || bestGroupe.score < 0.6) return null;
+  if (!bestGroupe || bestGroupe.score < 0.6) {return null;}
 
   const gammes = await prisma.gamme.findMany({
     where: { groupeId: bestGroupe.g.id },
@@ -573,7 +584,7 @@ export async function findFormuleByNames(params: {
     }))
     .sort((a, b) => b.score - a.score)[0];
 
-  if (!bestGamme || bestGamme.score < 0.6) return null;
+  if (!bestGamme || bestGamme.score < 0.6) {return null;}
 
   const formules = await prisma.formule.findMany({
     where: { gammeId: bestGamme.gm.id },
@@ -590,7 +601,7 @@ export async function findFormuleByNames(params: {
     })
     .sort((a, b) => b.score - a.score)[0];
 
-  if (!bestFormule || bestFormule.score < 0.65) return null;
+  if (!bestFormule || bestFormule.score < 0.65) {return null;}
 
   const fuzzy = await prisma.formule.findUnique({
     where: { id: bestFormule.f.id },
@@ -616,7 +627,7 @@ export async function findFormuleByNames(params: {
     },
   });
 
-  if (!fuzzy) return null;
+  if (!fuzzy) {return null;}
 
   // Calculate counts
   const garantiesCount = fuzzy.garantiesParsed.length;

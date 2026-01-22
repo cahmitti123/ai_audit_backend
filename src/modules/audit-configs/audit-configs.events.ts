@@ -7,7 +7,6 @@
 
 import type {
   AuditConfig,
-  AuditConfigDetail,
   AuditStep,
 } from "./audit-configs.schemas.js";
 

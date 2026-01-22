@@ -5,12 +5,13 @@
  */
 
 import type { Response } from "express";
+
 import { jsonResponse } from "./bigint-serializer.js";
-import { logger } from "./logger.js";
 import { AppError } from "./errors.js";
+import { logger } from "./logger.js";
 
 function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
+  if (error instanceof Error) {return error.message;}
   try {
     return String(error);
   } catch {
@@ -53,7 +54,7 @@ export function fail(
     error: msg || "Internal server error",
   };
 
-  if (app?.code) payload.code = app.code;
+  if (app?.code) {payload.code = app.code;}
   if (process.env.NODE_ENV === "development" && error instanceof Error) {
     payload.stack = error.stack;
   }

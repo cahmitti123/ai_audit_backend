@@ -14,38 +14,39 @@
  */
 
 import type {
-  FicheSelection,
-  ScheduleType,
-  ProcessedFicheData,
-  CreateAutomationScheduleInput,
-  UpdateAutomationScheduleInput,
-  AutomationSchedule,
-  AutomationScheduleWithRuns,
-  AutomationRun,
-  AutomationRunWithLogs,
-  AutomationLog,
-  AutomationLogLevel,
-  AutomationRunStatus,
-  TranscriptionPriority,
-} from "./automation.schemas.js";
-import type {
   AutomationLog as DbAutomationLog,
   AutomationRun as DbAutomationRun,
   AutomationSchedule as DbAutomationSchedule,
 } from "@prisma/client";
-import * as automationRepository from "./automation.repository.js";
-import * as automationApi from "./automation.api.js";
+
+import { ValidationError } from "../../shared/errors.js";
 import { logger } from "../../shared/logger.js";
+import * as automationApi from "./automation.api.js";
 import { cronMatches, parseCronExpression } from "./automation.cron.js";
-import { NotFoundError, ValidationError } from "../../shared/errors.js";
+import * as automationRepository from "./automation.repository.js";
+import type {
+  AutomationLog,
+  AutomationLogLevel,
+  AutomationRun,
+  AutomationRunStatus,
+  AutomationRunWithLogs,
+  AutomationSchedule,
+  AutomationScheduleWithRuns,
+  CreateAutomationScheduleInput,
+  FicheSelection,
+  ProcessedFicheData,
+  ScheduleType,
+  TranscriptionPriority,
+  UpdateAutomationScheduleInput,
+} from "./automation.schemas.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
 function getString(value: unknown): string | null {
-  if (typeof value === "string") return value;
-  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string") {return value;}
+  if (typeof value === "number" && Number.isFinite(value)) {return String(value);}
   return null;
 }
 
@@ -61,9 +62,9 @@ type ExternalFicheSummary = {
 };
 
 function toExternalFicheSummary(value: unknown): ExternalFicheSummary | null {
-  if (!isRecord(value)) return null;
+  if (!isRecord(value)) {return null;}
   const idRaw = getString(value.id);
-  if (!idRaw) return null;
+  if (!idRaw) {return null;}
 
   const pick = (key: string): string | undefined => {
     const v = (value as Record<string, unknown>)[key];
@@ -172,7 +173,7 @@ export function getNextRunTime(
   timeOfDay?: string,
   dayOfWeek?: number,
   dayOfMonth?: number,
-  timezone = "UTC"
+  _timezone = "UTC"
 ): Date | null {
   // This is a simplified implementation
   // In production, you'd use a library like 'cron-parser'
@@ -275,7 +276,7 @@ export function getCronExpressionForSchedule(params: {
   dayOfMonth?: number | null;
 }): string | null {
   const scheduleType = params.scheduleType;
-  if (scheduleType === "MANUAL") return null;
+  if (scheduleType === "MANUAL") {return null;}
 
   if (scheduleType === "CRON") {
     return params.cronExpression || null;
@@ -332,7 +333,7 @@ function getDatePartsInTimeZone(
   const parts = fmt.formatToParts(date);
   const map: Record<string, string> = {};
   for (const p of parts) {
-    if (p.type !== "literal") map[p.type] = p.value;
+    if (p.type !== "literal") {map[p.type] = p.value;}
   }
 
   const weekdayStr = map.weekday;

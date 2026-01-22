@@ -4,17 +4,17 @@
  * Generates chronological timeline from transcriptions
  */
 
-import {
-  Transcription,
-  TimelineRecording,
+import type {
   ConversationChunk,
+  TimelineRecording,
+  Transcription,
 } from "../../schemas.js";
 import { TIMELINE_CHUNK_SIZE } from "../../shared/constants.js";
 import { logger } from "../../shared/logger.js";
 import {
-  logPayloadSize,
   formatBytes,
   getPayloadSize,
+  logPayloadSize,
 } from "../../utils/payload-size.js";
 
 type RecordingMetadata = {
@@ -72,7 +72,7 @@ export function generateTimeline(
     let currentEnd = 0;
 
     for (const word of words) {
-      if (word.type === "spacing") continue;
+      if (word.type === "spacing") {continue;}
 
       const speaker = word.speaker_id ?? "unknown";
 

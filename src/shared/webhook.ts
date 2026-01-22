@@ -73,6 +73,23 @@ export async function sendNotification(
 /**
  * Webhook helper for audit events
  */
+type AuditApproach = { use_rlm: boolean; transcript_mode: "prompt" | "tools" };
+type AuditWebhookMeta = {
+  /**
+   * Database audit id (BigInt serialized as string).
+   * This makes it easy to bridge realtime events → REST `GET /api/audits/:audit_id`.
+   */
+  audit_db_id?: string;
+  /**
+   * Inngest event id for the parent workflow/event that triggered this realtime message.
+   */
+  event_id?: string;
+  /**
+   * Long-context strategy for transcript evidence.
+   */
+  approach?: AuditApproach;
+};
+
 export const auditWebhooks = {
   /**
    * Sent when audit workflow starts
@@ -82,86 +99,129 @@ export const auditWebhooks = {
     ficheId: string,
     configId: string,
     configName: string,
-    totalSteps: number
+    totalSteps: number,
+    meta?: AuditWebhookMeta
   ) =>
     sendWebhook("audit.started", {
       audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
       fiche_id: ficheId,
       audit_config_id: configId,
       audit_config_name: configName,
       total_steps: totalSteps,
       started_at: new Date().toISOString(),
       status: "started",
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   /**
    * Sent when starting to fetch fiche data
    */
-  ficheFetchStarted: (ficheId: string, fromCache: boolean) =>
+  ficheFetchStarted: (
+    auditId: string,
+    ficheId: string,
+    fromCache: boolean,
+    meta?: AuditWebhookMeta
+  ) =>
     sendWebhook("audit.fiche_fetch_started", {
+      audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
       fiche_id: ficheId,
       from_cache: fromCache,
       status: "fetching",
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   /**
    * Sent when fiche data is fetched
    */
   ficheFetchCompleted: (
+    auditId: string,
     ficheId: string,
     recordingsCount: number,
     prospectName: string,
-    fromCache: boolean
+    fromCache: boolean,
+    meta?: AuditWebhookMeta
   ) =>
     sendWebhook("audit.fiche_fetch_completed", {
+      audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
       fiche_id: ficheId,
       recordings_count: recordingsCount,
       prospect_name: prospectName,
       from_cache: fromCache,
       status: "fetched",
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   /**
    * Sent when audit configuration is loaded
    */
-  configLoaded: (configId: string, configName: string, stepsCount: number) =>
+  configLoaded: (
+    auditId: string,
+    ficheId: string,
+    configId: string,
+    configName: string,
+    stepsCount: number,
+    meta?: AuditWebhookMeta
+  ) =>
     sendWebhook("audit.config_loaded", {
+      audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
+      fiche_id: ficheId,
       config_id: configId,
       config_name: configName,
       steps_count: stepsCount,
       status: "loaded",
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   /**
    * Sent when checking transcription status
    */
   transcriptionCheck: (
+    auditId: string,
     ficheId: string,
     totalRecordings: number,
     transcribed: number,
-    needsTranscription: number
+    needsTranscription: number,
+    meta?: AuditWebhookMeta
   ) =>
     sendWebhook("audit.transcription_check", {
+      audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
       fiche_id: ficheId,
       total_recordings: totalRecordings,
       transcribed,
       needs_transcription: needsTranscription,
       status: "checked",
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   /**
    * Sent when timeline is generated
    */
   timelineGenerated: (
+    auditId: string,
     ficheId: string,
     recordingsCount: number,
-    totalChunks: number
+    totalChunks: number,
+    meta?: AuditWebhookMeta
   ) =>
     sendWebhook("audit.timeline_generated", {
+      audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
       fiche_id: ficheId,
       recordings_count: recordingsCount,
       total_chunks: totalChunks,
       status: "generated",
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   /**
@@ -171,14 +231,18 @@ export const auditWebhooks = {
     auditId: string,
     ficheId: string,
     totalSteps: number,
-    model: string
+    model: string,
+    meta?: AuditWebhookMeta
   ) =>
     sendWebhook("audit.analysis_started", {
       audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
       fiche_id: ficheId,
       total_steps: totalSteps,
       model,
       status: "analyzing",
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   /**
@@ -191,10 +255,13 @@ export const auditWebhooks = {
     stepName: string,
     totalSteps: number,
     stepWeight: number,
-    isCritical: boolean
+    isCritical: boolean,
+    meta?: AuditWebhookMeta
   ) =>
     sendWebhook("audit.step_started", {
       audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
       fiche_id: ficheId,
       step_position: stepPosition,
       step_name: stepName,
@@ -202,6 +269,7 @@ export const auditWebhooks = {
       step_weight: stepWeight,
       is_critical: isCritical,
       status: "processing",
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   /**
@@ -216,10 +284,13 @@ export const auditWebhooks = {
     maxScore: number,
     conforme: boolean,
     totalCitations: number,
-    tokensUsed: number
+    tokensUsed: number,
+    meta?: AuditWebhookMeta
   ) =>
     sendWebhook("audit.step_completed", {
       audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
       fiche_id: ficheId,
       step_position: stepPosition,
       step_name: stepName,
@@ -229,6 +300,7 @@ export const auditWebhooks = {
       total_citations: totalCitations,
       tokens_used: tokensUsed,
       status: "completed",
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   /**
@@ -239,15 +311,19 @@ export const auditWebhooks = {
     ficheId: string,
     stepPosition: number,
     stepName: string,
-    error: string
+    error: string,
+    meta?: AuditWebhookMeta
   ) =>
     sendWebhook("audit.step_failed", {
       audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
       fiche_id: ficheId,
       step_position: stepPosition,
       step_name: stepName,
       error,
       status: "failed",
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   /**
@@ -260,17 +336,24 @@ export const auditWebhooks = {
     completedSteps: number,
     totalSteps: number,
     failedSteps: number,
-    currentPhase: string
+    currentPhase: string,
+    meta?: AuditWebhookMeta
   ) =>
     sendWebhook("audit.progress", {
       audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
       fiche_id: ficheId,
       completed_steps: completedSteps,
       total_steps: totalSteps,
       failed_steps: failedSteps,
       current_phase: currentPhase,
-      progress_percentage: Math.round((completedSteps / totalSteps) * 100),
+      progress_percentage:
+        totalSteps > 0
+          ? Math.max(0, Math.min(100, Math.round((completedSteps / totalSteps) * 100)))
+          : 0,
       status: "in_progress",
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   /**
@@ -283,10 +366,13 @@ export const auditWebhooks = {
     scorePercentage: string,
     niveau: string,
     isCompliant: boolean,
-    criticalIssues: string
+    criticalIssues: string,
+    meta?: AuditWebhookMeta
   ) =>
     sendWebhook("audit.compliance_calculated", {
       audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
       fiche_id: ficheId,
       overall_score: score,
       score_percentage: scorePercentage,
@@ -294,6 +380,7 @@ export const auditWebhooks = {
       is_compliant: isCompliant,
       critical_issues: criticalIssues,
       status: "calculated",
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   /**
@@ -309,10 +396,13 @@ export const auditWebhooks = {
     successfulSteps: number,
     failedSteps: number,
     totalTokens: number,
-    durationSeconds: number
+    durationSeconds: number,
+    meta?: AuditWebhookMeta
   ) =>
     sendWebhook("audit.completed", {
       audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
       fiche_id: ficheId,
       overall_score: overallScore,
       score_percentage: scorePercentage,
@@ -324,6 +414,7 @@ export const auditWebhooks = {
       duration_seconds: durationSeconds,
       completed_at: new Date().toISOString(),
       status: "completed",
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   /**
@@ -338,10 +429,13 @@ export const auditWebhooks = {
       completed_steps: number;
       total_steps: number;
       failed_steps: number;
-    }
+    },
+    meta?: AuditWebhookMeta
   ) =>
     sendWebhook("audit.failed", {
       audit_id: auditId,
+      ...(meta?.event_id ? { event_id: meta.event_id } : {}),
+      ...(meta?.audit_db_id ? { audit_db_id: meta.audit_db_id } : {}),
       fiche_id: ficheId,
       error,
       failed_phase: failedPhase,
@@ -350,6 +444,7 @@ export const auditWebhooks = {
       ...(partialResults && {
         partial_results: partialResults,
       }),
+      ...(meta?.approach ? { approach: meta.approach } : {}),
     }),
 
   stepRerunStarted: (rerunId: string, auditId: string, stepPosition: number) =>
@@ -633,7 +728,10 @@ export const batchWebhooks = {
         total,
         completed,
         failed,
-        progress_percentage: Math.round((completed / total) * 100),
+        progress_percentage:
+          total > 0
+            ? Math.max(0, Math.min(100, Math.round((completed / total) * 100)))
+            : 0,
       },
       "batch-service"
     ),

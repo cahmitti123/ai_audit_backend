@@ -10,6 +10,7 @@
 
 import { tool } from "ai";
 import { z } from "zod";
+
 import type { TimelineRecording } from "../../schemas.js";
 
 export type TranscriptChunkRef = {
@@ -48,7 +49,7 @@ function toMMSS(seconds: number): string {
 }
 
 function clampInt(n: number, min: number, max: number): number {
-  if (!Number.isFinite(n)) return min;
+  if (!Number.isFinite(n)) {return min;}
   return Math.max(min, Math.min(max, Math.trunc(n)));
 }
 
@@ -57,7 +58,7 @@ function uniqueRefs(refs: TranscriptChunkRef[]): TranscriptChunkRef[] {
   const out: TranscriptChunkRef[] = [];
   for (const r of refs) {
     const k = `${r.recording_index}:${r.chunk_index}`;
-    if (seen.has(k)) continue;
+    if (seen.has(k)) {continue;}
     seen.add(k);
     out.push(r);
   }
@@ -168,11 +169,11 @@ export function createTranscriptTools(params: {
 
         for (const ch of indexed) {
           const text = ch.full_text_normalized;
-          if (!text) continue;
+          if (!text) {continue;}
 
           let score = 0;
           for (const term of terms) {
-            if (text.includes(term)) score += 1;
+            if (text.includes(term)) {score += 1;}
           }
           if (score > 0) {
             scored.push({ ...ch, score });
@@ -180,8 +181,8 @@ export function createTranscriptTools(params: {
         }
 
         scored.sort((a, b) => {
-          if (b.score !== a.score) return b.score - a.score;
-          if (a.recording_index !== b.recording_index) return a.recording_index - b.recording_index;
+          if (b.score !== a.score) {return b.score - a.score;}
+          if (a.recording_index !== b.recording_index) {return a.recording_index - b.recording_index;}
           return a.chunk_index - b.chunk_index;
         });
 
@@ -275,14 +276,14 @@ export function createTranscriptTools(params: {
         const valid: TranscriptChunkRef[] = [];
         for (const r of deduped) {
           const rec = recordingsMap.get(r.recording_index);
-          if (!rec) continue;
-          if (!Array.isArray(rec.chunks) || rec.chunks.length === 0) continue;
-          if (r.chunk_index < 0 || r.chunk_index >= rec.chunks.length) continue;
+          if (!rec) {continue;}
+          if (!Array.isArray(rec.chunks) || rec.chunks.length === 0) {continue;}
+          if (r.chunk_index < 0 || r.chunk_index >= rec.chunks.length) {continue;}
           valid.push(r);
         }
 
         valid.sort((a, b) => {
-          if (a.recording_index !== b.recording_index) return a.recording_index - b.recording_index;
+          if (a.recording_index !== b.recording_index) {return a.recording_index - b.recording_index;}
           return a.chunk_index - b.chunk_index;
         });
 
@@ -305,7 +306,7 @@ export function createTranscriptTools(params: {
 
         for (const r of valid) {
           const entry = byRef.get(`${r.recording_index}:${r.chunk_index}`);
-          if (!entry) continue;
+          if (!entry) {continue;}
 
           if (remaining <= 0) {
             truncated = true;

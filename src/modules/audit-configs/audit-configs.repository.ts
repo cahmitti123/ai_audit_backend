@@ -10,8 +10,9 @@
  * LAYER: Data Access
  */
 
-import { prisma } from "../../shared/prisma.js";
 import type { AuditSeverity } from "@prisma/client";
+
+import { prisma } from "../../shared/prisma.js";
 
 /**
  * Get all audit configurations

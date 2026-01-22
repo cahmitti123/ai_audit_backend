@@ -11,8 +11,9 @@
  */
 
 import { z } from "zod";
-import { logger } from "../../shared/logger.js";
+
 import { ValidationError } from "../../shared/errors.js";
+import { logger } from "../../shared/logger.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ENUMS

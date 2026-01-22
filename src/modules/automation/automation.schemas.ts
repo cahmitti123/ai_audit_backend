@@ -11,8 +11,20 @@
  */
 
 import { z } from "zod";
-import { logger } from "../../shared/logger.js";
+
 import { ValidationError } from "../../shared/errors.js";
+import { logger } from "../../shared/logger.js";
+import { validateOutgoingWebhookUrl } from "../../shared/webhook-security.js";
+
+const webhookUrlSchema = z.string().url().superRefine((value, ctx) => {
+  const validation = validateOutgoingWebhookUrl(value);
+  if (!validation.ok) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: validation.error,
+    });
+  }
+});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ENUMS
@@ -69,7 +81,11 @@ export const ficheSelectionSchema = z.object({
   groupes: z.array(z.string()).optional(),
   onlyWithRecordings: z.boolean().optional().default(false),
   onlyUnaudited: z.boolean().optional().default(false),
+  // If true, automation will propagate `use_rlm=true` into `audit/run` fan-out (transcript tools mode).
+  useRlm: z.boolean().optional().default(false),
   maxFiches: z.number().int().positive().optional(),
+  // If set, fiches with more recordings than this value are ignored/skipped by automation.
+  maxRecordingsPerFiche: z.number().int().positive().optional(),
   ficheIds: z.array(z.string()).optional(),
 });
 
@@ -110,14 +126,14 @@ export const createAutomationScheduleInputSchema = z.object({
   useAutomaticAudits: z.boolean().default(true),
   specificAuditConfigs: z
     .preprocess((val) => {
-      if (!Array.isArray(val)) return undefined;
+      if (!Array.isArray(val)) {return undefined;}
 
       const parsed = val
         .map((id) => {
-          if (typeof id === "number") return id;
+          if (typeof id === "number") {return id;}
           if (typeof id === "string") {
             const trimmed = id.trim();
-            if (!trimmed) return null;
+            if (!trimmed) {return null;}
             const n = Number.parseInt(trimmed, 10);
             return Number.isFinite(n) ? n : null;
           }
@@ -139,10 +155,10 @@ export const createAutomationScheduleInputSchema = z.object({
   notifyOnError: z.boolean().default(true),
   webhookUrl: z.preprocess(
     (val) => (!val || val === "" ? undefined : val),
-    z.string().url().optional()
+    webhookUrlSchema.optional()
   ),
   notifyEmails: z.preprocess((val) => {
-    if (!Array.isArray(val)) return [];
+    if (!Array.isArray(val)) {return [];}
     return val
       .filter((email): email is string => typeof email === "string")
       .map((email) => email.trim())

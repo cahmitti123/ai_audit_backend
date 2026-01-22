@@ -4,11 +4,17 @@
  * API endpoints for AI chat with audits and fiches
  */
 
-import { Router, Request, Response } from "express";
+import type { Request, Response } from "express";
+import { Router } from "express";
+
+import { asyncHandler } from "../../middleware/async-handler.js";
+import { NotFoundError, ValidationError } from "../../shared/errors.js";
+import { ok } from "../../shared/http.js";
+import { logger } from "../../shared/logger.js";
 import {
+  addMessage,
   getOrCreateAuditConversation,
   getOrCreateFicheConversation,
-  addMessage,
 } from "./chat.repository.js";
 import {
   buildAuditContext,
@@ -16,10 +22,6 @@ import {
   createChatStream,
   removeCitationMarkers,
 } from "./chat.service.js";
-import { logger } from "../../shared/logger.js";
-import { asyncHandler } from "../../middleware/async-handler.js";
-import { NotFoundError, ValidationError } from "../../shared/errors.js";
-import { ok } from "../../shared/http.js";
 
 export const chatRouter = Router();
 
@@ -71,7 +73,8 @@ chatRouter.get(
     const conversation = await getOrCreateAuditConversation(auditId, ficheId);
 
     // Serialize BigInt values
-    const serializedMessages = conversation.messages.map((msg) => ({
+    // Repository fetches newest-first; reverse for chronological display.
+    const serializedMessages = [...conversation.messages].reverse().map((msg) => ({
       id: msg.id.toString(),
       conversationId: msg.conversationId.toString(),
       role: msg.role,
@@ -146,7 +149,8 @@ chatRouter.post(
     const { systemPrompt, timeline } = await buildAuditContext(auditId, ficheId);
 
     // Get message history
-    const history = conversation.messages.map((m) => ({
+    // Repository fetches newest-first; reverse for chronological prompting.
+    const history = [...conversation.messages].reverse().map((m) => ({
       role: m.role,
       content: m.content,
     }));
@@ -195,7 +199,10 @@ chatRouter.post(
         streamError instanceof Error ? streamError : new Error(String(streamError));
       logger.error("Streaming error", { error: err.message });
       // Streaming fallback (can't rely on central error handler once headers are sent)
-      res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+      res.write(
+        `data: ${JSON.stringify({ type: "error", error: err.message, code: "STREAM_ERROR" })}\n\n`
+      );
+      res.write(`data: [DONE]\n\n`);
       res.end();
     }
   })
@@ -228,7 +235,8 @@ chatRouter.get(
     const conversation = await getOrCreateFicheConversation(fiche_id);
 
     // Serialize BigInt values
-    const serializedMessages = conversation.messages.map((msg) => ({
+    // Repository fetches newest-first; reverse for chronological display.
+    const serializedMessages = [...conversation.messages].reverse().map((msg) => ({
       id: msg.id.toString(),
       conversationId: msg.conversationId.toString(),
       role: msg.role,
@@ -291,7 +299,8 @@ chatRouter.post(
     const { systemPrompt, timeline } = await buildFicheContext(fiche_id);
 
     // Get message history
-    const history = conversation.messages.map((m) => ({
+    // Repository fetches newest-first; reverse for chronological prompting.
+    const history = [...conversation.messages].reverse().map((m) => ({
       role: m.role,
       content: m.content,
     }));
@@ -340,7 +349,10 @@ chatRouter.post(
         streamError instanceof Error ? streamError : new Error(String(streamError));
       logger.error("Streaming error", { error: err.message });
       // Streaming fallback (can't rely on central error handler once headers are sent)
-      res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+      res.write(
+        `data: ${JSON.stringify({ type: "error", error: err.message, code: "STREAM_ERROR" })}\n\n`
+      );
+      res.write(`data: [DONE]\n\n`);
       res.end();
     }
   })

@@ -19,6 +19,7 @@ npm install
 # 2. Setup environment
 cp .env.example .env
 # Edit .env with your connection strings and API keys
+# Env variable reference: docs/env.md
 
 # 3. Apply database migrations (dev) + generate Prisma client
 npx prisma migrate dev
@@ -31,8 +32,9 @@ npm run dev
 
 ```bash
 # 1. Setup environment
-cp .env.docker.example .env
+cp .env.example .env
 # Edit .env with your configuration
+# Env variable reference: docs/env.md
 
 # 2. Build and start services
 docker compose up -d --build

@@ -1,9 +1,9 @@
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { disconnectDb,prisma } from "../../src/shared/prisma.js";
 import { makeApp } from "../test-app.js";
 import { isIntegrationEnabled } from "./_integration.env.js";
-
-import { prisma, disconnectDb } from "../../src/shared/prisma.js";
 
 const describeIntegration = isIntegrationEnabled() ? describe : describe.skip;
 

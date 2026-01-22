@@ -10,8 +10,8 @@
  * LAYER: Data Access (Database)
  */
 
-import { prisma } from "../../shared/prisma.js";
 import { logger } from "../../shared/logger.js";
+import { prisma } from "../../shared/prisma.js";
 import { createConcurrencyLimiter } from "../../utils/concurrency.js";
 
 // IMPORTANT: This limiter is **module-scoped** on purpose.

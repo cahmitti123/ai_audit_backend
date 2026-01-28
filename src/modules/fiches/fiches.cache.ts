@@ -10,15 +10,13 @@
  * LAYER: Orchestration
  */
 
-import type { Prisma } from "@prisma/client";
-
 import { CACHE_EXPIRATION_HOURS } from "../../shared/constants.js";
 import { logger } from "../../shared/logger.js";
 import { prisma } from "../../shared/prisma.js";
 import { enrichRecording, type RecordingLike } from "../../utils/recording-parser.js";
 import * as fichesApi from "./fiches.api.js";
 import * as fichesRepository from "./fiches.repository.js";
-import type { FicheDetailsResponse } from "./fiches.schemas.js";
+import type { FicheDetailsResponse, MailDevis } from "./fiches.schemas.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -53,47 +51,52 @@ function toYyyyMmDdFromDateLike(value: string): string | undefined {
   return undefined;
 }
 
-function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
-  const json: unknown = JSON.parse(JSON.stringify(value));
-  return json as Prisma.InputJsonValue;
-}
-
 /**
  * Get fiche with auto-caching
  * Checks cache first, fetches from API if expired/missing
  */
 export async function getFicheWithCache(
-  ficheId: string
+  ficheId: string,
+  options?: { includeMailDevis?: boolean }
 ): Promise<FicheDetailsResponse> {
   logger.info("Getting fiche with cache", {
     fiche_id: ficheId,
   });
 
+  const includeMailDevis = options?.includeMailDevis === true;
+
   // Check cache
-  const cached = await fichesRepository.getCachedFiche(ficheId);
+  const cached = await fichesRepository.getCachedFiche(ficheId, { includeMailDevis });
 
   if (cached) {
     const rawData = cached.rawData;
     const isExpired = cached.expiresAt <= new Date();
+    const needsMailDevis =
+      includeMailDevis && !Object.prototype.hasOwnProperty.call(rawData, "mail_devis");
 
     // If cache is minimal (sales list only) OR expired, refresh from API.
     // Expiration is a "freshness" hint, not a hard requirement.
-    if (rawData._salesListOnly === true || isExpired) {
+    if (rawData._salesListOnly === true || isExpired || needsMailDevis) {
       logger.info(
         rawData._salesListOnly === true
           ? "Cache has only sales list data, fetching full details"
+          : needsMailDevis
+          ? "mail_devis requested but not cached; fetching fiche details"
           : "Cache expired, refreshing fiche details",
         {
           fiche_id: ficheId,
           cache_id: cached.id.toString(),
           expired: isExpired,
           sales_list_only: rawData._salesListOnly === true,
+          include_mail_devis: includeMailDevis,
           expires_at: cached.expiresAt?.toISOString?.() || String(cached.expiresAt),
         }
       );
 
       try {
-        const ficheData = await fichesApi.fetchFicheDetails(ficheId);
+        const ficheData = await fichesApi.fetchFicheDetails(ficheId, undefined, {
+          includeMailDevis,
+        });
 
         // Best-effort cache write: even if DB is temporarily unavailable,
         // return the fetched fiche details to the caller.
@@ -135,7 +138,9 @@ export async function getFicheWithCache(
 
   logger.info("Cache miss, fetching from API", { fiche_id: ficheId });
 
-  const ficheData = await fichesApi.fetchFicheDetails(ficheId);
+  const ficheData = await fichesApi.fetchFicheDetails(ficheId, undefined, {
+    includeMailDevis,
+  });
 
   // Best-effort cache write: even if DB is temporarily unavailable,
   // return the fetched fiche details to the caller.
@@ -155,15 +160,22 @@ export async function getFicheWithCache(
  * Force refresh fiche from API and update cache
  * Bypasses cache and always fetches fresh data
  */
-export async function refreshFicheFromApi(ficheId: string) {
+export async function refreshFicheFromApi(
+  ficheId: string,
+  options?: { includeMailDevis?: boolean }
+) {
   logger.info("Force refreshing fiche from API", {
     fiche_id: ficheId,
   });
 
+  const includeMailDevis = options?.includeMailDevis === true;
+
   const cached = await fichesRepository.getCachedFiche(ficheId);
 
   // Fetch from API (gateway handles `cle` refresh internally)
-  const ficheData = await fichesApi.fetchFicheDetails(ficheId);
+  const ficheData = await fichesApi.fetchFicheDetails(ficheId, undefined, {
+    includeMailDevis,
+  });
 
   // Update cache
   await cacheFicheDetails(ficheData, {
@@ -220,6 +232,45 @@ export async function cacheFicheDetails(
     }
   }
 
+  // Reduce DB JSON size: store recordings in the `recordings` table (not embedded in rawData).
+  // We can still attach recordings at read-time (see `getCachedFiche`) for backward compatibility.
+  const rawDataWithoutRecordings: unknown = (() => {
+    const r = ficheData as unknown as Record<string, unknown>;
+    if (!("recordings" in r)) {return ficheData;}
+    const { recordings: _recordings, ...rest } = r;
+    return rest;
+  })();
+
+  // Reduce DB JSON size further: normalize core objects (information, prospect, etiquettes)
+  // into dedicated tables and remove them from rawData.
+  const rawDataReduced: unknown = (() => {
+    const r = rawDataWithoutRecordings as unknown;
+    if (!isRecord(r)) {return rawDataWithoutRecordings;}
+    const hasMailDevis = Object.prototype.hasOwnProperty.call(r, "mail_devis");
+    const {
+      success: _success,
+      message: _message,
+      cle: _cle,
+      information: _information,
+      prospect: _prospect,
+      documents: _documents,
+      commentaires: _commentaires,
+      mails: _mails,
+      rendez_vous: _rendez_vous,
+      alertes: _alertes,
+      enfants: _enfants,
+      conjoint: _conjoint,
+      reclamations: _reclamations,
+      autres_contrats: _autres_contrats,
+      raw_sections: _raw_sections,
+      elements_souscription: _elements_souscription,
+      tarification: _tarification,
+      mail_devis: mailDevis,
+      ...rest
+    } = r;
+    return hasMailDevis && mailDevis === null ? { ...rest, mail_devis: null } : rest;
+  })();
+
   const ficheCache = await fichesRepository.upsertFicheCache({
     ficheId: ficheData.information.fiche_id,
     groupe: ficheData.information.groupe,
@@ -230,12 +281,83 @@ export async function cacheFicheDetails(
     prospectTel:
       ficheData.prospect?.telephone || ficheData.prospect?.mobile || undefined,
     salesDate, // Track which CRM sales date this fiche belongs to
-    rawData: ficheData,
+    cle: ficheData.information.cle,
+    detailsSuccess: ficheData.success,
+    detailsMessage: ficheData.message,
+    rawData: rawDataReduced,
     hasRecordings: ficheData.recordings?.length > 0,
     recordingsCount: ficheData.recordings?.length || 0,
     expiresAt,
     lastRevalidatedAt: options?.lastRevalidatedAt,
   });
+
+  // Persist normalized information/prospect (no backfill required for legacy rows).
+  await fichesRepository.upsertFicheCacheInformation(
+    ficheCache.id,
+    ficheData.information
+  );
+  await fichesRepository.upsertFicheCacheProspect(
+    ficheCache.id,
+    ficheData.prospect ?? null
+  );
+  await fichesRepository.replaceFicheCacheDocuments(
+    ficheCache.id,
+    Array.isArray(ficheData.documents) ? ficheData.documents : []
+  );
+  await fichesRepository.replaceFicheCacheCommentaires(
+    ficheCache.id,
+    Array.isArray(ficheData.commentaires) ? ficheData.commentaires : []
+  );
+  await fichesRepository.replaceFicheCacheMails(
+    ficheCache.id,
+    Array.isArray(ficheData.mails) ? ficheData.mails : []
+  );
+  await fichesRepository.replaceFicheCacheRendezVous(
+    ficheCache.id,
+    Array.isArray(ficheData.rendez_vous) ? ficheData.rendez_vous : []
+  );
+  await fichesRepository.replaceFicheCacheAlertes(
+    ficheCache.id,
+    Array.isArray(ficheData.alertes) ? ficheData.alertes : []
+  );
+  await fichesRepository.replaceFicheCacheEnfants(
+    ficheCache.id,
+    Array.isArray(ficheData.enfants) ? ficheData.enfants : []
+  );
+  await fichesRepository.upsertFicheCacheConjoint(
+    ficheCache.id,
+    ficheData.conjoint ?? null
+  );
+  await fichesRepository.replaceFicheCacheReclamations(
+    ficheCache.id,
+    Array.isArray(ficheData.reclamations) ? ficheData.reclamations : []
+  );
+  await fichesRepository.replaceFicheCacheAutresContrats(
+    ficheCache.id,
+    Array.isArray(ficheData.autres_contrats) ? ficheData.autres_contrats : []
+  );
+  await fichesRepository.replaceFicheCacheRawSections(
+    ficheCache.id,
+    ficheData.raw_sections ?? {}
+  );
+  await fichesRepository.upsertFicheCacheElementsSouscription(
+    ficheCache.id,
+    ficheData.elements_souscription ?? null
+  );
+  await fichesRepository.replaceFicheCacheTarification(
+    ficheCache.id,
+    Array.isArray(ficheData.tarification) ? ficheData.tarification : []
+  );
+  const ficheDataRecord = ficheData as unknown as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(ficheDataRecord, "mail_devis")) {
+    const v = (ficheDataRecord as { mail_devis?: unknown }).mail_devis;
+    if (v !== undefined) {
+      await fichesRepository.upsertFicheCacheMailDevis(
+        ficheCache.id,
+        v as MailDevis | null
+      );
+    }
+  }
 
   // Store recordings separately in recordings table
   if (ficheData.recordings?.length > 0) {
@@ -243,14 +365,6 @@ export async function cacheFicheDetails(
       ficheCache.id,
       ficheData.recordings
     );
-
-    // Update rawData to include recordings (keep in sync)
-    await prisma.ficheCache.update({
-      where: { id: ficheCache.id },
-      data: {
-        rawData: toPrismaJsonValue(ficheData),
-      },
-    });
   }
 
   logger.debug("Fiche cached with details", {
@@ -318,7 +432,6 @@ export async function cacheFicheSalesSummary(
 
   const summaryRawData = {
     id: ficheData.id,
-    cle: typeof ficheData.cle === "string" && ficheData.cle ? ficheData.cle : null,
     nom: ficheData.nom,
     prenom: ficheData.prenom,
     telephone: ficheData.telephone,
@@ -327,7 +440,6 @@ export async function cacheFicheSalesSummary(
     statut: ficheData.statut ?? null,
     date_insertion: ficheData.date_insertion ?? null,
     date_modification: ficheData.date_modification ?? null,
-    recordings: enrichedRecordings,
     _salesListOnly: true as const,
   };
 
@@ -338,15 +450,7 @@ export async function cacheFicheSalesSummary(
     existing && !existingIsSalesListOnly && isRecord(existingRaw)
       ? (() => {
           // Preserve existing full details.
-          const merged: Record<string, unknown> = { ...existingRaw };
-          if (typeof ficheData.cle === "string" && ficheData.cle) {
-            merged.cle = ficheData.cle;
-            const info = merged.information;
-            if (isRecord(info)) {
-              info.cle = ficheData.cle;
-            }
-          }
-          return merged;
+          return { ...existingRaw };
         })()
       : summaryRawData;
 
@@ -375,12 +479,25 @@ export async function cacheFicheSalesSummary(
     prospectTel: ficheData.telephone || existing?.prospectTel || undefined,
     // Track which CRM sales date this fiche belongs to (used by date-range queries)
     salesDate,
+    cle: typeof ficheData.cle === "string" && ficheData.cle ? ficheData.cle : undefined,
     rawData: nextRawData,
     hasRecordings: enrichedRecordings.length > 0,
     recordingsCount: enrichedRecordings.length,
     expiresAt,
     lastRevalidatedAt: options?.lastRevalidatedAt,
   });
+
+  // If full details exist in DB (normalized table), keep `information.cle` fresh too.
+  if (existing && !existingIsSalesListOnly && typeof ficheData.cle === "string" && ficheData.cle) {
+    try {
+      await prisma.ficheCacheInformation.update({
+        where: { ficheCacheId: existing.id },
+        data: { cle: ficheData.cle },
+      });
+    } catch {
+      // Best-effort only; ignore if missing.
+    }
+  }
 
   // Store recordings separately
   if (enrichedRecordings.length > 0) {

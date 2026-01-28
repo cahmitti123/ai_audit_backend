@@ -176,13 +176,16 @@ export async function fetchFicheDetails(
   cle?: string,
   options?: {
     includeRecordings?: boolean;
+    includeMailDevis?: boolean;
   }
 ): Promise<FicheDetailsResponse> {
   const includeRecordings = options?.includeRecordings ?? true; // TRUE by default for details
+  const includeMailDevis = options?.includeMailDevis ?? false;
 
   logger.info("Fetching fiche details", {
     fiche_id: ficheId,
     include_recordings: includeRecordings,
+    include_mail_devis: includeMailDevis,
   });
 
   try {
@@ -193,6 +196,7 @@ export async function fetchFicheDetails(
       include_recordings: String(includeRecordings),
       // We run our own transcription system; ask the gateway not to include upstream transcriptions.
       include_transcriptions: "false",
+      include_mail_devis: String(includeMailDevis),
     });
 
     const response = await axios.get<FicheDetailsResponse>(
@@ -217,6 +221,7 @@ export async function fetchFicheDetails(
       groupe: validatedData.information?.groupe,
       commentaires_count: validatedData.commentaires?.length || 0,
       alertes_count: validatedData.alertes?.length || 0,
+      has_mail_devis: Boolean(validatedData.mail_devis),
     });
 
     return validatedData;

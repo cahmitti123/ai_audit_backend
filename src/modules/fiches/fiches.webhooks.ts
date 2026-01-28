@@ -53,6 +53,149 @@ function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
   return json as Prisma.InputJsonValue;
 }
 
+function toIntOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : null;
+}
+
+function toStringOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function payloadToColumns(payload: WebhookPayload): {
+  payloadTimestamp: string;
+  payloadStatus: string;
+  payloadProgress: number | null;
+  payloadCompletedDays: number | null;
+  payloadTotalDays: number | null;
+  payloadTotalFiches: number | null;
+  payloadCurrentFichesCount: number | null;
+  payloadLatestDate: string | null;
+  payloadError: string | null;
+  payloadDataUrl: string | null;
+  partialData: Array<{
+    rowIndex: number;
+    ficheId: string;
+    groupe: string | null;
+    prospectNom: string | null;
+    prospectPrenom: string | null;
+    recordingsCount: number;
+    ficheCreatedAt: string;
+  }>;
+} {
+  const data = payload.data;
+  const partialData = Array.isArray(data.partialData)
+    ? data.partialData
+        .filter(
+          (f): f is NonNullable<typeof f> =>
+            typeof f === "object" &&
+            f !== null &&
+            typeof (f as { ficheId?: unknown }).ficheId === "string" &&
+            typeof (f as { recordingsCount?: unknown }).recordingsCount === "number" &&
+            typeof (f as { createdAt?: unknown }).createdAt === "string"
+        )
+        .map((f, idx) => ({
+          rowIndex: idx + 1,
+          ficheId: f.ficheId,
+          groupe: f.groupe ?? null,
+          prospectNom: f.prospectNom ?? null,
+          prospectPrenom: f.prospectPrenom ?? null,
+          recordingsCount: Math.trunc(f.recordingsCount),
+          ficheCreatedAt: f.createdAt,
+        }))
+    : [];
+
+  return {
+    payloadTimestamp: payload.timestamp,
+    payloadStatus: data.status,
+    payloadProgress: toIntOrNull(data.progress),
+    payloadCompletedDays: toIntOrNull(data.completedDays),
+    payloadTotalDays: toIntOrNull(data.totalDays),
+    payloadTotalFiches: toIntOrNull(data.totalFiches),
+    payloadCurrentFichesCount: toIntOrNull(data.currentFichesCount),
+    payloadLatestDate: toStringOrNull(data.latestDate),
+    payloadError: toStringOrNull(data.error),
+    payloadDataUrl: toStringOrNull(data.dataUrl),
+    partialData,
+  };
+}
+
+function buildPayloadFromNormalizedDelivery(delivery: {
+  event: string;
+  jobId: string;
+  payloadTimestamp: string | null;
+  payloadStatus: string | null;
+  payloadProgress: number | null;
+  payloadCompletedDays: number | null;
+  payloadTotalDays: number | null;
+  payloadTotalFiches: number | null;
+  payloadCurrentFichesCount: number | null;
+  payloadLatestDate: string | null;
+  payloadError: string | null;
+  payloadDataUrl: string | null;
+  partialData?: Array<{
+    rowIndex: number;
+    ficheId: string;
+    groupe: string | null;
+    prospectNom: string | null;
+    prospectPrenom: string | null;
+    recordingsCount: number;
+    ficheCreatedAt: string;
+  }>;
+}): WebhookPayload | null {
+  if (typeof delivery.payloadTimestamp !== "string") {return null;}
+  if (typeof delivery.payloadStatus !== "string") {return null;}
+
+  const data: WebhookPayload["data"] = {
+    status: delivery.payloadStatus,
+    ...(typeof delivery.payloadProgress === "number" ? { progress: delivery.payloadProgress } : {}),
+    ...(typeof delivery.payloadCompletedDays === "number"
+      ? { completedDays: delivery.payloadCompletedDays }
+      : {}),
+    ...(typeof delivery.payloadTotalDays === "number"
+      ? { totalDays: delivery.payloadTotalDays }
+      : {}),
+    ...(typeof delivery.payloadTotalFiches === "number"
+      ? { totalFiches: delivery.payloadTotalFiches }
+      : {}),
+    ...(typeof delivery.payloadCurrentFichesCount === "number"
+      ? { currentFichesCount: delivery.payloadCurrentFichesCount }
+      : {}),
+    ...(typeof delivery.payloadLatestDate === "string"
+      ? { latestDate: delivery.payloadLatestDate }
+      : {}),
+    ...(typeof delivery.payloadError === "string" ? { error: delivery.payloadError } : {}),
+    ...(typeof delivery.payloadDataUrl === "string" ? { dataUrl: delivery.payloadDataUrl } : {}),
+  };
+
+  const partial = Array.isArray(delivery.partialData) ? delivery.partialData : [];
+  if (partial.length > 0) {
+    data.partialData = partial
+      .slice()
+      .sort((a, b) => a.rowIndex - b.rowIndex)
+      .map((f) => ({
+        ficheId: f.ficheId,
+        groupe: f.groupe,
+        prospectNom: f.prospectNom,
+        prospectPrenom: f.prospectPrenom,
+        recordingsCount: f.recordingsCount,
+        createdAt: f.ficheCreatedAt,
+      }));
+  }
+
+  const event =
+    delivery.event === "progress" || delivery.event === "complete" || delivery.event === "failed"
+      ? delivery.event
+      : null;
+  if (!event) {return null;}
+
+  return {
+    event,
+    jobId: delivery.jobId,
+    timestamp: delivery.payloadTimestamp,
+    data,
+  };
+}
+
 /**
  * Generate HMAC signature for webhook payload
  */
@@ -99,22 +242,53 @@ export async function sendWebhook(
     timestamp: new Date().toISOString(),
     data,
   };
+  const cols = payloadToColumns(payload);
 
   // Validate URL to reduce SSRF risk (defense in depth; route should validate too)
   const validation = validateOutgoingWebhookUrl(webhookUrl);
   if (!validation.ok) {
-    const delivery = await prisma.webhookDelivery.create({
-      data: {
-        jobId,
-        event,
-        url: webhookUrl,
-        payload: toPrismaJsonValue(payload),
-        status: "failed",
-        attempt: 1,
-        maxAttempts,
-        responseBody: validation.error,
-        sentAt: new Date(),
-      },
+    const delivery = await prisma.$transaction(async (tx) => {
+      const created = await tx.webhookDelivery.create({
+        data: {
+          jobId,
+          event,
+          url: webhookUrl,
+          // Keep JSON minimal; canonical payload fields are stored in columns/rows.
+          payload: toPrismaJsonValue({}),
+          payloadTimestamp: cols.payloadTimestamp,
+          payloadStatus: cols.payloadStatus,
+          payloadProgress: cols.payloadProgress,
+          payloadCompletedDays: cols.payloadCompletedDays,
+          payloadTotalDays: cols.payloadTotalDays,
+          payloadTotalFiches: cols.payloadTotalFiches,
+          payloadCurrentFichesCount: cols.payloadCurrentFichesCount,
+          payloadLatestDate: cols.payloadLatestDate,
+          payloadError: cols.payloadError,
+          payloadDataUrl: cols.payloadDataUrl,
+          status: "failed",
+          attempt: 1,
+          maxAttempts,
+          responseBody: validation.error,
+          sentAt: new Date(),
+        },
+      });
+
+      if (cols.partialData.length > 0) {
+        await tx.webhookDeliveryPartialFiche.createMany({
+          data: cols.partialData.map((f) => ({
+            deliveryId: created.id,
+            rowIndex: f.rowIndex,
+            ficheId: f.ficheId,
+            groupe: f.groupe,
+            prospectNom: f.prospectNom,
+            prospectPrenom: f.prospectPrenom,
+            recordingsCount: f.recordingsCount,
+            ficheCreatedAt: f.ficheCreatedAt,
+          })),
+        });
+      }
+
+      return created;
     });
 
     await prisma.progressiveFetchJob.update({
@@ -137,16 +311,46 @@ export async function sendWebhook(
   }
 
   // Create webhook delivery record
-  const delivery = await prisma.webhookDelivery.create({
-    data: {
-      jobId,
-      event,
-      url: webhookUrl,
-      payload: toPrismaJsonValue(payload),
-      status: "pending",
-      attempt: 1,
-      maxAttempts,
-    },
+  const delivery = await prisma.$transaction(async (tx) => {
+    const created = await tx.webhookDelivery.create({
+      data: {
+        jobId,
+        event,
+        url: webhookUrl,
+        // Keep JSON minimal; canonical payload fields are stored in columns/rows.
+        payload: toPrismaJsonValue({}),
+        payloadTimestamp: cols.payloadTimestamp,
+        payloadStatus: cols.payloadStatus,
+        payloadProgress: cols.payloadProgress,
+        payloadCompletedDays: cols.payloadCompletedDays,
+        payloadTotalDays: cols.payloadTotalDays,
+        payloadTotalFiches: cols.payloadTotalFiches,
+        payloadCurrentFichesCount: cols.payloadCurrentFichesCount,
+        payloadLatestDate: cols.payloadLatestDate,
+        payloadError: cols.payloadError,
+        payloadDataUrl: cols.payloadDataUrl,
+        status: "pending",
+        attempt: 1,
+        maxAttempts,
+      },
+    });
+
+    if (cols.partialData.length > 0) {
+      await tx.webhookDeliveryPartialFiche.createMany({
+        data: cols.partialData.map((f) => ({
+          deliveryId: created.id,
+          rowIndex: f.rowIndex,
+          ficheId: f.ficheId,
+          groupe: f.groupe,
+          prospectNom: f.prospectNom,
+          prospectPrenom: f.prospectPrenom,
+          recordingsCount: f.recordingsCount,
+          ficheCreatedAt: f.ficheCreatedAt,
+        })),
+      });
+    }
+
+    return created;
   });
 
   logger.info("Webhook delivery created", {
@@ -168,7 +372,7 @@ async function attemptWebhookDelivery(
 ): Promise<void> {
   const delivery = await prisma.webhookDelivery.findUnique({
     where: { id: deliveryId },
-    include: { job: true },
+    include: { job: true, partialData: { orderBy: { rowIndex: "asc" } } },
   });
 
   if (!delivery) {
@@ -177,7 +381,33 @@ async function attemptWebhookDelivery(
   }
 
   const { job, payload, url, attempt, maxAttempts } = delivery;
-  const webhookPayload = payload as unknown as WebhookPayload;
+
+  const normalizedPayload =
+    buildPayloadFromNormalizedDelivery({
+      event: delivery.event,
+      jobId: delivery.jobId,
+      payloadTimestamp: delivery.payloadTimestamp,
+      payloadStatus: delivery.payloadStatus,
+      payloadProgress: delivery.payloadProgress,
+      payloadCompletedDays: delivery.payloadCompletedDays,
+      payloadTotalDays: delivery.payloadTotalDays,
+      payloadTotalFiches: delivery.payloadTotalFiches,
+      payloadCurrentFichesCount: delivery.payloadCurrentFichesCount,
+      payloadLatestDate: delivery.payloadLatestDate,
+      payloadError: delivery.payloadError,
+      payloadDataUrl: delivery.payloadDataUrl,
+      partialData: delivery.partialData.map((p) => ({
+        rowIndex: p.rowIndex,
+        ficheId: p.ficheId,
+        groupe: p.groupe,
+        prospectNom: p.prospectNom,
+        prospectPrenom: p.prospectPrenom,
+        recordingsCount: p.recordingsCount,
+        ficheCreatedAt: p.ficheCreatedAt,
+      })),
+    }) ?? null;
+
+  const webhookPayload = normalizedPayload ?? (payload as unknown as WebhookPayload);
 
   const attemptDelivery = async (): Promise<boolean> => {
     try {
@@ -403,11 +633,11 @@ export async function sendProgressWebhookWithData(
   },
   secret?: string
 ): Promise<void> {
-  const payload: WebhookPayload = {
-    event: "progress",
+  await sendWebhook(
+    webhookUrl,
+    "progress",
     jobId,
-    timestamp: new Date().toISOString(),
-    data: {
+    {
       status: "processing",
       progress: data.progress,
       completedDays: data.completedDays,
@@ -424,23 +654,8 @@ export async function sendProgressWebhookWithData(
         createdAt: f.createdAt.toISOString(),
       })),
     },
-  };
-
-  // Create webhook delivery record
-  const delivery = await prisma.webhookDelivery.create({
-    data: {
-      jobId,
-      event: "progress",
-      url: webhookUrl,
-      payload: toPrismaJsonValue(payload),
-      status: "pending",
-      attempt: 1,
-      maxAttempts: 3,
-    },
-  });
-
-  // Attempt delivery
-  await attemptWebhookDelivery(delivery.id, secret);
+    { secret }
+  );
 }
 
 /**

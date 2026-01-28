@@ -78,6 +78,13 @@ model FicheCache {
     // Sales date tracking - which CRM date this fiche belongs to
     salesDate String? @map("sales_date") // YYYY-MM-DD format - date from CRM sales list
 
+    // Security key (may be refreshed by gateway). Stored as scalar to avoid duplicating in JSON blobs.
+    cle String? @map("cle")
+
+    // Response envelope (avoid storing success/message inside raw_data JSON)
+    detailsSuccess Boolean? @map("details_success")
+    detailsMessage String?  @map("details_message") @db.Text
+
     rawData           Json      @map("raw_data")
     hasRecordings     Boolean   @default(false) @map("has_recordings")
     recordingsCount   Int?      @map("recordings_count")
@@ -89,6 +96,22 @@ model FicheCache {
 
     audits     Audit[]
     recordings Recording[]
+    information FicheCacheInformation?
+    prospectDetails FicheCacheProspect?
+    etiquettes FicheCacheEtiquette[]
+    documents FicheCacheDocument[]
+    commentaires FicheCacheCommentaire[]
+    mails FicheCacheMail[]
+    rendezVous FicheCacheRendezVous[]
+    alertes FicheCacheAlerte[]
+    enfants FicheCacheEnfant[]
+    conjoint FicheCacheConjoint?
+    reclamations FicheCacheReclamation[]
+    autresContrats FicheCacheAutreContrat[]
+    rawSections FicheCacheRawSection[]
+    elementsSouscription FicheCacheElementsSouscription?
+    tarifications FicheCacheTarification[]
+    mailDevis FicheCacheMailDevis?
 
     @@index([ficheId])
     @@index([expiresAt])
@@ -96,6 +119,671 @@ model FicheCache {
     @@index([salesDate])
     @@index([lastRevalidatedAt])
     @@map("fiche_cache")
+}
+
+model FicheCacheInformation {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @unique @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    cle           String
+    dateInsertion String  @map("date_insertion")
+    createur      String? @db.Text
+    fichesAssociees String? @map("fiches_associees") @db.Text
+    nombreAcces   Int     @map("nombre_acces")
+    dernierAcces  String  @map("dernier_acces")
+    groupe        String
+    groupeResponsable String? @map("groupe_responsable")
+    groupeGestion String? @map("groupe_gestion")
+    groupeReclamation String? @map("groupe_reclamation")
+    agenceId      String  @map("agence_id")
+    agenceNom     String  @map("agence_nom")
+    attributionUserId String @map("attribution_user_id")
+    attributionUserNom String @map("attribution_user_nom")
+    provenanceId  String  @map("provenance_id")
+    provenanceNom String  @map("provenance_nom")
+    provenanceNumero String? @map("provenance_numero")
+    provenancePeriodeRappel String? @map("provenance_periode_rappel")
+    origineId     String? @map("origine_id")
+    origineNom    String? @map("origine_nom")
+    attributionBisUserId String? @map("attribution_bis_user_id")
+    attributionBisUserNom String? @map("attribution_bis_user_nom")
+    refusDemarchage Boolean @map("refus_demarchage")
+    exceptionDemarchage Boolean @map("exception_demarchage")
+    exceptionDemarchageCommentaire String? @map("exception_demarchage_commentaire") @db.Text
+    niveauInteret Int?    @map("niveau_interet")
+    nombreOuvertureMails Int @map("nombre_ouverture_mails")
+    derniereOuvertureMail String? @map("derniere_ouverture_mail")
+    nombreVisualisationPages Int @map("nombre_visualisation_pages")
+    derniereVisualisationPage String? @map("derniere_visualisation_page")
+    espaceProspectUrl String? @map("espace_prospect_url") @db.Text
+    fermeEspaceProspect Boolean @map("ferme_espace_prospect")
+    desinscriptionMail Boolean @map("desinscription_mail")
+    corbeille     Boolean
+    archive       Boolean
+    modules       String[]
+
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    @@index([ficheCacheId])
+    @@index([groupe])
+    @@map("fiche_cache_information")
+}
+
+model FicheCacheEtiquette {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    etiquetteIndex Int    @map("etiquette_index")
+    nom   String
+    date  String
+    style String
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([ficheCacheId, etiquetteIndex])
+    @@index([ficheCacheId])
+    @@map("fiche_cache_etiquettes")
+}
+
+model FicheCacheProspect {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @unique @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    prospectId    String @map("prospect_id")
+    civilite      Int
+    civiliteText  String @map("civilite_text")
+    nom           String
+    prenom        String
+    dateNaissance String @map("date_naissance")
+    regime        String
+    regimeText    String @map("regime_text")
+    telephone     String?
+    mobile        String?
+    telephone2    String? @map("telephone_2")
+    mail          String?
+    mail2         String? @map("mail_2")
+    adresse       String?
+    codePostal    String? @map("code_postal")
+    ville         String?
+    numSecu       String? @map("num_secu")
+    numAffiliation String? @map("num_affiliation")
+    situationFamiliale Int? @map("situation_familiale")
+    situationFamilialeText String? @map("situation_familiale_text")
+    madelin      Boolean @default(false)
+    profession   String?
+    csp          Int?
+    cspText      String? @map("csp_text")
+    fax          String?
+
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    @@index([ficheCacheId])
+    @@index([prospectId])
+    @@map("fiche_cache_prospects")
+}
+
+model FicheCacheDocument {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    rowIndex    Int    @map("row_index")
+    documentId  String @map("document_id")
+    type        String
+    nom         String
+    taille      String
+    dateCreation String @map("date_creation")
+    selectionMail Boolean @map("selection_mail")
+    partageProspect Boolean @map("partage_prospect")
+    signer      Boolean
+    downloadUrl String? @map("download_url") @db.Text
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([ficheCacheId, rowIndex])
+    @@index([ficheCacheId])
+    @@index([documentId])
+    @@map("fiche_cache_documents")
+}
+
+model FicheCacheCommentaire {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    rowIndex      Int    @map("row_index")
+    commentaireId String @map("commentaire_id")
+    date          String
+    utilisateur   String
+    texte         String @db.Text
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([ficheCacheId, rowIndex])
+    @@index([ficheCacheId])
+    @@index([commentaireId])
+    @@map("fiche_cache_commentaires")
+}
+
+model FicheCacheMail {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    rowIndex  Int    @map("row_index")
+    dateEnvoi String @map("date_envoi")
+    typeMail  String @map("type_mail")
+    utilisateur String
+    visualisationUrl String? @map("visualisation_url") @db.Text
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([ficheCacheId, rowIndex])
+    @@index([ficheCacheId])
+    @@map("fiche_cache_mails")
+}
+
+model FicheCacheRendezVous {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    rowIndex Int    @map("row_index")
+    rdvId    String @map("rdv_id")
+    etiquette String?
+    etiquetteColor String? @map("etiquette_color")
+    utilisateur String
+    dateDebut String @map("date_debut")
+    dateFin   String? @map("date_fin")
+    commentaire String? @db.Text
+    statut     String?
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([ficheCacheId, rowIndex])
+    @@index([ficheCacheId])
+    @@index([rdvId])
+    @@map("fiche_cache_rendez_vous")
+}
+
+model FicheCacheAlerte {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    rowIndex Int    @map("row_index")
+    alerteId String @map("alerte_id")
+    etat     String
+    date     String
+    etiquette String?
+    libelle  String
+    deposeeLe String @map("deposee_le")
+    deposeePar String @map("deposee_par")
+    commentaire String? @db.Text
+    attribueeA String? @map("attribuee_a")
+    traiteeLe String? @map("traitee_le")
+    traiteePar String? @map("traitee_par")
+    commentaireTraitement String? @map("commentaire_traitement") @db.Text
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([ficheCacheId, rowIndex])
+    @@index([ficheCacheId])
+    @@index([alerteId])
+    @@map("fiche_cache_alertes")
+}
+
+model FicheCacheEnfant {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    rowIndex Int    @map("row_index")
+    enfantId String @map("enfant_id")
+    civilite Int
+    civiliteText String @map("civilite_text")
+    nom      String
+    prenom   String
+    dateNaissance String @map("date_naissance")
+    regime   String?
+    regimeText String? @map("regime_text")
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([ficheCacheId, rowIndex])
+    @@index([ficheCacheId])
+    @@index([enfantId])
+    @@map("fiche_cache_enfants")
+}
+
+model FicheCacheConjoint {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @unique @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    conjointId String @map("conjoint_id")
+    civilite Int
+    civiliteText String @map("civilite_text")
+    nom      String
+    prenom   String
+    dateNaissance String @map("date_naissance")
+    regime   String?
+    regimeText String? @map("regime_text")
+    telephone String?
+    mobile    String?
+    mail      String?
+    profession String?
+    csp Int?
+    cspText String? @map("csp_text")
+
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    @@index([ficheCacheId])
+    @@index([conjointId])
+    @@map("fiche_cache_conjoints")
+}
+
+model FicheCacheReclamation {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    rowIndex Int @map("row_index")
+    reclamationId String @map("reclamation_id")
+    dateCreation String @map("date_creation")
+    assureur String?
+    typeReclamation String? @map("type_reclamation")
+    description String? @db.Text
+    statut String?
+    dateTraitement String? @map("date_traitement")
+    utilisateurCreation String? @map("utilisateur_creation")
+    utilisateurTraitement String? @map("utilisateur_traitement")
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([ficheCacheId, rowIndex])
+    @@index([ficheCacheId])
+    @@index([reclamationId])
+    @@map("fiche_cache_reclamations")
+}
+
+model FicheCacheAutreContrat {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    rowIndex Int @map("row_index")
+    contratId String @map("contrat_id")
+    typeContrat String @map("type_contrat")
+    assureur String?
+    numeroContrat String? @map("numero_contrat")
+    dateSouscription String? @map("date_souscription")
+    montant String?
+    commentaire String? @db.Text
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([ficheCacheId, rowIndex])
+    @@index([ficheCacheId])
+    @@index([contratId])
+    @@map("fiche_cache_autres_contrats")
+}
+
+model FicheCacheRawSection {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    sectionKey String @map("section_key")
+    sectionValue String @map("section_value") @db.Text
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([ficheCacheId, sectionKey])
+    @@index([ficheCacheId])
+    @@map("fiche_cache_raw_sections")
+}
+
+model FicheCacheElementsSouscription {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @unique @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    souscriptionId String? @map("souscription_id")
+    dateSouscription String? @map("date_souscription")
+    dateSignature String? @map("date_signature")
+    dateValidation String? @map("date_validation")
+    numContrat String? @map("num_contrat")
+    annulationContrat Boolean @default(false) @map("annulation_contrat")
+    typeVente String? @map("type_vente")
+    venteAFroid String? @map("vente_a_froid")
+    vfAccept String? @map("vf_accept")
+
+    ancienDejaAssure Boolean? @map("ancien_deja_assure")
+    ancienPlus12Mois Boolean? @map("ancien_plus_12_mois")
+    ancienRiaRequested Boolean? @map("ancien_ria_requested")
+    ancienAssureur String? @map("ancien_assureur")
+    ancienCodeAssureur String? @map("ancien_code_assureur")
+    ancienAdresse String? @map("ancien_adresse")
+    ancienCodePostal String? @map("ancien_code_postal")
+    ancienVille String? @map("ancien_ville")
+    ancienDateSouscription String? @map("ancien_date_souscription")
+    ancienDateEcheance String? @map("ancien_date_echeance")
+    ancienNumContrat String? @map("ancien_num_contrat")
+    ancienFormule String? @map("ancien_formule")
+    ancienCotisation String? @map("ancien_cotisation")
+
+    produitDateEffet String? @map("produit_date_effet")
+    produitDateEffetModifiable String? @map("produit_date_effet_modifiable")
+    produitFormule String? @map("produit_formule")
+    produitGroupeNom String? @map("produit_groupe_nom")
+    produitGammeNom String? @map("produit_gamme_nom")
+    produitFormuleNom String? @map("produit_formule_nom")
+    produitCotisation String? @map("produit_cotisation")
+    produitTypeContrat String? @map("produit_type_contrat")
+    produitTypeClient String? @map("produit_type_client")
+    produitLogoUrl String? @map("produit_logo_url") @db.Text
+    produitGarantiesUrl String? @map("produit_garanties_url") @db.Text
+    produitDipaUrl String? @map("produit_dipa_url") @db.Text
+    produitConditionsGeneralesUrl String? @map("produit_conditions_generales_url") @db.Text
+    produitBulletinAdhesionUrl String? @map("produit_bulletin_adhesion_url") @db.Text
+    produitDevoirConseilUrl String? @map("produit_devoir_conseil_url") @db.Text
+
+    paiementModePaiement String? @map("paiement_mode_paiement")
+    paiementPrelevementLe String? @map("paiement_prelevement_le")
+    paiementPeriodicite String? @map("paiement_periodicite")
+    paiementPasCoordBancaires Boolean? @map("paiement_pas_coord_bancaires")
+
+    prelevementAccountId String? @map("prelevement_account_id")
+    prelevementTitulaireNom String? @map("prelevement_titulaire_nom")
+    prelevementTitulairePrenom String? @map("prelevement_titulaire_prenom")
+    prelevementTitulaireAdresse String? @map("prelevement_titulaire_adresse")
+    prelevementTitulaireCp String? @map("prelevement_titulaire_cp")
+    prelevementTitulaireVille String? @map("prelevement_titulaire_ville")
+
+    virementAccountId String? @map("virement_account_id")
+    virementTitulaireNom String? @map("virement_titulaire_nom")
+    virementTitulairePrenom String? @map("virement_titulaire_prenom")
+    virementTitulaireAdresse String? @map("virement_titulaire_adresse")
+    virementTitulaireCp String? @map("virement_titulaire_cp")
+    virementTitulaireVille String? @map("virement_titulaire_ville")
+
+    questionsComplementaires Json? @map("questions_complementaires")
+    questionsConseil Json? @map("questions_conseil")
+    rawData Json? @map("raw_data")
+
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    @@index([ficheCacheId])
+    @@map("fiche_cache_elements_souscription")
+}
+
+model FicheCacheTarification {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    rowIndex Int @map("row_index")
+    nom      String
+
+    gammes FicheCacheTarificationGamme[]
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([ficheCacheId, rowIndex])
+    @@index([ficheCacheId])
+    @@index([nom])
+    @@map("fiche_cache_tarifications")
+}
+
+model FicheCacheTarificationGamme {
+    id BigInt @id @default(autoincrement())
+
+    tarificationId BigInt @map("tarification_id")
+    tarification   FicheCacheTarification @relation(fields: [tarificationId], references: [id], onDelete: Cascade)
+
+    rowIndex Int @map("row_index")
+    nom      String
+    logoUrl  String? @map("logo_url") @db.Text
+    garantiesUrl String? @map("garanties_url") @db.Text
+    conditionsGeneralesUrl String? @map("conditions_generales_url") @db.Text
+    bulletinAdhesionUrl String? @map("bulletin_adhesion_url") @db.Text
+
+    formules FicheCacheTarificationFormule[]
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([tarificationId, rowIndex])
+    @@index([tarificationId])
+    @@index([nom])
+    @@map("fiche_cache_tarification_gammes")
+}
+
+model FicheCacheTarificationFormule {
+    id BigInt @id @default(autoincrement())
+
+    gammeId BigInt @map("gamme_id")
+    gamme   FicheCacheTarificationGamme @relation(fields: [gammeId], references: [id], onDelete: Cascade)
+
+    rowIndex Int @map("row_index")
+    formuleId String @map("formule_id")
+    nom      String
+    prix     String
+
+    details FicheCacheTarificationFormuleDetail[]
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([gammeId, rowIndex])
+    @@index([gammeId])
+    @@index([formuleId])
+    @@map("fiche_cache_tarification_formules")
+}
+
+model FicheCacheTarificationFormuleDetail {
+    id BigInt @id @default(autoincrement())
+
+    formuleRowId BigInt @map("formule_row_id")
+    formuleRow   FicheCacheTarificationFormule @relation(fields: [formuleRowId], references: [id], onDelete: Cascade)
+
+    detailKey String @map("detail_key")
+    detailValue String @map("detail_value")
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([formuleRowId, detailKey])
+    @@index([formuleRowId])
+    @@index([detailKey])
+    @@map("fiche_cache_tarification_formule_details")
+}
+
+model FicheCacheMailDevis {
+    id BigInt @id @default(autoincrement())
+
+    ficheCacheId BigInt    @unique @map("fiche_cache_id")
+    ficheCache   FicheCache @relation(fields: [ficheCacheId], references: [id], onDelete: Cascade)
+
+    dateEnvoi String @map("date_envoi")
+    typeMail  String @map("type_mail")
+    utilisateur String
+    visualisationUrl String? @map("visualisation_url") @db.Text
+
+    customerEmail String? @map("customer_email")
+    customerPhone String? @map("customer_phone")
+    customerName  String? @map("customer_name")
+
+    garantiesLinkUrl  String  @map("garanties_link_url") @db.Text
+    garantiesLinkText String? @map("garanties_link_text")
+
+    detailsGamme        String @map("details_gamme")
+    detailsProductName  String @map("details_product_name")
+    detailsFormule      String @map("details_formule")
+    detailsPrice        String? @map("details_price")
+    detailsAgeRange     String? @map("details_age_range")
+    detailsSubscriptionLink String? @map("details_subscription_link") @db.Text
+
+    agenceNom      String? @map("agence_nom")
+    agenceAdresse  String? @map("agence_adresse") @db.Text
+    agenceTelephone String? @map("agence_telephone")
+    agenceEmail    String? @map("agence_email")
+    agenceLogoUrl  String? @map("agence_logo_url") @db.Text
+
+    ficheInfoFicheId  String  @map("fiche_info_fiche_id")
+    ficheInfoCle      String? @map("fiche_info_cle")
+    ficheInfoConseiller String? @map("fiche_info_conseiller")
+
+    subscriberCivilite String? @map("subscriber_civilite")
+    subscriberNom      String? @map("subscriber_nom")
+    subscriberPrenom   String? @map("subscriber_prenom")
+
+    docConditionsGenerales   String? @map("doc_conditions_generales") @db.Text
+    docTableauGaranties      String? @map("doc_tableau_garanties") @db.Text
+    docDocumentInformation   String? @map("doc_document_information") @db.Text
+    docExemplesRemboursements String? @map("doc_exemples_remboursements") @db.Text
+
+    menuHome         String? @map("menu_home") @db.Text
+    menuGaranties    String? @map("menu_garanties") @db.Text
+    menuDocuments    String? @map("menu_documents") @db.Text
+    menuSubscription String? @map("menu_subscription") @db.Text
+
+    categories FicheCacheMailDevisGarantieCategory[]
+    notes      FicheCacheMailDevisNote[]
+
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    @@index([ficheCacheId])
+    @@map("fiche_cache_mail_devis")
+}
+
+model FicheCacheMailDevisGarantieCategory {
+    id BigInt @id @default(autoincrement())
+
+    mailDevisId BigInt @map("mail_devis_id")
+    mailDevis   FicheCacheMailDevis @relation(fields: [mailDevisId], references: [id], onDelete: Cascade)
+
+    categoryKey  String @map("category_key")
+    categoryName String @map("category_name")
+    subcategoriesFormat String @default("named") @map("subcategories_format") // named | array
+
+    noteReferences FicheCacheMailDevisGarantieCategoryNoteRef[]
+    items          FicheCacheMailDevisGarantieCategoryItem[]
+    subcategories  FicheCacheMailDevisGarantieSubcategory[]
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([mailDevisId, categoryKey])
+    @@index([mailDevisId])
+    @@map("fiche_cache_mail_devis_garantie_categories")
+}
+
+model FicheCacheMailDevisGarantieCategoryNoteRef {
+    id BigInt @id @default(autoincrement())
+
+    categoryId BigInt @map("category_id")
+    category   FicheCacheMailDevisGarantieCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+    rowIndex Int @map("row_index")
+    noteReference String @map("note_reference")
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([categoryId, rowIndex])
+    @@index([categoryId])
+    @@map("fiche_cache_mail_devis_garantie_category_note_refs")
+}
+
+model FicheCacheMailDevisGarantieCategoryItem {
+    id BigInt @id @default(autoincrement())
+
+    categoryId BigInt @map("category_id")
+    category   FicheCacheMailDevisGarantieCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+    rowIndex Int @map("row_index")
+    name     String
+    value    String
+    noteRef  String? @map("note_ref")
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([categoryId, rowIndex])
+    @@index([categoryId])
+    @@map("fiche_cache_mail_devis_garantie_category_items")
+}
+
+model FicheCacheMailDevisGarantieSubcategory {
+    id BigInt @id @default(autoincrement())
+
+    categoryId BigInt @map("category_id")
+    category   FicheCacheMailDevisGarantieCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+    subKey String @map("sub_key")
+    name   String?
+
+    items FicheCacheMailDevisGarantieSubcategoryItem[]
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([categoryId, subKey])
+    @@index([categoryId])
+    @@map("fiche_cache_mail_devis_garantie_subcategories")
+}
+
+model FicheCacheMailDevisGarantieSubcategoryItem {
+    id BigInt @id @default(autoincrement())
+
+    subcategoryId BigInt @map("subcategory_id")
+    subcategory   FicheCacheMailDevisGarantieSubcategory @relation(fields: [subcategoryId], references: [id], onDelete: Cascade)
+
+    rowIndex Int @map("row_index")
+    name     String
+    value    String
+    noteRef  String? @map("note_ref")
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([subcategoryId, rowIndex])
+    @@index([subcategoryId])
+    @@map("fiche_cache_mail_devis_garantie_subcategory_items")
+}
+
+model FicheCacheMailDevisNote {
+    id BigInt @id @default(autoincrement())
+
+    mailDevisId BigInt @map("mail_devis_id")
+    mailDevis   FicheCacheMailDevis @relation(fields: [mailDevisId], references: [id], onDelete: Cascade)
+
+    rowIndex Int @map("row_index")
+    number   String
+    text     String @db.Text
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([mailDevisId, rowIndex])
+    @@index([mailDevisId])
+    @@map("fiche_cache_mail_devis_notes")
 }
 
 model Recording {
@@ -117,16 +805,40 @@ model Recording {
     transcriptionId   String?   @map("transcription_id")
     transcriptionText String?   @map("transcription_text") @db.Text
     transcriptionData Json?     @map("transcription_data")
+    transcriptionLanguageCode String?  @map("transcription_language_code")
+    transcriptionLanguageProbability Float? @map("transcription_language_probability")
     hasTranscription  Boolean   @default(false) @map("has_transcription")
     transcribedAt     DateTime? @map("transcribed_at")
     createdAt         DateTime  @default(now()) @map("created_at")
     updatedAt         DateTime  @updatedAt @map("updated_at")
+
+    transcriptionChunks RecordingTranscriptionChunk[]
 
     @@unique([ficheCacheId, callId])
     @@index([ficheCacheId])
     @@index([callId])
     @@index([recordingDate])
     @@map("recordings")
+}
+
+model RecordingTranscriptionChunk {
+    id BigInt @id @default(autoincrement())
+
+    recordingId BigInt    @map("recording_id")
+    recording   Recording @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+
+    chunkIndex     Int      @map("chunk_index")
+    startTimestamp Float    @map("start_timestamp")
+    endTimestamp   Float    @map("end_timestamp")
+    messageCount   Int      @map("message_count")
+    speakers       String[]
+    fullText       String   @map("full_text") @db.Text
+    createdAt      DateTime @default(now()) @map("created_at")
+
+    @@unique([recordingId, chunkIndex])
+    @@index([recordingId])
+    @@index([chunkIndex])
+    @@map("recording_transcription_chunks")
 }
 
 model Audit {
@@ -212,6 +924,9 @@ model AuditStepResult {
     // Full step JSON (LLM output) so we can aggregate/finalize audits across replicas.
     // This is written by per-step workers and then overwritten with the final (enriched + gated) step at audit finalization.
     rawResult Json? @map("raw_result")
+    controlPoints AuditStepResultControlPoint[]
+    humanReviews  AuditStepResultHumanReview[]
+    rerunEvents   AuditStepResultRerunEvent[]
     createdAt                    DateTime @default(now()) @map("created_at")
 
     @@index([auditId])
@@ -219,6 +934,150 @@ model AuditStepResult {
     @@unique([auditId, stepPosition])
     @@index([conforme])
     @@map("audit_step_results")
+}
+
+model AuditStepResultControlPoint {
+    id BigInt @id @default(autoincrement())
+
+    auditId       BigInt        @map("audit_id")
+    stepPosition  Int           @map("step_position")
+    auditStepResult AuditStepResult @relation(fields: [auditId, stepPosition], references: [auditId, stepPosition], onDelete: Cascade)
+
+    controlPointIndex Int      @map("control_point_index")
+    point             String
+    statut            String
+    commentaire       String   @db.Text
+    minutages         String[]
+    erreurTranscriptionNotee Boolean @map("erreur_transcription_notee")
+    variationPhonetiqueUtilisee String? @map("variation_phonetique_utilisee")
+
+    citations AuditStepResultCitation[]
+
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    @@unique([auditId, stepPosition, controlPointIndex])
+    @@index([auditId, stepPosition])
+    @@index([controlPointIndex])
+    @@map("audit_step_result_control_points")
+}
+
+model AuditStepResultCitation {
+    id BigInt @id @default(autoincrement())
+
+    auditId          BigInt @map("audit_id")
+    stepPosition     Int    @map("step_position")
+    controlPointIndex Int   @map("control_point_index")
+    controlPoint     AuditStepResultControlPoint @relation(fields: [auditId, stepPosition, controlPointIndex], references: [auditId, stepPosition, controlPointIndex], onDelete: Cascade)
+
+    citationIndex Int @map("citation_index")
+
+    texte            String @db.Text
+    minutage         String
+    minutageSecondes Float  @map("minutage_secondes")
+    speaker          String
+    recordingIndex   Int    @map("recording_index")
+    chunkIndex       Int    @map("chunk_index")
+    recordingDate    String @map("recording_date")
+    recordingTime    String @map("recording_time")
+    recordingUrl     String @map("recording_url") @db.Text
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([auditId, stepPosition, controlPointIndex, citationIndex])
+    @@index([auditId, stepPosition])
+    @@index([auditId, stepPosition, controlPointIndex])
+    @@index([recordingIndex])
+    @@index([chunkIndex])
+    @@map("audit_step_result_citations")
+}
+
+model AuditStepResultHumanReview {
+    id BigInt @id @default(autoincrement())
+
+    auditId       BigInt        @map("audit_id")
+    stepPosition  Int           @map("step_position")
+    auditStepResult AuditStepResult @relation(fields: [auditId, stepPosition], references: [auditId, stepPosition], onDelete: Cascade)
+
+    reviewedAt DateTime @map("reviewed_at")
+    reviewer   String?  @map("reviewer")
+    reason     String?  @db.Text
+
+    kind             String  @default("step")
+    controlPointIndex Int?   @map("control_point_index")
+    point            String? @db.Text
+
+    // Step-level previous/override snapshot
+    previousTraite          Boolean? @map("previous_traite")
+    previousConforme        String?  @map("previous_conforme")
+    previousScore           Int?     @map("previous_score")
+    previousNiveauConformite String? @map("previous_niveau_conformite")
+
+    overrideTraite          Boolean? @map("override_traite")
+    overrideConforme        String?  @map("override_conforme")
+    overrideScore           Int?     @map("override_score")
+    overrideNiveauConformite String? @map("override_niveau_conformite")
+
+    // Control-point previous/override snapshot
+    previousStatut      String? @map("previous_statut")
+    previousCommentaire String? @map("previous_commentaire") @db.Text
+    overrideStatut      String? @map("override_statut")
+    overrideCommentaire String? @map("override_commentaire") @db.Text
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@index([auditId, stepPosition])
+    @@index([reviewedAt])
+    @@index([kind])
+    @@index([controlPointIndex])
+    @@map("audit_step_result_human_reviews")
+}
+
+model AuditStepResultRerunEvent {
+    id BigInt @id @default(autoincrement())
+
+    auditId       BigInt        @map("audit_id")
+    stepPosition  Int           @map("step_position")
+    auditStepResult AuditStepResult @relation(fields: [auditId, stepPosition], references: [auditId, stepPosition], onDelete: Cascade)
+
+    occurredAt DateTime @map("occurred_at")
+    kind       String   @default("unknown")
+    rerunId    String?  @map("rerun_id")
+    eventId    String?  @map("event_id")
+    customPrompt String? @map("custom_prompt") @db.Text
+
+    controlPointIndex Int?   @map("control_point_index")
+    point            String? @db.Text
+
+    // Step-level previous/next snapshot
+    previousScore         Int?    @map("previous_score")
+    previousConforme      String? @map("previous_conforme")
+    previousTotalCitations Int?   @map("previous_total_citations")
+    nextScore             Int?    @map("next_score")
+    nextConforme          String? @map("next_conforme")
+    nextTotalCitations    Int?    @map("next_total_citations")
+
+    // Control-point rerun previous/next snapshot
+    previousStatut       String? @map("previous_statut")
+    previousCommentaire  String? @map("previous_commentaire") @db.Text
+    previousCitations    Int?    @map("previous_citations")
+    previousStepScore    Int?    @map("previous_step_score")
+    previousStepConforme String? @map("previous_step_conforme")
+
+    nextStatut       String? @map("next_statut")
+    nextCommentaire  String? @map("next_commentaire") @db.Text
+    nextCitations    Int?    @map("next_citations")
+    nextStepScore    Int?    @map("next_step_score")
+    nextStepConforme String? @map("next_step_conforme")
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@index([auditId, stepPosition])
+    @@index([occurredAt])
+    @@index([kind])
+    @@index([rerunId])
+    @@index([controlPointIndex])
+    @@map("audit_step_result_rerun_events")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -278,20 +1137,18 @@ model AutomationSchedule {
     dayOfWeek      Int?         @map("day_of_week") // 0-6 (Sunday-Saturday)
     dayOfMonth     Int?         @map("day_of_month") // 1-31
 
-    // Fiche Selection Configuration
-    ficheSelection Json @map("fiche_selection") // Flexible JSON config
-    // Example JSON structure:
-    // {
-    //   "mode": "date_range" | "manual" | "filter",
-    //   "dateRange": "last_24h" | "yesterday" | "last_week" | "last_month" | "custom",
-    //   "customStartDate": "2024-01-01",
-    //   "customEndDate": "2024-01-31",
-    //   "groupes": ["groupe1", "groupe2"],
-    //   "onlyWithRecordings": true,
-    //   "onlyUnaudited": false,
-    //   "maxFiches": 100,
-    //   "ficheIds": ["123", "456"] // For manual mode
-    // }
+    // Fiche Selection Configuration (normalized; avoid JSON blob)
+    ficheSelectionMode                 String   @default("date_range") @map("fiche_selection_mode")
+    ficheSelectionDateRange            String?  @map("fiche_selection_date_range")
+    ficheSelectionCustomStartDate      String?  @map("fiche_selection_custom_start_date")
+    ficheSelectionCustomEndDate        String?  @map("fiche_selection_custom_end_date")
+    ficheSelectionGroupes              String[] @map("fiche_selection_groupes")
+    ficheSelectionOnlyWithRecordings   Boolean  @default(false) @map("fiche_selection_only_with_recordings")
+    ficheSelectionOnlyUnaudited        Boolean  @default(false) @map("fiche_selection_only_unaudited")
+    ficheSelectionUseRlm               Boolean  @default(false) @map("fiche_selection_use_rlm")
+    ficheSelectionMaxFiches            Int?     @map("fiche_selection_max_fiches")
+    ficheSelectionMaxRecordingsPerFiche Int?    @map("fiche_selection_max_recordings_per_fiche")
+    ficheSelectionFicheIds             String[] @map("fiche_selection_fiche_ids")
 
     // Transcription Configuration
     runTranscription      Boolean @default(true) @map("run_transcription")
@@ -379,6 +1236,7 @@ model AutomationRun {
     // Execution Logs
     logs AutomationLog[]
     audits Audit[]
+    ficheResults AutomationRunFicheResult[]
 
     @@index([scheduleId])
     @@index([status])
@@ -400,6 +1258,30 @@ model AutomationLog {
     @@index([level])
     @@index([timestamp])
     @@map("automation_logs")
+}
+
+model AutomationRunFicheResult {
+    id BigInt @id @default(autoincrement())
+
+    runId BigInt @map("run_id")
+    run   AutomationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+    ficheId String @map("fiche_id")
+    status  String // successful, failed, ignored
+
+    // Failed details
+    error String? @db.Text
+
+    // Ignored details
+    ignoreReason   String? @map("ignore_reason") @db.Text
+    recordingsCount Int?   @map("recordings_count")
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([runId, ficheId])
+    @@index([runId])
+    @@index([status])
+    @@map("automation_run_fiche_results")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -461,6 +1343,18 @@ model WebhookDelivery {
     url     String
     payload Json
 
+    // Normalized payload fields (avoid large JSON blobs; used for retries/signatures)
+    payloadTimestamp        String? @map("payload_timestamp")
+    payloadStatus           String? @map("payload_status")
+    payloadProgress         Int?    @map("payload_progress")
+    payloadCompletedDays    Int?    @map("payload_completed_days")
+    payloadTotalDays        Int?    @map("payload_total_days")
+    payloadTotalFiches      Int?    @map("payload_total_fiches")
+    payloadCurrentFichesCount Int?  @map("payload_current_fiches_count")
+    payloadLatestDate       String? @map("payload_latest_date")
+    payloadError            String? @map("payload_error") @db.Text
+    payloadDataUrl          String? @map("payload_data_url") @db.Text
+
     // Delivery status
     status       String  @default("pending") // pending, sent, failed
     statusCode   Int?    @map("status_code")
@@ -475,12 +1369,33 @@ model WebhookDelivery {
     sentAt    DateTime? @map("sent_at")
     createdAt DateTime  @default(now()) @map("created_at")
 
+    partialData WebhookDeliveryPartialFiche[]
+
     // Indexes
     @@index([jobId])
     @@index([status, nextRetryAt])
     @@index([event])
     @@index([createdAt])
     @@map("webhook_deliveries")
+}
+
+model WebhookDeliveryPartialFiche {
+    id BigInt @id @default(autoincrement())
+
+    deliveryId String         @map("delivery_id")
+    delivery   WebhookDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+
+    rowIndex Int    @map("row_index")
+    ficheId   String @map("fiche_id")
+    groupe    String?
+    prospectNom    String? @map("prospect_nom")
+    prospectPrenom String? @map("prospect_prenom")
+    recordingsCount Int   @map("recordings_count")
+    ficheCreatedAt  String @map("fiche_created_at")
+
+    @@unique([deliveryId, rowIndex])
+    @@index([deliveryId])
+    @@map("webhook_delivery_partial_fiches")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

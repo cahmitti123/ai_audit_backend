@@ -249,7 +249,35 @@ export const runAutomationFunction = inngest.createFunction(
         throw new NonRetriableError(`Schedule ${schedule_id} is not active`);
       }
 
-      const ficheSelection = validateFicheSelection(scheduleData.ficheSelection);
+      const ficheSelection = validateFicheSelection({
+        mode: scheduleData.ficheSelectionMode,
+        ...(scheduleData.ficheSelectionDateRange
+          ? { dateRange: scheduleData.ficheSelectionDateRange }
+          : {}),
+        ...(scheduleData.ficheSelectionCustomStartDate
+          ? { customStartDate: scheduleData.ficheSelectionCustomStartDate }
+          : {}),
+        ...(scheduleData.ficheSelectionCustomEndDate
+          ? { customEndDate: scheduleData.ficheSelectionCustomEndDate }
+          : {}),
+        ...(Array.isArray(scheduleData.ficheSelectionGroupes) &&
+        scheduleData.ficheSelectionGroupes.length > 0
+          ? { groupes: scheduleData.ficheSelectionGroupes }
+          : {}),
+        onlyWithRecordings: Boolean(scheduleData.ficheSelectionOnlyWithRecordings),
+        onlyUnaudited: Boolean(scheduleData.ficheSelectionOnlyUnaudited),
+        useRlm: Boolean(scheduleData.ficheSelectionUseRlm),
+        ...(typeof scheduleData.ficheSelectionMaxFiches === "number"
+          ? { maxFiches: scheduleData.ficheSelectionMaxFiches }
+          : {}),
+        ...(typeof scheduleData.ficheSelectionMaxRecordingsPerFiche === "number"
+          ? { maxRecordingsPerFiche: scheduleData.ficheSelectionMaxRecordingsPerFiche }
+          : {}),
+        ...(Array.isArray(scheduleData.ficheSelectionFicheIds) &&
+        scheduleData.ficheSelectionFicheIds.length > 0
+          ? { ficheIds: scheduleData.ficheSelectionFicheIds }
+          : {}),
+      });
 
       // Inngest step results must be JSON-serializable.
       // Convert BigInt values explicitly.
@@ -1060,6 +1088,7 @@ export const runAutomationFunction = inngest.createFunction(
                 recordingsCount: true,
                 hasRecordings: true,
                 rawData: true,
+                information: { select: { id: true } },
               },
             });
 
@@ -1080,7 +1109,9 @@ export const runAutomationFunction = inngest.createFunction(
               }
               const raw = r.rawData ?? null;
               const isSalesListOnly = isRecord(raw) && raw._salesListOnly === true;
-              const isFullDetails = isFullFicheDetailsRawData(raw) && !isSalesListOnly;
+              const isFullDetails =
+                Boolean(r.information) ||
+                (isFullFicheDetailsRawData(raw) && !isSalesListOnly);
               const rawRecordings = isRecord(raw)
                 ? (raw as { recordings?: unknown }).recordings
                 : undefined;
@@ -2018,23 +2049,24 @@ export const runAutomationFunction = inngest.createFunction(
           : "failed";
 
       await step.run("finalize-run", async () => {
-        await automationRepository.updateAutomationRun(runId, {
-          status: finalStatus,
-          completedAt: new Date(),
-          durationMs,
-          totalFiches: ficheIds.length,
-          successfulFiches: results.successful.length,
-          failedFiches: results.failed.length,
-          transcriptionsRun: results.transcriptions,
-          auditsRun: results.audits,
-          resultSummary: {
+        await automationRepository.finalizeAutomationRunWithFicheResults(
+          runId,
+          {
+            status: finalStatus,
+            completedAt: new Date(),
+            durationMs,
+            totalFiches: ficheIds.length,
+            successfulFiches: results.successful.length,
+            failedFiches: results.failed.length,
+            transcriptionsRun: results.transcriptions,
+            auditsRun: results.audits,
+          },
+          {
             successful: results.successful,
             failed: results.failed,
             ignored: results.ignored,
-            transcriptions: results.transcriptions,
-            audits: results.audits,
-          },
-        });
+          }
+        );
 
         await automationRepository.updateScheduleStats(
           scheduleId,

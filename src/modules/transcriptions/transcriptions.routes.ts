@@ -170,7 +170,10 @@ transcriptionsRouter.get(
     } else if (recording.transcriptionText) {
       transcriptionData = {
         text: recording.transcriptionText,
-        language_code: "fr",
+        language_code: recording.transcriptionLanguageCode || "fr",
+        ...(typeof recording.transcriptionLanguageProbability === "number"
+          ? { language_probability: recording.transcriptionLanguageProbability }
+          : {}),
         words: [],
       };
     }

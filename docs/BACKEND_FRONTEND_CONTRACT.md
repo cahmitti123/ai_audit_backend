@@ -41,8 +41,9 @@ You will see two different “audit id” concepts:
 
 **What changed**:
 - `POST /api/audits/:audit_id/steps/:step_position/rerun` now **updates** the stored step result (`audit_step_results`) and recomputes audit compliance summary (`audits.*` score/niveau/critical).
-- Control-point rerun now **patches** `audit_step_results.raw_result.points_controle[i]`, recomputes step score/conforme deterministically, and recomputes audit compliance summary.
-- Both store an audit trail in `audit_step_results.raw_result.rerun_history`.
+- Control-point rerun now updates the **normalized control point tables** (`audit_step_result_control_points` + citations), recomputes step score/conforme deterministically, and recomputes audit compliance summary.
+- Audit trails are now **normalized** (`audit_step_result_human_reviews`, `audit_step_result_rerun_events`). For backwards compatibility, audit detail endpoints still expose `human_review` / `rerun_history` under each step payload in `resultData`.
+- `audits.resultData` is stored as a workflow snapshot (heavy `results.steps` arrays are stripped). Audit detail endpoints rebuild/overlay the latest step payloads from DB so reruns/overrides are visible.
 
 **Frontend recommendation**:
 - Treat rerun as **“run async then refetch”**:
@@ -84,6 +85,28 @@ If `API_AUTH_TOKEN` or `API_AUTH_TOKENS` is configured, then all `/api/*` reques
 ### 6) Webhook URL SSRF guard (automation + progressive fetch)
 
 User-provided webhook URLs are validated server-side. In production, invalid/unsafe webhook URLs are rejected (HTTP `400`) unless explicitly allowlisted via `WEBHOOK_ALLOWED_ORIGINS`.
+
+### 7) Fiche details: `mail_devis` is opt-in (payload size)
+
+**What changed**:
+- `GET /api/fiches/:fiche_id` omits `mail_devis` by default to keep the default fiche details payload smaller.
+- To include it, request `?include_mail_devis=true`.
+- When requested, `mail_devis` may still be `null` (no mail devis available) and should be treated as an optional field.
+
+**Frontend recommendation**:
+- Only request `include_mail_devis=true` when the UI actually needs to render the “Mail Devis” view.
+
+### 8) JSON storage reduction (normalized tables/columns; API preserved)
+
+This backend is actively reducing raw JSON storage by normalizing stable structures into tables/columns, while keeping the **API response shapes backward compatible** by reconstructing legacy payloads at read time.
+
+Examples (non-exhaustive):
+- **Fiche cache**: many `fiche_cache.raw_data` sections are now stored in dedicated tables/columns and re-attached on read.
+- **Automation runs**: per-fiche outcomes live in `automation_run_fiche_results` (so `automation_runs.result_summary` can stay minimal); API can rebuild the legacy `resultSummary` shape from the table.
+- **Webhooks**: progressive fetch webhook deliveries store canonical payload fields in columns/rows (payload sent to the webhook URL remains the same).
+- **Audits**: control points + citations + trails are normalized; audit detail endpoints still expose legacy `points_controle` / `human_review` / `rerun_history` in `resultData`.
+- **Transcriptions**: transcription chunks are normalized; some endpoints may return `words: []` and you should rely on `text` for display.
+- **Products**: gamme/formule document URLs are normalized into the `documents` table; legacy JSON is kept minimal and reconstructed for API compatibility.
 
 ---
 
@@ -215,6 +238,7 @@ Below is the **full list** of routes defined in `src/modules/*/*.routes.ts` plus
 - **Purpose**: Get fiche “full details” from DB cache; may fetch full details from CRM if only minimal sales-list cache exists.
 - **Query**:
   - `refresh=true` (optional) forces refresh from the gateway/CRM (does not require a cached `cle`; gateway refreshes internally)
+  - `include_mail_devis=true` (optional) includes the (large) `mail_devis` object in the response; otherwise the field is omitted by default
 - **Response 200**: returns the cached/full fiche payload (BigInt-safe). Shape matches `FicheDetailsResponse` in `src/modules/fiches/fiches.schemas.ts`.
 - **Errors**:
   - `404`: fiche not found (gateway/CRM)
@@ -601,6 +625,9 @@ Notes:
 }
 ```
 
+- **Note**:
+  - `transcription.words` may be empty (the backend progressively normalizes transcription storage into chunks and may clear word-level JSON). Use `transcription.text` as the primary display field.
+
 - **Errors**:
   - `404` `{ success:false, error:"Recording not found" }`
   - `404` `{ success:false, error:"No transcription available for this recording" }`
@@ -787,6 +814,8 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
 - **Purpose**: get audit detail payload.
 - **Response 200**:
   - `{ success:true, data: AuditDetail }`
+- **Note (resultData “latest view”)**:
+  - The API returns `resultData` as a *latest view* rebuilt/overlaid from DB step results, so it reflects reruns and human overrides even though `audits.resultData` is stored as a lightweight workflow snapshot.
 - **Note (approach tracking)**:
   - Completed audits include an `approach` object indicating whether `use_rlm` was used and which `transcript_mode` ran (`prompt|tools`).
   - You can read it from any of:
@@ -825,7 +854,9 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
 - **Behavior (important)**:
   - The rerun runs asynchronously (Inngest).
   - When it completes, the backend **persists the rerun into the stored audit**:
-    - updates `audit_step_results` for that step (including `raw_result`)
+    - updates `audit_step_results` summary fields for that step
+    - persists per-control-point results into normalized tables (`audit_step_result_control_points` + citations)
+    - stores an audit trail entry (normalized; audit detail endpoints still expose `human_review` / `rerun_history` under the step payload in `resultData` for compatibility)
     - recomputes audit-level compliance summary (`audits.*` score/niveau/critical)
   - Frontend should refetch `GET /api/audits/:audit_id` after receiving `audit.step_completed` with `rerun_id`.
 - **Errors**:
@@ -845,7 +876,7 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
   - `{ success:true, message:"Control point re-run queued", event_id, audit_id, step_position, control_point_index }`
 - **Notes**:
   - Rebuilds transcript context from DB + includes previous control point result in the rerun prompt for better contextualisation.
-  - On completion, the backend **updates the stored audit** by patching `raw_result.points_controle[i]` and recomputing step score/conforme deterministically (then recomputes audit compliance summary).
+  - On completion, the backend **updates the stored audit** by updating the normalized control point row (fallback to legacy `raw_result.points_controle` for unbackfilled rows) and recomputing step score/conforme deterministically (then recomputes audit compliance summary).
   - Realtime uses `audit.step_started` / `audit.step_completed` with `rerun_id` and:
     - `rerun_scope: "control_point"`
     - `control_point_index`
@@ -864,7 +895,7 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
 - **Path**:
   - `audit_id` (BigInt string)
   - `step_position` (int > 0)
-  - `control_point_index` (int > 0, **1-based** index in `rawResult.points_controle`)
+  - `control_point_index` (int > 0, **1-based** index in the step's configured `controlPoints` array; prefers normalized tables, falls back to legacy `rawResult.points_controle`)
 - **Response 200**:
   - `{ success:true, data: { auditId, stepPosition, controlPointIndex, point, statut, commentaire } }`
 - **Errors**:
@@ -880,8 +911,8 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
   - `reviewer` (optional string): stored for audit trail
   - `reason` (optional string): stored for audit trail
 - **Behavior**:
-  - Updates `raw_result.points_controle[i].statut` and/or `.commentaire`
-  - Appends an audit trail entry into `raw_result.human_review`
+  - Updates the normalized control point row (`audit_step_result_control_points`) and/or `.commentaire` (legacy rows may still update `raw_result.points_controle[i]` until backfilled)
+  - Stores an audit trail entry (normalized; also reflected under `human_review` in the step payload returned in `resultData`)
 - **Response 200**:
   - `{ success:true, data: { auditId, stepPosition, controlPointIndex, point, statut, commentaire } }`
 - **Errors**:
@@ -904,7 +935,7 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
 - **Behavior**:
   - Updates the step summary fields in `audit_step_results` (so existing audit detail endpoints reflect the override).
   - Recomputes and persists the audit-level compliance summary (`score_percentage`, `niveau`, `is_compliant`, `critical_*`) from the current step results (best-effort).
-  - Preserves the original AI output by appending an entry into `raw_result.human_review` (audit trail).
+  - Preserves the original AI output by storing an audit trail entry (normalized; also reflected under `human_review` in the step payload returned in `resultData`).
 - **Response 200**:
   - `{ success:true, data: AuditStepResult }`
 - **Errors**:
@@ -1034,6 +1065,13 @@ Important: `POST /api/products/gammes` and `POST /api/products/formules` accept 
   - Returns the **most recent ~50 messages** for the conversation (DB query is `take: 50`), so the frontend should treat this as a window, not the full history.
   - Messages are returned in chronological order (oldest → newest).
 
+### GET `/api/fiches/:fiche_id/chat/history`
+
+- **Response 200**: `{ success:true, data:{ conversationId, ficheId, messages, messageCount } }`
+- **Note**:
+  - Returns the **most recent ~50 messages** for the conversation (DB query is `take: 50`), so the frontend should treat this as a window, not the full history.
+  - Messages are returned in chronological order (oldest → newest).
+
 ### POST `/api/audits/:audit_id/chat`
 ### POST `/api/fiches/:fiche_id/chat`
 
@@ -1048,7 +1086,7 @@ Important: `POST /api/products/gammes` and `POST /api/products/formules` accept 
   - Many chunks: `data: {"text":"..."}`
   - Final citations (optional): `data: {"citations":[ ... ]}`
   - Completion: `data: [DONE]`
-  - On streaming error after headers: `data: {"error":"..."}`
+  - On streaming error after headers: `data: {"type":"error","error":"...","code":"STREAM_ERROR"}`
 
 Important: chat uses **DB-only** transcription data (multi-replica safe).
 

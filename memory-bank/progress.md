@@ -12,8 +12,13 @@
 - Automation can run audits in transcript tools mode by setting `ficheSelection.useRlm=true` (propagates `use_rlm=true` into `audit/run`).
 - Automation emits dedicated Pusher realtime events (`automation.run.*`) on `private-job-automation-run-<RUN_ID>`.
 - Automation can send email notifications via SMTP when `SMTP_*` env vars are configured (otherwise skipped/logged).
+- Automation run per-fiche outcomes are normalized in `automation_run_fiche_results` (run `result_summary` JSON kept minimal; detail endpoint reconstructs legacy shape when needed).
 - Fiche detail fetch works by `fiche_id` only (gateway refreshes `cle` internally), so audits/transcriptions can fetch/cache fiche details even if the fiche was never pre-cached via sales-list/date-range.
 - **Automation safety** can skip/ignore fiches with too many recordings (`maxRecordingsPerFiche` / `AUTOMATION_MAX_RECORDINGS_PER_FICHE`) to protect fan-out + provider quota.
+- Progressive fetch webhook deliveries store payload fields in columns/rows (payload JSON kept minimal) and can retry by reconstructing the payload.
+- Fiche cache (`fiche_cache.raw_data`) is being progressively normalized into tables/columns; stable envelope scalars are stored as columns (`fiche_cache.cle`, `fiche_cache.details_success`, `fiche_cache.details_message`) and read paths reconstruct the legacy API shape so clients are unaffected.
+- Fiche cache backfills are running in small batches; many full-detail rows now have near-empty `raw_data` (often `{}`), with legacy API shape reconstructed from normalized tables.
+- Recording transcription backfill is in progress: transcription chunks are being created and `recordings.transcription_data` is being cleared (see `scripts/transcription-chunks-status.ts`).
 - **ElevenLabs transcription** validates/normalizes `ELEVENLABS_API_KEY` and sanitizes Axios errors (avoid leaking request headers in logs).
 - TypeScript build is green (`npm run build`).
 - Docker startup runs `prisma migrate deploy` so DB schema stays aligned with Prisma (prevents runtime column-missing crashes).

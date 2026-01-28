@@ -6,15 +6,13 @@
 
 import type { Prisma } from "@prisma/client";
 
-import type { Transcription, TranscriptionWord } from "../../schemas.js";
+import type { TimelineRecording, TranscriptionWord } from "../../schemas.js";
 import { COMPLIANCE_THRESHOLDS } from "../../shared/constants.js";
 import { logger } from "../../shared/logger.js";
 import { prisma } from "../../shared/prisma.js";
-import { enrichRecording } from "../../utils/recording-parser.js";
+import { buildConversationChunksFromWords } from "../../utils/transcription-chunks.js";
 import { getAuditConfigById } from "../audit-configs/audit-configs.repository.js";
-import { getCachedFiche } from "../fiches/fiches.repository.js";
-import type { FicheDetailsResponse } from "../fiches/fiches.schemas.js";
-import { getRecordingsByFiche } from "../recordings/recordings.repository.js";
+import { getRecordingsWithTranscriptionChunksByFiche } from "../recordings/recordings.repository.js";
 import { analyzeStep } from "./audits.analyzer.js";
 import type { AnalyzedAuditStepResult } from "./audits.evidence.js";
 import { validateAndGateAuditStepResults } from "./audits.evidence.js";
@@ -24,7 +22,12 @@ import {
   getAuditComplianceInputs,
   updateAuditComplianceSummary,
 } from "./audits.repository.js";
-import { generateTimeline } from "./audits.timeline.js";
+import {
+  extractLegacyHumanReviewEntries,
+  extractLegacyRerunHistoryEntries,
+  legacyHumanReviewsToRows,
+  legacyRerunHistoryToRows,
+} from "./audits.trails.js";
 import type { AuditConfigForAnalysis, AuditStepDefinition, ProductLinkResult } from "./audits.types.js";
 
 export interface RerunStepOptions {
@@ -135,137 +138,101 @@ function computeAuditComplianceFromSteps(params: {
 async function regenerateTimelineFromDatabase(ficheId: string) {
   logger.info("Regenerating timeline from DB", { fiche_id: ficheId });
 
-  // Load fiche cache
-  const ficheCache = await getCachedFiche(ficheId);
-  if (!ficheCache) {
-    throw new Error(`Fiche ${ficheId} not found in cache`);
-  }
-
   // Load recordings with transcriptions
-  const dbRecordings = await getRecordingsByFiche(ficheId);
+  const dbRecordings = await getRecordingsWithTranscriptionChunksByFiche(ficheId);
   logger.info("Loaded recordings from database", {
     fiche_id: ficheId,
     recordings: dbRecordings.length,
   });
-
-  // Get raw fiche data for recording enrichment
-  const ficheData = ficheCache.rawData as unknown as FicheDetailsResponse;
-  const rawRecordings = ficheData.recordings || [];
-
-  // Build transcriptions array (same logic as workflow)
-  const transcriptions: Transcription[] = [];
 
   const hasWordsArray = (value: unknown): value is { words: unknown[] } =>
     typeof value === "object" &&
     value !== null &&
     Array.isArray((value as { words?: unknown }).words);
 
+  const timeline: TimelineRecording[] = [];
+
   for (const dbRec of dbRecordings) {
-    if (!dbRec.hasTranscription || !dbRec.transcriptionId) {
-      logger.warn("Skipping recording (no transcription)", {
-        fiche_id: ficheId,
-        call_id: dbRec.callId,
-      });
-      continue;
-    }
+    if (!dbRec.hasTranscription) {continue;}
+    if (!dbRec.recordingUrl) {continue;}
 
-    // Find matching raw recording
-    const rawRec = rawRecordings.find(
-      (r) => {
-        const maybe = r as { call_id?: unknown; callId?: unknown };
-        const callId =
-          typeof maybe.call_id === "string"
-            ? maybe.call_id
-            : typeof maybe.callId === "string"
-              ? maybe.callId
-              : null;
-        return callId === dbRec.callId;
+    // Prefer normalized chunks (stable + avoids huge word-level JSON).
+    let chunks = dbRec.transcriptionChunks.map((c) => ({
+      chunk_index: c.chunkIndex,
+      start_timestamp: c.startTimestamp,
+      end_timestamp: c.endTimestamp,
+      message_count: c.messageCount,
+      speakers: c.speakers,
+      full_text: c.fullText,
+    }));
+
+    if (chunks.length === 0) {
+      // Legacy fallback: derive chunks from word-level payload or from plain text.
+      let words: TranscriptionWord[] | null = null;
+
+      const dbPayload = dbRec.transcriptionData as unknown;
+      if (hasWordsArray(dbPayload) && dbPayload.words.length > 0) {
+        const mapped = (dbPayload.words as unknown[]).map((w) => {
+          if (!isRecord(w)) {return null;}
+          const text = typeof w.text === "string" ? w.text : null;
+          const start = typeof w.start === "number" ? w.start : null;
+          const end = typeof w.end === "number" ? w.end : null;
+          const type = typeof w.type === "string" ? w.type : "word";
+          const speaker_id =
+            typeof w.speaker_id === "string" ? (w.speaker_id as string) : undefined;
+          const logprob = typeof w.logprob === "number" ? w.logprob : undefined;
+          if (text === null || start === null || end === null) {return null;}
+          return {
+            text,
+            start,
+            end,
+            type,
+            ...(speaker_id ? { speaker_id } : {}),
+            ...(logprob !== undefined ? { logprob } : {}),
+          } satisfies TranscriptionWord;
+        });
+        words = mapped.filter((v): v is TranscriptionWord => v !== null);
       }
-    );
-    if (!rawRec) {
-      logger.warn("Could not find raw recording", {
-        fiche_id: ficheId,
-        call_id: dbRec.callId,
-      });
-      continue;
+
+      if (!words || words.length === 0) {
+        const text = dbRec.transcriptionText;
+        if (typeof text === "string" && text.trim().length > 0) {
+          const textWords = text.split(/\s+/).filter(Boolean);
+          const durationSeconds =
+            typeof dbRec.durationSeconds === "number" && dbRec.durationSeconds > 0
+              ? dbRec.durationSeconds
+              : Math.max(1, Math.round(textWords.length * 0.5));
+          const wordDur = Math.max(0.05, durationSeconds / Math.max(1, textWords.length));
+          words = textWords.map((word, idx) => ({
+            text: word,
+            start: idx * wordDur,
+            end: (idx + 1) * wordDur,
+            type: "word",
+            speaker_id: idx % 20 < 10 ? "speaker_0" : "speaker_1",
+          }));
+        }
+      }
+
+      if (!words || words.length === 0) {continue;}
+
+      chunks = buildConversationChunksFromWords(words);
     }
 
-    const enrichedRec = enrichRecording(rawRec);
-    const url = enrichedRec.recording_url;
-
-    if (!url) {
-      logger.warn("Missing URL for recording", {
-        fiche_id: ficheId,
-        call_id: dbRec.callId,
-      });
-      continue;
-    }
-
-    // Load transcription from database (prefer full payload with word timestamps)
-    let transcriptionData: {
-      text: string;
-      language_code?: string;
-      words: TranscriptionWord[];
-    };
-    const dbPayload = dbRec.transcriptionData;
-
-    if (
-      dbPayload &&
-      typeof dbPayload === "object" &&
-      hasWordsArray(dbPayload) &&
-      dbPayload.words.length > 0
-    ) {
-      transcriptionData = dbPayload as unknown as {
-        text: string;
-        language_code?: string;
-        words: TranscriptionWord[];
-      };
-    } else if (dbRec.transcriptionText && dbRec.transcriptionText.trim().length > 0) {
-      const textWords = dbRec.transcriptionText.split(/\s+/).filter(Boolean);
-      const durationSeconds =
-        typeof dbRec.durationSeconds === "number" && dbRec.durationSeconds > 0
-          ? dbRec.durationSeconds
-          : Math.max(1, Math.round(textWords.length * 0.5));
-      const wordDur = Math.max(0.05, durationSeconds / Math.max(1, textWords.length));
-
-      const words = textWords.map((word, idx) => ({
-        text: word,
-        start: idx * wordDur,
-        end: (idx + 1) * wordDur,
-        type: "word" as const,
-        // Speaker unknown without diarization; keep expected shape.
-        speaker_id: idx % 20 < 10 ? "speaker_0" : "speaker_1",
-      }));
-
-      transcriptionData = {
-        text: dbRec.transcriptionText,
-        language_code: "fr",
-        words,
-      };
-    } else {
-      logger.warn("Recording has no transcription data", {
-        fiche_id: ficheId,
-        call_id: dbRec.callId,
-      });
-      continue;
-    }
-
-    transcriptions.push({
-      recording_url: url,
-      transcription_id: dbRec.transcriptionId,
+    timeline.push({
+      recording_index: timeline.length,
       call_id: dbRec.callId,
-      recording: enrichedRec,
-      transcription: transcriptionData,
+      start_time: dbRec.startTime?.toISOString() || "",
+      duration_seconds: dbRec.durationSeconds ?? 0,
+      recording_url: dbRec.recordingUrl,
+      recording_date: dbRec.recordingDate ?? "",
+      recording_time: dbRec.recordingTime ?? "",
+      from_number: dbRec.fromNumber ?? "",
+      to_number: dbRec.toNumber ?? "",
+      total_chunks: chunks.length,
+      chunks,
     });
   }
 
-  logger.info("Built transcriptions for timeline", {
-    fiche_id: ficheId,
-    transcriptions: transcriptions.length,
-  });
-
-  // Generate timeline
-  const timeline = generateTimeline(transcriptions);
   const timelineText = buildTimelineText(timeline);
 
   logger.info("Timeline regenerated", {
@@ -509,7 +476,7 @@ export async function saveRerunResult(
     return { saved: false, auditUpdated: false };
   }
 
-  const nowIso = new Date().toISOString();
+  const now = new Date();
   const customPrompt =
     (options.customPrompt && options.customPrompt.trim()
       ? options.customPrompt.trim()
@@ -530,88 +497,184 @@ export async function saveRerunResult(
   const maxWeight = Math.max(0, Number(existing.weight));
   const score = Math.min(Math.max(0, Math.round(rawScore)), maxWeight);
 
-  const trailEntry = {
-    at: nowIso,
+  // One-time migration for this step: if trails still live inside rawResult,
+  // backfill them into tables before writing the new entry (to avoid losing history).
+  const legacyHuman = extractLegacyHumanReviewEntries(existing.rawResult as unknown);
+  const legacyRerun = extractLegacyRerunHistoryEntries(existing.rawResult as unknown);
+
+  const existingHumanCount =
+    legacyHuman.length > 0
+      ? await prisma.auditStepResultHumanReview.count({
+          where: { auditId: options.auditId, stepPosition: options.stepPosition },
+        })
+      : 0;
+
+  const existingRerunCount =
+    legacyRerun.length > 0
+      ? await prisma.auditStepResultRerunEvent.count({
+          where: { auditId: options.auditId, stepPosition: options.stepPosition },
+        })
+      : 0;
+
+  const legacyHumanRows =
+    existingHumanCount === 0 && legacyHuman.length > 0
+      ? legacyHumanReviewsToRows({
+          auditId: options.auditId,
+          stepPosition: options.stepPosition,
+          entries: legacyHuman,
+          fallbackDate: now,
+        })
+      : [];
+
+  const legacyRerunRows =
+    existingRerunCount === 0 && legacyRerun.length > 0
+      ? legacyRerunHistoryToRows({
+          auditId: options.auditId,
+          stepPosition: options.stepPosition,
+          entries: legacyRerun,
+          fallbackDate: now,
+        })
+      : [];
+
+  const rerunEventRow = {
+    auditId: options.auditId,
+    stepPosition: options.stepPosition,
+    occurredAt: now,
     kind: "step_rerun",
-    rerun_id: meta?.rerunId ?? null,
-    event_id: meta?.eventId ?? null,
-    step_position: options.stepPosition,
-    custom_prompt: customPrompt ?? null,
-    previous: {
-      score: existing.score,
-      conforme: existing.conforme,
-      total_citations: existing.totalCitations,
-    },
-    next: {
-      score,
-      conforme: String(step?.conforme ?? existing.conforme),
-      total_citations: totalCitations,
-    },
+    rerunId: meta?.rerunId ?? null,
+    eventId: meta?.eventId ?? null,
+    customPrompt: customPrompt ?? null,
+    previousScore: existing.score,
+    previousConforme: existing.conforme,
+    previousTotalCitations: existing.totalCitations,
+    nextScore: score,
+    nextConforme: String(step?.conforme ?? existing.conforme),
+    nextTotalCitations: totalCitations,
   };
 
-  // Persist new LLM output but preserve any existing audit trails.
-  let nextRaw: Record<string, unknown>;
-  if (isRecord(step)) {
-    nextRaw = { ...(step as Record<string, unknown>) };
-  } else {
-    nextRaw = { result: step as unknown };
-  }
+  // Reduce raw JSON storage: keep only meta (audit trails are stored in tables).
+  const nextRaw: Record<string, unknown> = {
+    step_metadata: isRecord(step) ? (step.step_metadata as unknown) : null,
+    usage: isRecord(step) ? (step.usage as unknown) : null,
+  };
 
-  if (isRecord(existing.rawResult)) {
-    const prev = existing.rawResult as Record<string, unknown>;
-
-    // Preserve human review entries, if any.
-    if (prev.human_review !== undefined && nextRaw.human_review === undefined) {
-      nextRaw.human_review = prev.human_review;
-    }
-
-    const existingHistory = prev.rerun_history;
-    const history: unknown[] = Array.isArray(existingHistory)
-      ? [...existingHistory]
-      : existingHistory
-        ? [existingHistory]
-        : [];
-    history.push(trailEntry);
-    nextRaw.rerun_history = history;
-  } else {
-    nextRaw.rerun_history = [trailEntry];
-  }
-
-  await prisma.auditStepResult.update({
-    where: {
-      auditId_stepPosition: {
+  const controlPointsData = points
+    .map((cp, idx) => {
+      if (!isRecord(cp)) {return null;}
+      return {
         auditId: options.auditId,
         stepPosition: options.stepPosition,
-      },
-    },
-    data: {
-      traite: Boolean(step?.traite),
-      conforme: String(sanitizeNullBytes(String(step?.conforme ?? existing.conforme))),
-      score,
-      niveauConformite: String(
-        sanitizeNullBytes(String(step?.niveau_conformite ?? existing.niveauConformite))
-      ),
-      commentaireGlobal: String(
-        sanitizeNullBytes(String(step?.commentaire_global ?? existing.commentaireGlobal))
-      ),
-      motsClesTrouves: Array.isArray(step?.mots_cles_trouves)
-        ? step.mots_cles_trouves
-            .filter((v: unknown): v is string => typeof v === "string")
-            .map((s: string) => String(sanitizeNullBytes(s)))
-        : existing.motsClesTrouves,
-      minutages: Array.isArray(step?.minutages)
-        ? step.minutages
-            .filter((v: unknown): v is string => typeof v === "string")
-            .map((s: string) => String(sanitizeNullBytes(s)))
-        : existing.minutages,
-      erreursTranscriptionTolerees: Number.isFinite(step?.erreurs_transcription_tolerees)
-        ? Math.max(0, Math.round(step.erreurs_transcription_tolerees))
-        : existing.erreursTranscriptionTolerees,
-      totalCitations,
-      totalTokens: Number(step?.usage?.total_tokens ?? existing.totalTokens) || 0,
-      rawResult: toPrismaJsonValue(nextRaw),
-    },
+        controlPointIndex: idx + 1,
+        point: typeof cp.point === "string" ? cp.point : "",
+        statut: typeof cp.statut === "string" ? cp.statut : "ABSENT",
+        commentaire: typeof cp.commentaire === "string" ? cp.commentaire : "",
+        minutages: Array.isArray(cp.minutages)
+          ? cp.minutages.filter((v): v is string => typeof v === "string")
+          : [],
+        erreurTranscriptionNotee: Boolean(cp.erreur_transcription_notee),
+        variationPhonetiqueUtilisee:
+          typeof cp.variation_phonetique_utilisee === "string"
+            ? cp.variation_phonetique_utilisee
+            : null,
+      };
+    })
+    .filter((v): v is NonNullable<typeof v> => v !== null);
+
+  const citationsData = points.flatMap((cp, cpIdx) => {
+    if (!isRecord(cp)) {return [];}
+    const controlPointIndex = cpIdx + 1;
+    const citationsRaw = Array.isArray(cp.citations) ? cp.citations : [];
+    return citationsRaw
+      .map((c, cIdx) => {
+        if (!isRecord(c)) {return null;}
+        return {
+          auditId: options.auditId,
+          stepPosition: options.stepPosition,
+          controlPointIndex,
+          citationIndex: cIdx + 1,
+          texte: typeof c.texte === "string" ? c.texte : "",
+          minutage: typeof c.minutage === "string" ? c.minutage : "",
+          minutageSecondes:
+            typeof c.minutage_secondes === "number" ? c.minutage_secondes : 0,
+          speaker: typeof c.speaker === "string" ? c.speaker : "",
+          recordingIndex:
+            typeof c.recording_index === "number" ? Math.trunc(c.recording_index) : 0,
+          chunkIndex: typeof c.chunk_index === "number" ? Math.trunc(c.chunk_index) : 0,
+          recordingDate:
+            typeof c.recording_date === "string" ? c.recording_date : "N/A",
+          recordingTime:
+            typeof c.recording_time === "string" ? c.recording_time : "N/A",
+          recordingUrl:
+            typeof c.recording_url === "string" ? c.recording_url : "N/A",
+        };
+      })
+      .filter((v): v is NonNullable<typeof v> => v !== null);
   });
+
+  await prisma.$transaction([
+    ...(legacyHumanRows.length > 0
+      ? [prisma.auditStepResultHumanReview.createMany({ data: legacyHumanRows })]
+      : []),
+    ...(legacyRerunRows.length > 0
+      ? [prisma.auditStepResultRerunEvent.createMany({ data: legacyRerunRows })]
+      : []),
+    prisma.auditStepResultRerunEvent.create({ data: rerunEventRow }),
+    prisma.auditStepResult.update({
+      where: {
+        auditId_stepPosition: {
+          auditId: options.auditId,
+          stepPosition: options.stepPosition,
+        },
+      },
+      data: {
+        traite: Boolean(step?.traite),
+        conforme: String(sanitizeNullBytes(String(step?.conforme ?? existing.conforme))),
+        score,
+        niveauConformite: String(
+          sanitizeNullBytes(String(step?.niveau_conformite ?? existing.niveauConformite))
+        ),
+        commentaireGlobal: String(
+          sanitizeNullBytes(String(step?.commentaire_global ?? existing.commentaireGlobal))
+        ),
+        motsClesTrouves: Array.isArray(step?.mots_cles_trouves)
+          ? step.mots_cles_trouves
+              .filter((v: unknown): v is string => typeof v === "string")
+              .map((s: string) => String(sanitizeNullBytes(s)))
+          : existing.motsClesTrouves,
+        minutages: Array.isArray(step?.minutages)
+          ? step.minutages
+              .filter((v: unknown): v is string => typeof v === "string")
+              .map((s: string) => String(sanitizeNullBytes(s)))
+          : existing.minutages,
+        erreursTranscriptionTolerees: Number.isFinite(step?.erreurs_transcription_tolerees)
+          ? Math.max(0, Math.round(step.erreurs_transcription_tolerees))
+          : existing.erreursTranscriptionTolerees,
+        totalCitations,
+        totalTokens: Number(step?.usage?.total_tokens ?? existing.totalTokens) || 0,
+        // Reduce raw JSON storage: keep only meta (audit trails are normalized).
+        rawResult: toPrismaJsonValue(nextRaw),
+      },
+    }),
+    prisma.auditStepResultControlPoint.deleteMany({
+      where: { auditId: options.auditId, stepPosition: options.stepPosition },
+    }),
+    ...(controlPointsData.length > 0
+      ? [
+          prisma.auditStepResultControlPoint.createMany({
+            data: controlPointsData,
+            skipDuplicates: true,
+          }),
+        ]
+      : []),
+    ...(citationsData.length > 0
+      ? [
+          prisma.auditStepResultCitation.createMany({
+            data: citationsData,
+            skipDuplicates: true,
+          }),
+        ]
+      : []),
+  ]);
 
   if (!updateAudit) {
     return { saved: true, auditUpdated: false };

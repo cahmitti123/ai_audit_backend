@@ -42,16 +42,253 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function buildLatestStepPayloadFromDb(step: Record<string, unknown>): Record<string, unknown> | null {
+  const raw = step.rawResult as unknown;
+
+  // Back-compat: old rows still store full step JSON (including points_controle) in rawResult.
+  if (isRecord(raw) && Array.isArray(raw.points_controle)) {
+    return raw as Record<string, unknown>;
+  }
+
+  const cpsRaw = step.controlPoints;
+  const cps = Array.isArray(cpsRaw) ? cpsRaw : [];
+  if (cps.length === 0) {
+    return null;
+  }
+
+  const stepPosition = Number(step.stepPosition) || 0;
+  const weight = Number(step.weight) || 0;
+
+  const usage =
+    isRecord(raw) && isRecord(raw.usage)
+      ? raw.usage
+      : { total_tokens: Number(step.totalTokens ?? 0) };
+
+  const step_metadata =
+    isRecord(raw) && isRecord(raw.step_metadata)
+      ? raw.step_metadata
+      : {
+          position: stepPosition,
+          name: typeof step.stepName === "string" ? step.stepName : "",
+          severity: typeof step.severityLevel === "string" ? step.severityLevel : "MEDIUM",
+          is_critical: Boolean(step.isCritical),
+          weight,
+        };
+
+  const points_controle = cps.map((cp: unknown) => {
+    const rec = isRecord(cp) ? cp : {};
+    const citationsRaw = rec.citations;
+    const citations = Array.isArray(citationsRaw) ? citationsRaw : [];
+
+    return {
+      point: typeof rec.point === "string" ? rec.point : "",
+      statut: typeof rec.statut === "string" ? rec.statut : "ABSENT",
+      commentaire: typeof rec.commentaire === "string" ? rec.commentaire : "",
+      citations: citations.map((c: unknown) => {
+        const cit = isRecord(c) ? c : {};
+        return {
+          texte: typeof cit.texte === "string" ? cit.texte : "",
+          speaker: typeof cit.speaker === "string" ? cit.speaker : "",
+          minutage: typeof cit.minutage === "string" ? cit.minutage : "",
+          chunk_index: Number(cit.chunkIndex ?? cit.chunk_index ?? 0) || 0,
+          recording_url:
+            typeof cit.recordingUrl === "string"
+              ? cit.recordingUrl
+              : typeof cit.recording_url === "string"
+                ? cit.recording_url
+                : "N/A",
+          recording_date:
+            typeof cit.recordingDate === "string"
+              ? cit.recordingDate
+              : typeof cit.recording_date === "string"
+                ? cit.recording_date
+                : "N/A",
+          recording_time:
+            typeof cit.recordingTime === "string"
+              ? cit.recordingTime
+              : typeof cit.recording_time === "string"
+                ? cit.recording_time
+                : "N/A",
+          recording_index: Number(cit.recordingIndex ?? cit.recording_index ?? 0) || 0,
+          minutage_secondes:
+            typeof cit.minutageSecondes === "number"
+              ? cit.minutageSecondes
+              : typeof cit.minutage_secondes === "number"
+                ? cit.minutage_secondes
+                : 0,
+        };
+      }),
+      minutages: Array.isArray(rec.minutages) ? rec.minutages : [],
+      erreur_transcription_notee: Boolean(rec.erreurTranscriptionNotee),
+      variation_phonetique_utilisee:
+        rec.variationPhonetiqueUtilisee === null ||
+        typeof rec.variationPhonetiqueUtilisee === "string"
+          ? rec.variationPhonetiqueUtilisee
+          : null,
+    };
+  });
+
+  const out: Record<string, unknown> = {
+    traite: Boolean(step.traite),
+    conforme: String(step.conforme ?? "NON_CONFORME"),
+    minutages: Array.isArray(step.minutages) ? step.minutages : [],
+    score: Number(step.score ?? 0),
+    points_controle,
+    mots_cles_trouves: Array.isArray(step.motsClesTrouves) ? step.motsClesTrouves : [],
+    commentaire_global: String(step.commentaireGlobal ?? ""),
+    niveau_conformite: String(step.niveauConformite ?? "INSUFFISANT"),
+    erreurs_transcription_tolerees: Number(step.erreursTranscriptionTolerees ?? 0),
+    step_metadata,
+    usage,
+  };
+
+  // Prefer normalized audit trail tables; fallback to legacy rawResult fields.
+  const humanReviews = Array.isArray(step.humanReviews)
+    ? (step.humanReviews as Array<Record<string, unknown>>)
+    : [];
+  if (humanReviews.length > 0) {
+    out.human_review = humanReviews.map((r) => {
+      const kind = typeof r.kind === "string" ? r.kind : "step";
+      const at =
+        r.reviewedAt instanceof Date && Number.isFinite(r.reviewedAt.getTime())
+          ? r.reviewedAt.toISOString()
+          : new Date().toISOString();
+      const by = typeof r.reviewer === "string" ? r.reviewer : null;
+      const reason = typeof r.reason === "string" ? r.reason : null;
+
+      if (kind === "control_point") {
+        return {
+          at,
+          by,
+          reason,
+          kind: "control_point",
+          control_point_index:
+            typeof r.controlPointIndex === "number" ? r.controlPointIndex : null,
+          point: typeof r.point === "string" ? r.point : null,
+          previous: {
+            statut: typeof r.previousStatut === "string" ? r.previousStatut : null,
+            commentaire:
+              typeof r.previousCommentaire === "string" ? r.previousCommentaire : null,
+          },
+          override: {
+            statut: typeof r.overrideStatut === "string" ? r.overrideStatut : null,
+            commentaire:
+              typeof r.overrideCommentaire === "string" ? r.overrideCommentaire : null,
+          },
+        };
+      }
+
+      return {
+        at,
+        by,
+        reason,
+        previous: {
+          traite: typeof r.previousTraite === "boolean" ? r.previousTraite : null,
+          conforme: typeof r.previousConforme === "string" ? r.previousConforme : null,
+          score: typeof r.previousScore === "number" ? r.previousScore : null,
+          niveau_conformite:
+            typeof r.previousNiveauConformite === "string"
+              ? r.previousNiveauConformite
+              : null,
+        },
+        override: {
+          traite: typeof r.overrideTraite === "boolean" ? r.overrideTraite : null,
+          conforme: typeof r.overrideConforme === "string" ? r.overrideConforme : null,
+          score: typeof r.overrideScore === "number" ? r.overrideScore : null,
+          niveau_conformite:
+            typeof r.overrideNiveauConformite === "string"
+              ? r.overrideNiveauConformite
+              : null,
+        },
+      };
+    });
+  } else if (isRecord(raw) && raw.human_review !== undefined) {
+    out.human_review = raw.human_review;
+  }
+
+  const rerunEvents = Array.isArray(step.rerunEvents)
+    ? (step.rerunEvents as Array<Record<string, unknown>>)
+    : [];
+  if (rerunEvents.length > 0) {
+    out.rerun_history = rerunEvents.map((e) => {
+      const kind = typeof e.kind === "string" ? e.kind : "unknown";
+      const at =
+        e.occurredAt instanceof Date && Number.isFinite(e.occurredAt.getTime())
+          ? e.occurredAt.toISOString()
+          : new Date().toISOString();
+      const rerun_id = typeof e.rerunId === "string" ? e.rerunId : null;
+      const event_id = typeof e.eventId === "string" ? e.eventId : null;
+
+      if (kind === "control_point_rerun") {
+        return {
+          at,
+          kind,
+          rerun_id,
+          event_id,
+          step_position: Number.isFinite(stepPosition) ? stepPosition : null,
+          control_point_index:
+            typeof e.controlPointIndex === "number" ? e.controlPointIndex : null,
+          point: typeof e.point === "string" ? e.point : null,
+          previous: {
+            statut: typeof e.previousStatut === "string" ? e.previousStatut : null,
+            commentaire:
+              typeof e.previousCommentaire === "string" ? e.previousCommentaire : null,
+            citations: typeof e.previousCitations === "number" ? e.previousCitations : null,
+            step_score: typeof e.previousStepScore === "number" ? e.previousStepScore : null,
+            step_conforme:
+              typeof e.previousStepConforme === "string" ? e.previousStepConforme : null,
+          },
+          next: {
+            statut: typeof e.nextStatut === "string" ? e.nextStatut : null,
+            commentaire:
+              typeof e.nextCommentaire === "string" ? e.nextCommentaire : null,
+            citations: typeof e.nextCitations === "number" ? e.nextCitations : null,
+            step_score: typeof e.nextStepScore === "number" ? e.nextStepScore : null,
+            step_conforme:
+              typeof e.nextStepConforme === "string" ? e.nextStepConforme : null,
+          },
+        };
+      }
+
+      return {
+        at,
+        kind,
+        rerun_id,
+        event_id,
+        step_position: Number.isFinite(stepPosition) ? stepPosition : null,
+        custom_prompt: typeof e.customPrompt === "string" ? e.customPrompt : null,
+        previous: {
+          score: typeof e.previousScore === "number" ? e.previousScore : null,
+          conforme: typeof e.previousConforme === "string" ? e.previousConforme : null,
+          total_citations:
+            typeof e.previousTotalCitations === "number" ? e.previousTotalCitations : null,
+        },
+        next: {
+          score: typeof e.nextScore === "number" ? e.nextScore : null,
+          conforme: typeof e.nextConforme === "string" ? e.nextConforme : null,
+          total_citations:
+            typeof e.nextTotalCitations === "number" ? e.nextTotalCitations : null,
+        },
+      };
+    });
+  } else if (isRecord(raw) && raw.rerun_history !== undefined) {
+    out.rerun_history = raw.rerun_history;
+  }
+
+  return out;
+}
+
 /**
- * Produce a "latest view" of an audit's stored `resultData` by overlaying step-level `rawResult`
- * (from `audit_step_results.raw_result`) onto `resultData.audit.results.steps`.
+ * Produce a "latest view" of an audit's stored `resultData` by overlaying the latest
+ * step payload (built from normalized tables + rawResult audit trails) onto
+ * `resultData.audit.results.steps`.
  *
- * Why: human overrides currently update step rawResult, while `audits.resultData` is a workflow snapshot.
- * This ensures `GET /api/audits/:audit_id` reflects the latest checkpoint changes by default.
+ * Why: reruns / human overrides update step-level storage, while `audits.resultData`
+ * is a workflow snapshot.
  */
 function mergeResultDataWithLatestStepRawResults(params: {
   resultData: unknown;
-  stepResults: Array<{ stepPosition: number; rawResult?: unknown | null }>;
+  stepResults: Array<Record<string, unknown>>;
 }): unknown {
   const { resultData, stepResults } = params;
 
@@ -62,9 +299,8 @@ function mergeResultDataWithLatestStepRawResults(params: {
   if (!isRecord(results)) {return resultData;}
 
   const steps = results.steps;
-  if (!Array.isArray(steps) || steps.length === 0) {return resultData;}
-
-  const nextSteps = [...steps];
+  const hasStoredSteps = Array.isArray(steps) && steps.length > 0;
+  const nextSteps = hasStoredSteps ? [...steps] : [];
 
   const findStepIndex = (stepPosition: number): number => {
     const idxByMetadata = nextSteps.findIndex((s) => {
@@ -79,15 +315,40 @@ function mergeResultDataWithLatestStepRawResults(params: {
     return stepPosition - 1;
   };
 
+  if (!hasStoredSteps) {
+    // Stored `resultData` has no `results.steps` (we intentionally strip them for storage).
+    // Rebuild steps in order from DB step results.
+    const rebuilt: unknown[] = [];
+    for (const step of stepResults) {
+      const payload = buildLatestStepPayloadFromDb(step);
+      if (payload) {
+        rebuilt.push(payload);
+      }
+    }
+    if (rebuilt.length === 0) {return resultData;}
+
+    return {
+      ...(resultData as Record<string, unknown>),
+      audit: {
+        ...(audit as Record<string, unknown>),
+        results: {
+          ...(results as Record<string, unknown>),
+          steps: rebuilt,
+        },
+      },
+    };
+  }
+
   for (const step of stepResults) {
     const stepPos = Number(step.stepPosition);
     if (!Number.isFinite(stepPos) || stepPos <= 0) {continue;}
-    if (!isRecord(step.rawResult)) {continue;}
+    const payload = buildLatestStepPayloadFromDb(step);
+    if (!isRecord(payload)) {continue;}
 
     const idx = findStepIndex(stepPos);
     if (idx < 0 || idx >= nextSteps.length) {continue;}
 
-    nextSteps[idx] = step.rawResult;
+    nextSteps[idx] = payload;
   }
 
   return {
@@ -194,10 +455,7 @@ export async function getAuditById(
 
   const resultDataLatest = mergeResultDataWithLatestStepRawResults({
     resultData: audit.resultData,
-    stepResults: audit.stepResults as Array<{
-      stepPosition: number;
-      rawResult?: unknown | null;
-    }>,
+    stepResults: audit.stepResults as unknown as Array<Record<string, unknown>>,
   });
 
   // Transform to API-friendly format
@@ -281,20 +539,9 @@ export async function getAuditsByFiche(
     resultData: mergeResultDataWithLatestStepRawResults({
       resultData: audit.resultData,
       stepResults: (() => {
-        const out: Array<{ stepPosition: number; rawResult?: unknown | null }> = [];
         const maybe = (audit as unknown as { stepResults?: unknown }).stepResults;
-        if (!Array.isArray(maybe)) {return out;}
-
-        for (const r of maybe) {
-          if (!isRecord(r)) {continue;}
-          const stepPosition = r.stepPosition;
-          if (typeof stepPosition !== "number" || !Number.isFinite(stepPosition)) {
-            continue;
-          }
-          out.push({ stepPosition, rawResult: (r.rawResult as unknown) ?? null });
-        }
-
-        return out;
+        if (!Array.isArray(maybe)) {return [];}
+        return maybe.filter(isRecord);
       })(),
     }),
     id: audit.id.toString(),

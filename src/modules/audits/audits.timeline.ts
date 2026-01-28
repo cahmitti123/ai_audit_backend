@@ -9,13 +9,13 @@ import type {
   TimelineRecording,
   Transcription,
 } from "../../schemas.js";
-import { TIMELINE_CHUNK_SIZE } from "../../shared/constants.js";
 import { logger } from "../../shared/logger.js";
 import {
   formatBytes,
   getPayloadSize,
   logPayloadSize,
 } from "../../utils/payload-size.js";
+import { buildConversationChunksFromWords } from "../../utils/transcription-chunks.js";
 
 type RecordingMetadata = {
   parsed?: {
@@ -28,13 +28,6 @@ type RecordingMetadata = {
   call_id?: string;
   start_time?: string;
   duration_seconds?: number;
-};
-
-type TimelineMessage = {
-  speaker: string;
-  text: string;
-  start: number;
-  end: number;
 };
 
 export function generateTimeline(
@@ -63,62 +56,7 @@ export function generateTimeline(
       });
     }
     const words = t.transcription.words;
-
-    // Grouper par speaker
-    const messages: TimelineMessage[] = [];
-    let currentSpeaker = "unknown";
-    let currentText: string[] = [];
-    let currentStart = 0;
-    let currentEnd = 0;
-
-    for (const word of words) {
-      if (word.type === "spacing") {continue;}
-
-      const speaker = word.speaker_id ?? "unknown";
-
-      if (speaker !== currentSpeaker) {
-        if (currentText.length > 0) {
-          messages.push({
-            speaker: currentSpeaker,
-            text: currentText.join(" "), // Add space between words
-            start: currentStart,
-            end: currentEnd,
-          });
-        }
-        currentSpeaker = speaker;
-        currentText = [word.text];
-        currentStart = word.start;
-        currentEnd = word.end;
-      } else {
-        currentText.push(word.text);
-        currentEnd = word.end;
-      }
-    }
-
-    if (currentText.length > 0) {
-      messages.push({
-        speaker: currentSpeaker,
-        text: currentText.join(" "), // Add space between words
-        start: currentStart,
-        end: currentEnd,
-      });
-    }
-
-    // Créer chunks
-    const chunks: ConversationChunk[] = [];
-    for (let j = 0; j < messages.length; j += TIMELINE_CHUNK_SIZE) {
-      const chunkMessages = messages.slice(j, j + TIMELINE_CHUNK_SIZE);
-      chunks.push({
-        chunk_index: chunks.length,
-        start_timestamp: chunkMessages[0].start,
-        end_timestamp: chunkMessages[chunkMessages.length - 1].end,
-        message_count: chunkMessages.length,
-        speakers: [...new Set(chunkMessages.map((m) => m.speaker))],
-        full_text: chunkMessages
-          .map((m) => `${m.speaker}: ${m.text}`)
-          .join("\n"),
-      });
-    }
+    const chunks: ConversationChunk[] = buildConversationChunksFromWords(words);
 
     // Get recording URL from enriched recording or fallback to transcription object
     const recordingUrl = recording?.recording_url || t.recording_url || "";

@@ -8,9 +8,13 @@ For detailed request/response payloads (and frontend-ready DTOs), see `docs/BACK
 
 If you’re updating the frontend, start here:
 
-- **Reruns now update stored audits**: step reruns and control-point reruns mutate `audit_step_results` and recompute audit compliance; UI should refetch `GET /api/audits/:audit_id` after rerun completion.
+- **Reruns now update stored audits**: step reruns and control-point reruns persist updates (step summary + normalized control points/trails) and recompute audit compliance; UI should refetch `GET /api/audits/:audit_id` after rerun completion.
 - **Automation has dedicated realtime events**: `automation.run.*` events are emitted on `private-job-automation-run-{run_id}` (see contract + checklist).
+- **Automation run results are normalized**: per-fiche outcomes live in `automation_run_fiche_results`; run detail endpoints can reconstruct the legacy `resultSummary` shape even when `automation_runs.result_summary` is minimal.
 - **Batch audits require Redis**: `POST /api/audits/batch` returns `503` if Redis is not configured; UI must handle this.
+- **Fiche details `mail_devis` is opt-in**: `GET /api/fiches/:fiche_id` omits `mail_devis` by default; request it with `?include_mail_devis=true` (field is optional and may be `null` if not available).
+- **Recording transcription `words` can be empty**: transcription storage is being normalized; `GET /api/transcriptions/:fiche_id/recordings/:call_id` may return `transcription.words: []` — use `transcription.text` as the primary display field.
+- **Chat SSE error events**: when a streaming error happens after headers are sent, the server emits `data: {"type":"error","error":"...","code":"STREAM_ERROR"}` before `[DONE]`.
 - **Optional API token auth**: if `API_AUTH_TOKEN`/`API_AUTH_TOKENS` is set, all `/api/*` calls (including Pusher auth + chat) require `Authorization: Bearer ...` or `X-API-Key: ...`.
 
 See:
@@ -31,7 +35,7 @@ See:
 ### Fiches (`/api/fiches`)
 
 - `GET /api/fiches/search?date=YYYY-MM-DD`
-- `GET /api/fiches/:fiche_id?refresh=true|false`
+- `GET /api/fiches/:fiche_id?refresh=true|false&include_mail_devis=true|false`
 - `GET /api/fiches/:fiche_id/cache`
 - `GET /api/fiches/:fiche_id/status`
 - `POST /api/fiches/status/batch`

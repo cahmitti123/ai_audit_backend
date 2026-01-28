@@ -211,6 +211,41 @@ export async function updateGamme(id: bigint, data: Prisma.GammeUpdateInput) {
   });
 }
 
+export async function replaceGammeDocuments(
+  gammeId: bigint,
+  documents: Record<string, string>
+) {
+  const entries = Object.entries(documents).filter(
+    (e): e is [string, string] => typeof e[0] === "string" && typeof e[1] === "string"
+  );
+
+  // Canonicalize: wipe gamme-level docs and replace with the provided set.
+  // (We treat gamme-level docs as those with `formuleId = null`.)
+  await prisma.$transaction([
+    prisma.document.deleteMany({
+      where: { gammeId, formuleId: null },
+    }),
+    ...(entries.length > 0
+      ? [
+          prisma.document.createMany({
+            data: entries
+              .map(([documentType, url]) => ({
+                gammeId,
+                documentType,
+                url: url.trim(),
+              }))
+              .filter((d) => d.url.length > 0),
+          }),
+        ]
+      : []),
+    // Reduce JSON storage: keep legacy JSON column minimal once table is filled.
+    prisma.gamme.update({
+      where: { id: gammeId },
+      data: { documents: {} },
+    }),
+  ]);
+}
+
 export async function deleteGamme(id: bigint) {
   return prisma.gamme.delete({
     where: { id },

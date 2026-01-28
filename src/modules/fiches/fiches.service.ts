@@ -454,12 +454,16 @@ export async function enrichSalesWithStatus(
  * Get fiche from cache or API
  * Orchestrates cache lookup and API fetch
  */
-export async function getFiche(ficheId: string, forceRefresh = false) {
+export async function getFiche(
+  ficheId: string,
+  forceRefresh = false,
+  options?: { includeMailDevis?: boolean }
+) {
   if (forceRefresh) {
-    return fichesCache.refreshFicheFromApi(ficheId);
+    return fichesCache.refreshFicheFromApi(ficheId, options);
   }
 
-  return fichesCache.getFicheWithCache(ficheId);
+  return fichesCache.getFicheWithCache(ficheId, options);
 }
 
 /**

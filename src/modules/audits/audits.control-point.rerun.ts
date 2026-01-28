@@ -16,17 +16,14 @@ import type { Prisma } from "@prisma/client";
 import type {
   ControlPoint,
   TimelineRecording,
-  Transcription,
   TranscriptionWord,
 } from "../../schemas.js";
 import { COMPLIANCE_THRESHOLDS } from "../../shared/constants.js";
 import { logger } from "../../shared/logger.js";
 import { prisma } from "../../shared/prisma.js";
-import { enrichRecording } from "../../utils/recording-parser.js";
+import { buildConversationChunksFromWords } from "../../utils/transcription-chunks.js";
 import { getAuditConfigById } from "../audit-configs/audit-configs.repository.js";
-import { getCachedFiche } from "../fiches/fiches.repository.js";
-import type { FicheDetailsResponse } from "../fiches/fiches.schemas.js";
-import { getRecordingsByFiche } from "../recordings/recordings.repository.js";
+import { getRecordingsWithTranscriptionChunksByFiche } from "../recordings/recordings.repository.js";
 import { analyzeStep } from "./audits.analyzer.js";
 import type { AnalyzedAuditStepResult } from "./audits.evidence.js";
 import { validateAndGateAuditStepResults } from "./audits.evidence.js";
@@ -36,7 +33,12 @@ import {
   getAuditComplianceInputs,
   updateAuditComplianceSummary,
 } from "./audits.repository.js";
-import { generateTimeline } from "./audits.timeline.js";
+import {
+  extractLegacyHumanReviewEntries,
+  extractLegacyRerunHistoryEntries,
+  legacyHumanReviewsToRows,
+  legacyRerunHistoryToRows,
+} from "./audits.trails.js";
 import type { AuditConfigForAnalysis, AuditStepDefinition, ProductLinkResult } from "./audits.types.js";
 
 export interface RerunControlPointOptions {
@@ -256,99 +258,100 @@ async function regenerateTimelineFromDatabase(ficheId: string): Promise<{
 }> {
   logger.info("Regenerating timeline from DB (control point rerun)", { fiche_id: ficheId });
 
-  const ficheCache = await getCachedFiche(ficheId);
-  if (!ficheCache) {
-    throw new Error(`Fiche ${ficheId} not found in cache`);
-  }
-
-  const dbRecordings = await getRecordingsByFiche(ficheId);
-  logger.info("Loaded recordings from database (control point rerun)", {
-    fiche_id: ficheId,
-    recordings: dbRecordings.length,
-  });
-
-  const ficheData = ficheCache.rawData as unknown as FicheDetailsResponse;
-  const rawRecordings = ficheData.recordings || [];
-
-  const transcriptions: Transcription[] = [];
-
   const hasWordsArray = (value: unknown): value is { words: unknown[] } =>
     typeof value === "object" &&
     value !== null &&
     Array.isArray((value as { words?: unknown }).words);
 
+  const dbRecordings = await getRecordingsWithTranscriptionChunksByFiche(ficheId);
+  logger.info("Loaded recordings from database (control point rerun)", {
+    fiche_id: ficheId,
+    recordings: dbRecordings.length,
+  });
+
+  const timeline: TimelineRecording[] = [];
+
   for (const dbRec of dbRecordings) {
-    if (!dbRec.hasTranscription || !dbRec.transcriptionId) {continue;}
+    if (!dbRec.hasTranscription) {continue;}
+    if (!dbRec.recordingUrl) {continue;}
 
-    const rawRec = rawRecordings.find((r) => {
-      const maybe = r as { call_id?: unknown; callId?: unknown };
-      const callId =
-        typeof maybe.call_id === "string"
-          ? maybe.call_id
-          : typeof maybe.callId === "string"
-            ? maybe.callId
-            : null;
-      return callId === dbRec.callId;
-    });
-    if (!rawRec) {continue;}
+    // Prefer normalized chunks (stable + avoids huge word-level JSON).
+    let chunks = dbRec.transcriptionChunks.map((c) => ({
+      chunk_index: c.chunkIndex,
+      start_timestamp: c.startTimestamp,
+      end_timestamp: c.endTimestamp,
+      message_count: c.messageCount,
+      speakers: c.speakers,
+      full_text: c.fullText,
+    }));
 
-    const enrichedRec = enrichRecording(rawRec);
-    const url = enrichedRec.recording_url;
-    if (!url) {continue;}
+    if (chunks.length === 0) {
+      // Legacy fallback: derive chunks from word-level payload or from plain text.
+      let words: TranscriptionWord[] | null = null;
 
-    let transcriptionData: {
-      text: string;
-      language_code?: string;
-      words: TranscriptionWord[];
-    } | null = null;
+      const dbPayload = dbRec.transcriptionData as unknown;
+      if (hasWordsArray(dbPayload) && dbPayload.words.length > 0) {
+        const mapped = (dbPayload.words as unknown[]).map((w) => {
+          if (!isRecord(w)) {return null;}
+          const text = typeof w.text === "string" ? w.text : null;
+          const start = typeof w.start === "number" ? w.start : null;
+          const end = typeof w.end === "number" ? w.end : null;
+          const type = typeof w.type === "string" ? w.type : "word";
+          const speaker_id =
+            typeof w.speaker_id === "string" ? (w.speaker_id as string) : undefined;
+          const logprob = typeof w.logprob === "number" ? w.logprob : undefined;
+          if (text === null || start === null || end === null) {return null;}
+          return {
+            text,
+            start,
+            end,
+            type,
+            ...(speaker_id ? { speaker_id } : {}),
+            ...(logprob !== undefined ? { logprob } : {}),
+          } satisfies TranscriptionWord;
+        });
+        words = mapped.filter((v): v is TranscriptionWord => v !== null);
+      }
 
-    const dbPayload = dbRec.transcriptionData;
-    if (
-      dbPayload &&
-      typeof dbPayload === "object" &&
-      hasWordsArray(dbPayload) &&
-      dbPayload.words.length > 0
-    ) {
-      transcriptionData = dbPayload as unknown as {
-        text: string;
-        language_code?: string;
-        words: TranscriptionWord[];
-      };
-    } else if (dbRec.transcriptionText && dbRec.transcriptionText.trim().length > 0) {
-      const textWords = dbRec.transcriptionText.split(/\s+/).filter(Boolean);
-      const durationSeconds =
-        typeof dbRec.durationSeconds === "number" && dbRec.durationSeconds > 0
-          ? dbRec.durationSeconds
-          : Math.max(1, Math.round(textWords.length * 0.5));
-      const wordDur = Math.max(0.05, durationSeconds / Math.max(1, textWords.length));
+      if (!words || words.length === 0) {
+        const text = dbRec.transcriptionText;
+        if (typeof text === "string" && text.trim().length > 0) {
+          const textWords = text.split(/\s+/).filter(Boolean);
+          const durationSeconds =
+            typeof dbRec.durationSeconds === "number" && dbRec.durationSeconds > 0
+              ? dbRec.durationSeconds
+              : Math.max(1, Math.round(textWords.length * 0.5));
+          const wordDur = Math.max(0.05, durationSeconds / Math.max(1, textWords.length));
+          words = textWords.map((word, idx) => ({
+            text: word,
+            start: idx * wordDur,
+            end: (idx + 1) * wordDur,
+            type: "word",
+            speaker_id: idx % 20 < 10 ? "speaker_0" : "speaker_1",
+          }));
+        }
+      }
 
-      const words = textWords.map((word, idx) => ({
-        text: word,
-        start: idx * wordDur,
-        end: (idx + 1) * wordDur,
-        type: "word" as const,
-        speaker_id: idx % 20 < 10 ? "speaker_0" : "speaker_1",
-      }));
+      if (!words || words.length === 0) {continue;}
 
-      transcriptionData = {
-        text: dbRec.transcriptionText,
-        language_code: "fr",
-        words,
-      };
+      chunks = buildConversationChunksFromWords(words);
     }
 
-    if (!transcriptionData) {continue;}
-
-    transcriptions.push({
-      recording_url: url,
-      transcription_id: dbRec.transcriptionId,
+    timeline.push({
+      recording_index: timeline.length,
       call_id: dbRec.callId,
-      recording: enrichedRec,
-      transcription: transcriptionData,
+      start_time: dbRec.startTime?.toISOString() || "",
+      duration_seconds: dbRec.durationSeconds ?? 0,
+      recording_url: dbRec.recordingUrl,
+      recording_date: dbRec.recordingDate ?? "",
+      recording_time: dbRec.recordingTime ?? "",
+      from_number: dbRec.fromNumber ?? "",
+      to_number: dbRec.toNumber ?? "",
+      total_chunks: chunks.length,
+      chunks,
     });
   }
 
-  const timeline = generateTimeline(transcriptions);
   const timelineText = buildTimelineText(timeline);
 
   logger.info("Timeline regenerated (control point rerun)", {
@@ -535,11 +538,33 @@ export async function rerunAuditStepControlPoint(
     }
   }
 
-  const previousControlPoint = extractOriginalControlPointSummary({
-    rawResult: (originalStepResult as unknown as { rawResult?: unknown }).rawResult,
-    controlPointIndex: options.controlPointIndex,
-    controlPointText,
-  });
+  const previousControlPoint = await (async () => {
+    const cp = await prisma.auditStepResultControlPoint.findUnique({
+      where: {
+        auditId_stepPosition_controlPointIndex: {
+          auditId: options.auditId,
+          stepPosition: options.stepPosition,
+          controlPointIndex: options.controlPointIndex,
+        },
+      },
+      include: { citations: { select: { id: true } } },
+    });
+
+    if (cp) {
+      return {
+        statut: cp.statut,
+        commentaire: cp.commentaire,
+        citations: cp.citations.length,
+        minutages: cp.minutages,
+      };
+    }
+
+    return extractOriginalControlPointSummary({
+      rawResult: (originalStepResult as unknown as { rawResult?: unknown }).rawResult,
+      controlPointIndex: options.controlPointIndex,
+      controlPointText,
+    });
+  })();
 
   const userPrompt =
     (options.customPrompt && options.customPrompt.trim() ? options.customPrompt : undefined) ??
@@ -635,7 +660,8 @@ export async function rerunAuditStepControlPoint(
  * - Recomputes step score/conforme deterministically from control point statuses
  * - Recomputes audit-level compliance summary (so list/detail endpoints stay consistent)
  *
- * NOTE: This mutates the existing audit (no versioning) but keeps an audit trail in `raw_result.rerun_history`.
+ * NOTE: This mutates the existing audit (no versioning) but keeps an audit trail in
+ * `audit_step_result_rerun_events` (structured).
  */
 export async function saveControlPointRerunResult(
   options: RerunControlPointOptions,
@@ -661,118 +687,368 @@ export async function saveControlPointRerunResult(
     return { saved: false, auditUpdated: false };
   }
 
-  if (!isRecord(existing.rawResult)) {
-    logger.warn("Audit step rawResult missing; cannot apply control point rerun", {
-      audit_id: options.auditId.toString(),
-      step_position: options.stepPosition,
-      control_point_index: options.controlPointIndex,
-    });
-    return { saved: false, auditUpdated: false };
-  }
+  // Prefer normalized control points table; fall back to legacy `rawResult.points_controle`.
+  const prevRaw = isRecord(existing.rawResult)
+    ? (existing.rawResult as Record<string, unknown>)
+    : null;
 
-  const raw = { ...(existing.rawResult as Record<string, unknown>) };
-  const pointsRaw = raw.points_controle;
-  if (!Array.isArray(pointsRaw) || pointsRaw.length < options.controlPointIndex) {
-    logger.warn("Audit step has no matching control point to update", {
-      audit_id: options.auditId.toString(),
-      step_position: options.stepPosition,
-      control_point_index: options.controlPointIndex,
-      points_len: Array.isArray(pointsRaw) ? pointsRaw.length : 0,
-    });
-    return { saved: false, auditUpdated: false };
-  }
+  const legacyPoints =
+    prevRaw && Array.isArray(prevRaw.points_controle) ? prevRaw.points_controle : null;
 
-  const idx = options.controlPointIndex - 1;
-  const previousCp = pointsRaw[idx];
-  const previous = isRecord(previousCp)
-    ? {
-        point: typeof previousCp.point === "string" ? previousCp.point : "",
-        statut: typeof previousCp.statut === "string" ? previousCp.statut : "UNKNOWN",
-        commentaire: typeof previousCp.commentaire === "string" ? previousCp.commentaire : "",
-        citations: Array.isArray(previousCp.citations) ? previousCp.citations.length : 0,
-      }
-    : {
-        point: "",
-        statut: "UNKNOWN",
-        commentaire: "",
-        citations: 0,
-      };
+  const now = new Date();
 
-  const rerunCp = rerunResult.rerunControlPoint as unknown as Record<string, unknown>;
-  const nextCp: Record<string, unknown> = {
-    ...(isRecord(previousCp) ? (previousCp as Record<string, unknown>) : {}),
-    ...rerunCp,
-  };
-  if (typeof nextCp.point !== "string" && previous.point) {
-    nextCp.point = previous.point;
-  }
+  // One-time migration for this step: if trails still live inside rawResult,
+  // backfill them into tables before writing the new entry (to avoid losing history).
+  const legacyHuman = extractLegacyHumanReviewEntries(existing.rawResult as unknown);
+  const legacyRerun = extractLegacyRerunHistoryEntries(existing.rawResult as unknown);
 
-  const nextPoints = [...pointsRaw];
-  nextPoints[idx] = nextCp;
-  raw.points_controle = nextPoints;
+  const existingHumanCount =
+    legacyHuman.length > 0
+      ? await prisma.auditStepResultHumanReview.count({
+          where: { auditId: options.auditId, stepPosition: options.stepPosition },
+        })
+      : 0;
 
-  // Deterministically recompute step summary fields (mirrors evidence-gating scoring model).
-  const derived = deriveStepFromControlPoints({
-    points: nextPoints as Array<{ statut?: unknown; citations?: unknown }>,
-    weight: Math.max(0, Number(existing.weight)),
-  });
+  const existingRerunCount =
+    legacyRerun.length > 0
+      ? await prisma.auditStepResultRerunEvent.count({
+          where: { auditId: options.auditId, stepPosition: options.stepPosition },
+        })
+      : 0;
 
-  raw.score = derived.score;
-  raw.conforme = derived.conforme;
-  raw.niveau_conformite = derived.niveauConformite;
-  raw.minutages = derived.minutages;
-
-  // Append rerun audit trail entry
-  const nowIso = new Date().toISOString();
-  const trailEntry = {
-    at: nowIso,
-    kind: "control_point_rerun",
-    rerun_id: meta?.rerunId ?? null,
-    event_id: meta?.eventId ?? null,
-    step_position: options.stepPosition,
-    control_point_index: options.controlPointIndex,
-    point: typeof nextCp.point === "string" ? nextCp.point : previous.point,
-    previous: {
-      statut: previous.statut,
-      commentaire: previous.commentaire,
-      citations: previous.citations,
-      step_score: existing.score,
-      step_conforme: existing.conforme,
-    },
-    next: {
-      statut: typeof nextCp.statut === "string" ? nextCp.statut : "UNKNOWN",
-      commentaire: typeof nextCp.commentaire === "string" ? nextCp.commentaire : "",
-      citations: Array.isArray(nextCp.citations) ? nextCp.citations.length : 0,
-      step_score: derived.score,
-      step_conforme: derived.conforme,
-    },
-  };
-
-  const existingHistory = raw.rerun_history;
-  const history: unknown[] = Array.isArray(existingHistory)
-    ? [...existingHistory]
-    : existingHistory
-      ? [existingHistory]
+  const legacyHumanRows =
+    existingHumanCount === 0 && legacyHuman.length > 0
+      ? legacyHumanReviewsToRows({
+          auditId: options.auditId,
+          stepPosition: options.stepPosition,
+          entries: legacyHuman,
+          fallbackDate: now,
+        })
       : [];
-  history.push(trailEntry);
-  raw.rerun_history = history;
 
-  await prisma.auditStepResult.update({
-    where: {
-      auditId_stepPosition: {
+  const legacyRerunRows =
+    existingRerunCount === 0 && legacyRerun.length > 0
+      ? legacyRerunHistoryToRows({
+          auditId: options.auditId,
+          stepPosition: options.stepPosition,
+          entries: legacyRerun,
+          fallbackDate: now,
+        })
+      : [];
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Legacy path (pre-backfill): mutate rawResult.points_controle, then persist
+  // the full control point set into normalized tables and shrink rawResult.
+  // ───────────────────────────────────────────────────────────────────────────
+  if (legacyPoints && legacyPoints.length >= options.controlPointIndex) {
+    const idx = options.controlPointIndex - 1;
+    const previousCp = legacyPoints[idx];
+    const previous = isRecord(previousCp)
+      ? {
+          point: typeof previousCp.point === "string" ? previousCp.point : "",
+          statut: typeof previousCp.statut === "string" ? previousCp.statut : "UNKNOWN",
+          commentaire:
+            typeof previousCp.commentaire === "string" ? previousCp.commentaire : "",
+          citations: Array.isArray(previousCp.citations) ? previousCp.citations.length : 0,
+        }
+      : {
+          point: "",
+          statut: "UNKNOWN",
+          commentaire: "",
+          citations: 0,
+        };
+
+    const rerunCp = rerunResult.rerunControlPoint as unknown as Record<string, unknown>;
+    const nextCp: Record<string, unknown> = {
+      ...(isRecord(previousCp) ? (previousCp as Record<string, unknown>) : {}),
+      ...rerunCp,
+    };
+    if (typeof nextCp.point !== "string" && previous.point) {
+      nextCp.point = previous.point;
+    }
+
+    const nextPoints = [...legacyPoints];
+    nextPoints[idx] = nextCp;
+
+    const derived = deriveStepFromControlPoints({
+      points: nextPoints as Array<{ statut?: unknown; citations?: unknown }>,
+      weight: Math.max(0, Number(existing.weight)),
+    });
+
+    const rerunEventRow = {
+      auditId: options.auditId,
+      stepPosition: options.stepPosition,
+      occurredAt: now,
+      kind: "control_point_rerun",
+      rerunId: meta?.rerunId ?? null,
+      eventId: meta?.eventId ?? null,
+      customPrompt: null,
+      controlPointIndex: options.controlPointIndex,
+      point: typeof nextCp.point === "string" ? nextCp.point : previous.point,
+      previousStatut: previous.statut,
+      previousCommentaire: previous.commentaire,
+      previousCitations: previous.citations,
+      previousStepScore: existing.score,
+      previousStepConforme: existing.conforme,
+      nextStatut: typeof nextCp.statut === "string" ? nextCp.statut : "UNKNOWN",
+      nextCommentaire: typeof nextCp.commentaire === "string" ? nextCp.commentaire : "",
+      nextCitations: Array.isArray(nextCp.citations) ? nextCp.citations.length : 0,
+      nextStepScore: derived.score,
+      nextStepConforme: derived.conforme,
+    };
+
+    const controlPointsData = nextPoints
+      .map((cp, i) => {
+        if (!isRecord(cp)) {return null;}
+        return {
+          auditId: options.auditId,
+          stepPosition: options.stepPosition,
+          controlPointIndex: i + 1,
+          point: typeof cp.point === "string" ? cp.point : "",
+          statut: typeof cp.statut === "string" ? cp.statut : "ABSENT",
+          commentaire: typeof cp.commentaire === "string" ? cp.commentaire : "",
+          minutages: Array.isArray(cp.minutages)
+            ? cp.minutages.filter((v): v is string => typeof v === "string")
+            : [],
+          erreurTranscriptionNotee: Boolean(cp.erreur_transcription_notee),
+          variationPhonetiqueUtilisee:
+            typeof cp.variation_phonetique_utilisee === "string"
+              ? cp.variation_phonetique_utilisee
+              : null,
+        };
+      })
+      .filter((v): v is NonNullable<typeof v> => v !== null);
+
+    const citationsData = nextPoints.flatMap((cp, cpIdx) => {
+      if (!isRecord(cp)) {return [];}
+      const controlPointIndex = cpIdx + 1;
+      const citationsRaw = Array.isArray(cp.citations) ? cp.citations : [];
+      return citationsRaw
+        .map((c, cIdx) => {
+          if (!isRecord(c)) {return null;}
+          return {
+            auditId: options.auditId,
+            stepPosition: options.stepPosition,
+            controlPointIndex,
+            citationIndex: cIdx + 1,
+            texte: typeof c.texte === "string" ? c.texte : "",
+            minutage: typeof c.minutage === "string" ? c.minutage : "",
+            minutageSecondes:
+              typeof c.minutage_secondes === "number" ? c.minutage_secondes : 0,
+            speaker: typeof c.speaker === "string" ? c.speaker : "",
+            recordingIndex:
+              typeof c.recording_index === "number" ? Math.trunc(c.recording_index) : 0,
+            chunkIndex: typeof c.chunk_index === "number" ? Math.trunc(c.chunk_index) : 0,
+            recordingDate:
+              typeof c.recording_date === "string" ? c.recording_date : "N/A",
+            recordingTime:
+              typeof c.recording_time === "string" ? c.recording_time : "N/A",
+            recordingUrl:
+              typeof c.recording_url === "string" ? c.recording_url : "N/A",
+          };
+        })
+        .filter((v): v is NonNullable<typeof v> => v !== null);
+    });
+
+    const nextRaw = {
+      step_metadata: prevRaw?.step_metadata ?? null,
+      usage: prevRaw?.usage ?? null,
+    };
+
+    await prisma.$transaction([
+      ...(legacyHumanRows.length > 0
+        ? [prisma.auditStepResultHumanReview.createMany({ data: legacyHumanRows })]
+        : []),
+      ...(legacyRerunRows.length > 0
+        ? [prisma.auditStepResultRerunEvent.createMany({ data: legacyRerunRows })]
+        : []),
+      prisma.auditStepResultRerunEvent.create({ data: rerunEventRow }),
+      prisma.auditStepResult.update({
+        where: {
+          auditId_stepPosition: {
+            auditId: options.auditId,
+            stepPosition: options.stepPosition,
+          },
+        },
+        data: {
+          score: derived.score,
+          conforme: derived.conforme,
+          niveauConformite: derived.niveauConformite,
+          totalCitations: derived.totalCitations,
+          minutages: derived.minutages,
+          rawResult: toPrismaJsonValue(nextRaw),
+        },
+      }),
+      prisma.auditStepResultControlPoint.deleteMany({
+        where: { auditId: options.auditId, stepPosition: options.stepPosition },
+      }),
+      ...(controlPointsData.length > 0
+        ? [
+            prisma.auditStepResultControlPoint.createMany({
+              data: controlPointsData,
+              skipDuplicates: true,
+            }),
+          ]
+        : []),
+      ...(citationsData.length > 0
+        ? [
+            prisma.auditStepResultCitation.createMany({
+              data: citationsData,
+              skipDuplicates: true,
+            }),
+          ]
+        : []),
+    ]);
+  } else {
+    // ─────────────────────────────────────────────────────────────────────────
+    // New path: update the normalized control point + citations directly.
+    // ─────────────────────────────────────────────────────────────────────────
+    const dbPoints = await prisma.auditStepResultControlPoint.findMany({
+      where: { auditId: options.auditId, stepPosition: options.stepPosition },
+      include: { citations: { select: { minutage: true } } },
+      orderBy: { controlPointIndex: "asc" },
+    });
+
+    if (dbPoints.length < options.controlPointIndex) {
+      logger.warn("Audit step has no matching control point row to update", {
+        audit_id: options.auditId.toString(),
+        step_position: options.stepPosition,
+        control_point_index: options.controlPointIndex,
+        points_len: dbPoints.length,
+      });
+      return { saved: false, auditUpdated: false };
+    }
+
+    const idx = options.controlPointIndex - 1;
+    const previousCp = dbPoints[idx];
+    const previous = {
+      point: previousCp.point,
+      statut: previousCp.statut,
+      commentaire: previousCp.commentaire,
+      citations: previousCp.citations.length,
+    };
+
+    const nextCp = rerunResult.rerunControlPoint;
+
+    const derivedPoints = dbPoints.map((cp, i) => {
+      if (i !== idx) {
+        return { statut: cp.statut, citations: cp.citations };
+      }
+      const cits = Array.isArray(nextCp.citations) ? nextCp.citations : [];
+      return {
+        statut: nextCp.statut,
+        citations: cits.map((c) => ({ minutage: c.minutage })),
+      };
+    });
+
+    const derived = deriveStepFromControlPoints({
+      points: derivedPoints,
+      weight: Math.max(0, Number(existing.weight)),
+    });
+
+    const rerunEventRow = {
+      auditId: options.auditId,
+      stepPosition: options.stepPosition,
+      occurredAt: now,
+      kind: "control_point_rerun",
+      rerunId: meta?.rerunId ?? null,
+      eventId: meta?.eventId ?? null,
+      customPrompt: null,
+      controlPointIndex: options.controlPointIndex,
+      point: nextCp.point || previous.point,
+      previousStatut: previous.statut,
+      previousCommentaire: previous.commentaire,
+      previousCitations: previous.citations,
+      previousStepScore: existing.score,
+      previousStepConforme: existing.conforme,
+      nextStatut: nextCp.statut,
+      nextCommentaire: nextCp.commentaire || "",
+      nextCitations: Array.isArray(nextCp.citations) ? nextCp.citations.length : 0,
+      nextStepScore: derived.score,
+      nextStepConforme: derived.conforme,
+    };
+
+    const nextRaw = {
+      step_metadata: prevRaw?.step_metadata ?? null,
+      usage: prevRaw?.usage ?? null,
+    };
+
+    const citationsData = (Array.isArray(nextCp.citations) ? nextCp.citations : []).map(
+      (c, cIdx) => ({
         auditId: options.auditId,
         stepPosition: options.stepPosition,
-      },
-    },
-    data: {
-      score: derived.score,
-      conforme: derived.conforme,
-      niveauConformite: derived.niveauConformite,
-      totalCitations: derived.totalCitations,
-      minutages: derived.minutages,
-      rawResult: toPrismaJsonValue(raw),
-    },
-  });
+        controlPointIndex: options.controlPointIndex,
+        citationIndex: cIdx + 1,
+        texte: c.texte,
+        minutage: c.minutage,
+        minutageSecondes: c.minutage_secondes,
+        speaker: c.speaker,
+        recordingIndex: c.recording_index,
+        chunkIndex: c.chunk_index,
+        recordingDate: c.recording_date,
+        recordingTime: c.recording_time,
+        recordingUrl: c.recording_url,
+      })
+    );
+
+    await prisma.$transaction([
+      ...(legacyHumanRows.length > 0
+        ? [prisma.auditStepResultHumanReview.createMany({ data: legacyHumanRows })]
+        : []),
+      ...(legacyRerunRows.length > 0
+        ? [prisma.auditStepResultRerunEvent.createMany({ data: legacyRerunRows })]
+        : []),
+      prisma.auditStepResultRerunEvent.create({ data: rerunEventRow }),
+      prisma.auditStepResultControlPoint.update({
+        where: {
+          auditId_stepPosition_controlPointIndex: {
+            auditId: options.auditId,
+            stepPosition: options.stepPosition,
+            controlPointIndex: options.controlPointIndex,
+          },
+        },
+        data: {
+          point: nextCp.point || previous.point,
+          statut: nextCp.statut,
+          commentaire: nextCp.commentaire || "",
+          minutages: Array.isArray(nextCp.minutages) ? nextCp.minutages : [],
+          erreurTranscriptionNotee: Boolean(nextCp.erreur_transcription_notee),
+          variationPhonetiqueUtilisee: nextCp.variation_phonetique_utilisee,
+        },
+      }),
+      prisma.auditStepResultCitation.deleteMany({
+        where: {
+          auditId: options.auditId,
+          stepPosition: options.stepPosition,
+          controlPointIndex: options.controlPointIndex,
+        },
+      }),
+      ...(citationsData.length > 0
+        ? [
+            prisma.auditStepResultCitation.createMany({
+              data: citationsData,
+              skipDuplicates: true,
+            }),
+          ]
+        : []),
+      prisma.auditStepResult.update({
+        where: {
+          auditId_stepPosition: {
+            auditId: options.auditId,
+            stepPosition: options.stepPosition,
+          },
+        },
+        data: {
+          score: derived.score,
+          conforme: derived.conforme,
+          niveauConformite: derived.niveauConformite,
+          totalCitations: derived.totalCitations,
+          minutages: derived.minutages,
+          rawResult: toPrismaJsonValue(nextRaw),
+        },
+      }),
+    ]);
+  }
 
   if (!updateAudit) {
     return { saved: true, auditUpdated: false };

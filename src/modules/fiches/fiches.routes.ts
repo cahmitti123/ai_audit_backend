@@ -104,8 +104,11 @@ fichesRouter.get(
     const { fiche_id } = req.params;
     const refresh = req.query.refresh;
     const shouldRefresh = refresh === "true";
+    const includeMailDevis = req.query.include_mail_devis === "true";
 
-    const ficheDetails = await fichesService.getFiche(fiche_id, shouldRefresh);
+    const ficheDetails = await fichesService.getFiche(fiche_id, shouldRefresh, {
+      includeMailDevis,
+    });
     return jsonResponse(res, ficheDetails);
   })
 );
@@ -131,7 +134,10 @@ fichesRouter.get(
 fichesRouter.get(
   "/:fiche_id(\\d+)/cache",
   asyncHandler(async (req: Request, res: Response) => {
-    const cached = await fichesRepository.getCachedFiche(req.params.fiche_id);
+    const includeMailDevis = req.query.include_mail_devis === "true";
+    const cached = await fichesRepository.getCachedFiche(req.params.fiche_id, {
+      includeMailDevis,
+    });
 
     if (!cached) {
       return res.status(404).json({

@@ -16,6 +16,7 @@
 import type {
   AutomationLog as DbAutomationLog,
   AutomationRun as DbAutomationRun,
+  AutomationRunFicheResult as DbAutomationRunFicheResult,
   AutomationSchedule as DbAutomationSchedule,
 } from "@prisma/client";
 
@@ -39,6 +40,7 @@ import type {
   TranscriptionPriority,
   UpdateAutomationScheduleInput,
 } from "./automation.schemas.js";
+import { validateFicheSelection } from "./automation.schemas.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -48,6 +50,53 @@ function getString(value: unknown): string | null {
   if (typeof value === "string") {return value;}
   if (typeof value === "number" && Number.isFinite(value)) {return String(value);}
   return null;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function buildRunResultSummary(
+  run: DbAutomationRun & { ficheResults?: DbAutomationRunFicheResult[] }
+): unknown {
+  const rs = run.resultSummary as unknown;
+  if (isPlainObject(rs) && Object.keys(rs).length > 0) {
+    return rs;
+  }
+
+  const ficheResults = run.ficheResults;
+  if (!Array.isArray(ficheResults) || ficheResults.length === 0) {
+    return rs;
+  }
+
+  const successful = ficheResults
+    .filter((r) => r.status === "successful")
+    .map((r) => r.ficheId);
+
+  const failed = ficheResults
+    .filter((r) => r.status === "failed")
+    .map((r) => ({
+      ficheId: r.ficheId,
+      error: r.error ?? "Unknown error",
+    }));
+
+  const ignored = ficheResults
+    .filter((r) => r.status === "ignored")
+    .map((r) => ({
+      ficheId: r.ficheId,
+      reason: r.ignoreReason ?? "Ignored",
+      ...(typeof r.recordingsCount === "number"
+        ? { recordingsCount: r.recordingsCount }
+        : {}),
+    }));
+
+  return {
+    successful,
+    failed,
+    ignored,
+    transcriptions: run.transcriptionsRun,
+    audits: run.auditsRun,
+  };
 }
 
 type ExternalFicheSummary = {
@@ -105,6 +154,38 @@ function toAutomationLogLevel(value: unknown): AutomationLogLevel {
   return value === "debug" || value === "info" || value === "warning" || value === "error"
     ? value
     : "info";
+}
+
+function buildFicheSelectionFromDb(schedule: DbAutomationSchedule): FicheSelection {
+  return validateFicheSelection({
+    mode: schedule.ficheSelectionMode,
+    ...(schedule.ficheSelectionDateRange
+      ? { dateRange: schedule.ficheSelectionDateRange }
+      : {}),
+    ...(schedule.ficheSelectionCustomStartDate
+      ? { customStartDate: schedule.ficheSelectionCustomStartDate }
+      : {}),
+    ...(schedule.ficheSelectionCustomEndDate
+      ? { customEndDate: schedule.ficheSelectionCustomEndDate }
+      : {}),
+    ...(Array.isArray(schedule.ficheSelectionGroupes) &&
+    schedule.ficheSelectionGroupes.length > 0
+      ? { groupes: schedule.ficheSelectionGroupes }
+      : {}),
+    onlyWithRecordings: Boolean(schedule.ficheSelectionOnlyWithRecordings),
+    onlyUnaudited: Boolean(schedule.ficheSelectionOnlyUnaudited),
+    useRlm: Boolean(schedule.ficheSelectionUseRlm),
+    ...(typeof schedule.ficheSelectionMaxFiches === "number"
+      ? { maxFiches: schedule.ficheSelectionMaxFiches }
+      : {}),
+    ...(typeof schedule.ficheSelectionMaxRecordingsPerFiche === "number"
+      ? { maxRecordingsPerFiche: schedule.ficheSelectionMaxRecordingsPerFiche }
+      : {}),
+    ...(Array.isArray(schedule.ficheSelectionFicheIds) &&
+    schedule.ficheSelectionFicheIds.length > 0
+      ? { ficheIds: schedule.ficheSelectionFicheIds }
+      : {}),
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -893,7 +974,7 @@ function transformScheduleToApi(schedule: DbAutomationSchedule): AutomationSched
     timeOfDay: schedule.timeOfDay,
     dayOfWeek: schedule.dayOfWeek,
     dayOfMonth: schedule.dayOfMonth,
-    ficheSelection: schedule.ficheSelection as unknown as FicheSelection,
+    ficheSelection: buildFicheSelectionFromDb(schedule),
     runTranscription: schedule.runTranscription,
     skipIfTranscribed: schedule.skipIfTranscribed,
     transcriptionPriority: toTranscriptionPriority(schedule.transcriptionPriority),
@@ -942,7 +1023,9 @@ function transformScheduleWithRunsToApi(
 /**
  * Transform run from database to API
  */
-function transformRunToApi(run: DbAutomationRun): AutomationRun {
+function transformRunToApi(
+  run: DbAutomationRun & { ficheResults?: DbAutomationRunFicheResult[] }
+): AutomationRun {
   return {
     id: run.id.toString(),
     scheduleId: run.scheduleId.toString(),
@@ -958,7 +1041,7 @@ function transformRunToApi(run: DbAutomationRun): AutomationRun {
     errorMessage: run.errorMessage,
     errorDetails: run.errorDetails,
     configSnapshot: run.configSnapshot,
-    resultSummary: run.resultSummary,
+    resultSummary: buildRunResultSummary(run),
   };
 }
 
@@ -966,7 +1049,10 @@ function transformRunToApi(run: DbAutomationRun): AutomationRun {
  * Transform run with logs from database to API
  */
 function transformRunWithLogsToApi(
-  run: DbAutomationRun & { logs: DbAutomationLog[] }
+  run: DbAutomationRun & {
+    logs: DbAutomationLog[];
+    ficheResults?: DbAutomationRunFicheResult[];
+  }
 ): AutomationRunWithLogs {
   return {
     ...transformRunToApi(run),

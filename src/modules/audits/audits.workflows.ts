@@ -11,7 +11,6 @@ import { inngest } from "../../inngest/client.js";
 import type {
   ControlPoint,
   TimelineRecording,
-  Transcription,
   TranscriptionWord,
 } from "../../schemas.js";
 import {
@@ -30,6 +29,7 @@ import {
   formatBytes,
   getPayloadSize,
 } from "../../utils/payload-size.js";
+import { buildConversationChunksFromWords } from "../../utils/transcription-chunks.js";
 import { getCachedFiche } from "../fiches/fiches.repository.js";
 import { fetchFicheFunction } from "../fiches/fiches.workflows.js";
 import { getFicheTranscriptionStatus } from "../transcriptions/transcriptions.service.js";
@@ -79,15 +79,6 @@ function getAuditRunFailureMeta(event: unknown): {
   return { fiche_id, audit_config_id };
 }
 
-function getRawCallId(value: unknown): string | null {
-  if (!isRecord(value)) {return null;}
-  const call_id = value.call_id;
-  if (typeof call_id === "string" && call_id) {return call_id;}
-  const callId = value.callId;
-  if (typeof callId === "string" && callId) {return callId;}
-  return null;
-}
-
 function getAuditDbIdFromEvent(event: unknown): bigint | null {
   const data =
     isRecord(event) && isRecord(event.data) ? (event.data as Record<string, unknown>) : null;
@@ -126,12 +117,6 @@ function toNumberOr(value: unknown, fallback: number): number {
 function toIntOr(value: unknown, fallback: number): number {
   const n = toNumberOr(value, fallback);
   return Number.isFinite(n) ? Math.trunc(n) : fallback;
-}
-
-function getRawRecordingsFromFicheRawData(rawData: unknown): unknown[] {
-  if (!isRecord(rawData)) {return [];}
-  const recordings = rawData.recordings;
-  return Array.isArray(recordings) ? recordings : [];
 }
 
 function normalizeTimelineRecordings(value: unknown): TimelineRecording[] {
@@ -317,51 +302,61 @@ function buildTranscriptionPayload(
 }
 
 async function rebuildTimelineFromDatabase(ficheId: string): Promise<TimelineRecording[]> {
-  const { getRecordingsByFiche } = await import(
+  const { getRecordingsWithTranscriptionChunksByFiche } = await import(
     "../recordings/recordings.repository.js"
   );
-  const { generateTimeline } = await import("./audits.timeline.js");
-  const { enrichRecording } = await import("../../utils/recording-parser.js");
 
-  const cached = await getCachedFiche(ficheId);
-  if (!cached) {throw new Error("Fiche not cached");}
+  const dbRecordings = await getRecordingsWithTranscriptionChunksByFiche(ficheId);
 
-  const dbRecordings = await getRecordingsByFiche(ficheId);
-  const rawRecordings = getRawRecordingsFromFicheRawData(cached.rawData);
+  const timeline: TimelineRecording[] = [];
 
-  const transcriptions: Transcription[] = [];
   for (const dbRec of dbRecordings) {
-    const rec: DbRecordingForTimeline = {
-      callId: dbRec.callId,
-      hasTranscription: dbRec.hasTranscription,
-      transcriptionId: dbRec.transcriptionId,
-      transcriptionText: dbRec.transcriptionText,
-      transcriptionData: dbRec.transcriptionData,
-      durationSeconds: dbRec.durationSeconds,
-    };
+    if (!dbRec.hasTranscription) {continue;}
+    if (!dbRec.recordingUrl) {continue;}
 
-    if (!rec.hasTranscription || !rec.transcriptionId) {continue;}
+    // Prefer normalized chunks (stable indices; avoids huge word-level JSON).
+    let chunks = dbRec.transcriptionChunks.map((c) => ({
+      chunk_index: c.chunkIndex,
+      start_timestamp: c.startTimestamp,
+      end_timestamp: c.endTimestamp,
+      message_count: c.messageCount,
+      speakers: c.speakers,
+      full_text: c.fullText,
+    }));
 
-    const rawRec = rawRecordings.find((r) => getRawCallId(r) === rec.callId);
-    if (!rawRec || !isRecord(rawRec)) {continue;}
+    // Fallback for legacy rows that still have word-level JSON but no persisted chunks.
+    if (chunks.length === 0) {
+      const rec: DbRecordingForTimeline = {
+        callId: dbRec.callId,
+        hasTranscription: dbRec.hasTranscription,
+        transcriptionId: dbRec.transcriptionId,
+        transcriptionText: dbRec.transcriptionText,
+        transcriptionData: dbRec.transcriptionData,
+        durationSeconds: dbRec.durationSeconds,
+      };
 
-    const enrichedRec = enrichRecording(rawRec);
-    const url = enrichedRec.recording_url;
-    if (!url) {continue;}
+      const transcription = buildTranscriptionPayload(rec);
+      if (!transcription) {continue;}
 
-    const transcription = buildTranscriptionPayload(rec);
-    if (!transcription) {continue;}
+      chunks = buildConversationChunksFromWords(transcription.words);
+    }
 
-    transcriptions.push({
-      recording_url: url,
-      transcription_id: rec.transcriptionId,
-      call_id: rec.callId,
-      recording: enrichedRec,
-      transcription,
+    timeline.push({
+      recording_index: timeline.length,
+      call_id: dbRec.callId,
+      start_time: dbRec.startTime?.toISOString() || "",
+      duration_seconds: dbRec.durationSeconds ?? 0,
+      recording_url: dbRec.recordingUrl,
+      recording_date: dbRec.recordingDate ?? "",
+      recording_time: dbRec.recordingTime ?? "",
+      from_number: dbRec.fromNumber ?? "",
+      to_number: dbRec.toNumber ?? "",
+      total_chunks: chunks.length,
+      chunks,
     });
   }
 
-  return generateTimeline(transcriptions);
+  return timeline;
 }
 
 function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
@@ -1457,7 +1452,48 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
     await step.run("upsert-step-result", async () => {
       const { prisma } = await import("../../shared/prisma.js");
 
-      await prisma.auditStepResult.upsert({
+      const points = Array.isArray(analyzedSanitized.points_controle)
+        ? analyzedSanitized.points_controle
+        : [];
+
+      const controlPointsData = points.map((cp, idx) => ({
+        auditId: auditDbId,
+        stepPosition,
+        controlPointIndex: idx + 1,
+        point: cp.point,
+        statut: cp.statut,
+        commentaire: cp.commentaire,
+        minutages: Array.isArray(cp.minutages) ? cp.minutages : [],
+        erreurTranscriptionNotee: Boolean(cp.erreur_transcription_notee),
+        variationPhonetiqueUtilisee: cp.variation_phonetique_utilisee ?? null,
+      }));
+
+      const citationsData = points.flatMap((cp, idx) => {
+        const controlPointIndex = idx + 1;
+        const citations = Array.isArray(cp.citations) ? cp.citations : [];
+        return citations.map((c, cIdx) => ({
+          auditId: auditDbId,
+          stepPosition,
+          controlPointIndex,
+          citationIndex: cIdx + 1,
+          texte: c.texte,
+          minutage: c.minutage,
+          minutageSecondes: c.minutage_secondes,
+          speaker: c.speaker,
+          recordingIndex: c.recording_index,
+          chunkIndex: c.chunk_index,
+          recordingDate: c.recording_date,
+          recordingTime: c.recording_time,
+          recordingUrl: c.recording_url,
+        }));
+      });
+
+      const rawResultMinimal = {
+        step_metadata: analyzedSanitized.step_metadata,
+        usage: analyzedSanitized.usage,
+      };
+
+      const upsert = prisma.auditStepResult.upsert({
         where: {
           auditId_stepPosition: {
             auditId: auditDbId,
@@ -1481,7 +1517,8 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
           erreursTranscriptionTolerees: analyzedSanitized.erreurs_transcription_tolerees || 0,
           totalCitations,
           totalTokens: analyzedSanitized.usage?.total_tokens || 0,
-          rawResult: toPrismaJsonValue(analyzedSanitized),
+          // Reduce raw JSON storage: persist points/citations in tables.
+          rawResult: toPrismaJsonValue(rawResultMinimal),
         },
         update: {
           traite: Boolean(analyzedSanitized.traite),
@@ -1494,9 +1531,34 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
           erreursTranscriptionTolerees: analyzedSanitized.erreurs_transcription_tolerees || 0,
           totalCitations,
           totalTokens: analyzedSanitized.usage?.total_tokens || 0,
-          rawResult: toPrismaJsonValue(analyzedSanitized),
+          rawResult: toPrismaJsonValue(rawResultMinimal),
         },
       });
+
+      const deleteControlPoints = prisma.auditStepResultControlPoint.deleteMany({
+        where: { auditId: auditDbId, stepPosition },
+      });
+
+      await prisma.$transaction([
+        upsert,
+        deleteControlPoints,
+        ...(controlPointsData.length > 0
+          ? [
+              prisma.auditStepResultControlPoint.createMany({
+                data: controlPointsData,
+                skipDuplicates: true,
+              }),
+            ]
+          : []),
+        ...(citationsData.length > 0
+          ? [
+              prisma.auditStepResultCitation.createMany({
+                data: citationsData,
+                skipDuplicates: true,
+              }),
+            ]
+          : []),
+      ]);
 
       return { saved: true };
     });
@@ -1687,8 +1749,44 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
           stepName: true,
           severityLevel: true,
           isCritical: true,
-          weight: true,
+          weight: true,                                                                                                                                                                                           
+          traite: true,
+          conforme: true,
+          score: true,
+          niveauConformite: true,
+          commentaireGlobal: true,
+          motsClesTrouves: true,
+          minutages: true,
+          erreursTranscriptionTolerees: true,
+          totalTokens: true,
           rawResult: true,
+          controlPoints: {
+            orderBy: { controlPointIndex: "asc" },
+            select: {
+              controlPointIndex: true,
+              point: true,
+              statut: true,
+              commentaire: true,
+              minutages: true,
+              erreurTranscriptionNotee: true,
+              variationPhonetiqueUtilisee: true,
+              citations: {
+                orderBy: { citationIndex: "asc" },
+                select: {
+                  citationIndex: true,
+                  texte: true,
+                  minutage: true,
+                  minutageSecondes: true,
+                  speaker: true,
+                  recordingIndex: true,
+                  chunkIndex: true,
+                  recordingDate: true,
+                  recordingTime: true,
+                  recordingUrl: true,
+                },
+              },
+            },
+          },
         },
       });
       return rows;
@@ -1696,18 +1794,71 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
 
     const stepResults: AnalyzeStepResult[] = stepRows.map((r) => {
       const raw = r.rawResult as unknown;
+      // Back-compat: old rows still have the full step JSON in rawResult.
       if (raw && isAnalyzeStepResult(raw)) {return raw;}
-      const stepPosition = toIntOr(r.stepPosition, 0);
+
+      const stepPosition = toIntOr(r.stepPosition, 0) > 0 ? toIntOr(r.stepPosition, 0) : 1;
       const weight = toIntOr(r.weight, 5);
-      return fallbackAnalyzeStepResult({
-        stepPosition: stepPosition > 0 ? stepPosition : 1,
-        stepName: typeof r.stepName === "string" ? r.stepName : "",
-        severity: toAuditSeverityLevel(r.severityLevel),
-        isCritical: Boolean(r.isCritical),
-        weight,
-        controlPoints: [],
-        message: "Missing step rawResult",
-      });
+
+      const usage =
+        isRecord(raw) && isRecord(raw.usage)
+          ? (raw.usage as Record<string, unknown>)
+          : { total_tokens: Number(r.totalTokens ?? 0) };
+
+      const points = Array.isArray(r.controlPoints)
+        ? r.controlPoints.map((cp) => ({
+            point: cp.point,
+            statut: cp.statut as ControlPoint["statut"],
+            commentaire: cp.commentaire,
+            citations: cp.citations.map((c) => ({
+              texte: c.texte,
+              speaker: c.speaker,
+              minutage: c.minutage,
+              chunk_index: c.chunkIndex,
+              recording_url: c.recordingUrl,
+              recording_date: c.recordingDate,
+              recording_time: c.recordingTime,
+              recording_index: c.recordingIndex,
+              minutage_secondes: c.minutageSecondes,
+            })),
+            minutages: cp.minutages,
+            erreur_transcription_notee: cp.erreurTranscriptionNotee,
+            variation_phonetique_utilisee: cp.variationPhonetiqueUtilisee ?? null,
+          }))
+        : [];
+
+      // If we still couldn't load points (shouldn't happen for new audits), fall back to a safe placeholder.
+      if (points.length === 0) {
+        return fallbackAnalyzeStepResult({
+          stepPosition,
+          stepName: typeof r.stepName === "string" ? r.stepName : "",
+          severity: toAuditSeverityLevel(r.severityLevel),
+          isCritical: Boolean(r.isCritical),
+          weight,
+          controlPoints: [],
+          message: "Missing step control points",
+        });
+      }
+
+      return {
+        traite: Boolean(r.traite),
+        conforme: String(r.conforme),
+        minutages: Array.isArray(r.minutages) ? r.minutages : [],
+        score: Number(r.score ?? 0),
+        points_controle: points,
+        mots_cles_trouves: Array.isArray(r.motsClesTrouves) ? r.motsClesTrouves : [],
+        commentaire_global: String(r.commentaireGlobal ?? ""),
+        niveau_conformite: String(r.niveauConformite ?? "INSUFFISANT"),
+        erreurs_transcription_tolerees: Number(r.erreursTranscriptionTolerees ?? 0),
+        step_metadata: {
+          position: stepPosition,
+          name: typeof r.stepName === "string" ? r.stepName : "",
+          severity: toAuditSeverityLevel(r.severityLevel),
+          is_critical: Boolean(r.isCritical),
+          weight,
+        },
+        usage,
+      } as AnalyzeStepResult;
     });
 
     // Ensure we have a timeline for evidence gating + citation enrichment

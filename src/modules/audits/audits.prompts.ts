@@ -291,11 +291,25 @@ IDENTIFICATION PRODUIT:
   });
 
   // Add gamme-level documents if available
-  if (gamme.documents && Object.keys(gamme.documents).length > 0) {
+  const gammeDocuments =
+    Array.isArray((gamme as unknown as { documentsTable?: unknown }).documentsTable) &&
+    (gamme as unknown as { documentsTable: unknown[] }).documentsTable.length > 0
+      ? (gamme as unknown as { documentsTable: Array<{ documentType?: unknown; url?: unknown }> })
+          .documentsTable.reduce<Record<string, string>>((acc, d) => {
+            if (d && typeof d.documentType === "string" && typeof d.url === "string") {
+              acc[d.documentType] = d.url;
+            }
+            return acc;
+          }, {})
+      : gamme.documents && Object.keys(gamme.documents).length > 0
+        ? gamme.documents
+        : null;
+
+  if (gammeDocuments && Object.keys(gammeDocuments).length > 0) {
     context += `\nDOCUMENTS OFFICIELS (Gamme ${gamme.libelle}):
 ─────────────────────────────────────────────────────────────────────────────
 `;
-    Object.entries(gamme.documents).forEach(([docType, url]) => {
+    Object.entries(gammeDocuments).forEach(([docType, url]) => {
       if (url) {
         const docLabels: Record<string, string> = {
           cg: "Conditions Générales",

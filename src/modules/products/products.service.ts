@@ -88,7 +88,38 @@ export async function getGammeDetails(id: bigint) {
   if (!gamme) {
     throw new NotFoundError("Gamme", id.toString());
   }
-  return gamme;
+
+  const docsFromTable = Array.isArray(gamme.documentsTable)
+    ? gamme.documentsTable.reduce<Record<string, string>>((acc, d) => {
+        if (d && typeof d.documentType === "string" && typeof d.url === "string") {
+          acc[d.documentType] = d.url;
+        }
+        return acc;
+      }, {})
+    : {};
+
+  const legacyDocs =
+    gamme.documents &&
+    typeof gamme.documents === "object" &&
+    !Array.isArray(gamme.documents)
+      ? (gamme.documents as Record<string, unknown>)
+      : null;
+
+  const docs =
+    Object.keys(docsFromTable).length > 0
+      ? docsFromTable
+      : legacyDocs
+        ? Object.fromEntries(
+            Object.entries(legacyDocs).filter(
+              (e): e is [string, string] =>
+                typeof e[0] === "string" &&
+                typeof e[1] === "string" &&
+                e[1].trim().length > 0
+            )
+          )
+        : {};
+
+  return { ...gamme, documents: docs };
 }
 
 export async function createGamme(data: CreateGamme) {
@@ -98,21 +129,39 @@ export async function createGamme(data: CreateGamme) {
     throw new NotFoundError("Groupe", data.groupeId.toString());
   }
 
-  return productsRepository.createGamme({
+  const docs = data.documents || {};
+  const gamme = await productsRepository.createGamme({
     groupe: {
       connect: { id: data.groupeId },
     },
     code: data.code,
     libelle: data.libelle,
-    documents: data.documents || {},
+    // Reduce JSON storage: keep legacy JSON minimal; canonical docs live in `documents` table.
+    documents: {},
   });
+
+  await productsRepository.replaceGammeDocuments(gamme.id, docs);
+
+  return { ...gamme, documents: docs };
 }
 
 export async function updateGamme(id: bigint, data: UpdateGamme) {
   // Check if gamme exists
   await getGammeDetails(id);
 
-  return productsRepository.updateGamme(id, data);
+  const { documents, ...rest } = data;
+
+  const gamme = await productsRepository.updateGamme(id, {
+    ...rest,
+    ...(documents !== undefined ? { documents: {} } : {}),
+  });
+
+  if (documents !== undefined) {
+    await productsRepository.replaceGammeDocuments(id, documents);
+    return { ...gamme, documents };
+  }
+
+  return gamme;
 }
 
 export async function deleteGamme(id: bigint) {

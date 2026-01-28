@@ -28,6 +28,40 @@ function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
   return json as Prisma.InputJsonValue;
 }
 
+function toFicheSelectionColumns(
+  selection: CreateAutomationScheduleInput["ficheSelection"]
+): {
+  ficheSelectionMode: string;
+  ficheSelectionDateRange: string | null;
+  ficheSelectionCustomStartDate: string | null;
+  ficheSelectionCustomEndDate: string | null;
+  ficheSelectionGroupes: string[];
+  ficheSelectionOnlyWithRecordings: boolean;
+  ficheSelectionOnlyUnaudited: boolean;
+  ficheSelectionUseRlm: boolean;
+  ficheSelectionMaxFiches: number | null;
+  ficheSelectionMaxRecordingsPerFiche: number | null;
+  ficheSelectionFicheIds: string[];
+} {
+  return {
+    ficheSelectionMode: selection.mode,
+    ficheSelectionDateRange: selection.dateRange ?? null,
+    ficheSelectionCustomStartDate: selection.customStartDate ?? null,
+    ficheSelectionCustomEndDate: selection.customEndDate ?? null,
+    ficheSelectionGroupes: Array.isArray(selection.groupes) ? selection.groupes : [],
+    ficheSelectionOnlyWithRecordings: Boolean(selection.onlyWithRecordings),
+    ficheSelectionOnlyUnaudited: Boolean(selection.onlyUnaudited),
+    ficheSelectionUseRlm: Boolean(selection.useRlm),
+    ficheSelectionMaxFiches:
+      typeof selection.maxFiches === "number" ? selection.maxFiches : null,
+    ficheSelectionMaxRecordingsPerFiche:
+      typeof selection.maxRecordingsPerFiche === "number"
+        ? selection.maxRecordingsPerFiche
+        : null,
+    ficheSelectionFicheIds: Array.isArray(selection.ficheIds) ? selection.ficheIds : [],
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTOMATION SCHEDULE CRUD
 // ═══════════════════════════════════════════════════════════════════════════
@@ -38,6 +72,7 @@ function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
 export async function createAutomationSchedule(
   data: CreateAutomationScheduleInput & { cronExpression?: string | null }
 ) {
+  const selectionCols = toFicheSelectionColumns(data.ficheSelection);
   return await prisma.automationSchedule.create({
     data: {
       name: data.name,
@@ -50,7 +85,7 @@ export async function createAutomationSchedule(
       timeOfDay: data.timeOfDay,
       dayOfWeek: data.dayOfWeek,
       dayOfMonth: data.dayOfMonth,
-      ficheSelection: toPrismaJsonValue(data.ficheSelection),
+      ...selectionCols,
       runTranscription: data.runTranscription,
       skipIfTranscribed: data.skipIfTranscribed,
       transcriptionPriority: data.transcriptionPriority,
@@ -156,9 +191,7 @@ export async function updateAutomationSchedule(
       ...(data.timeOfDay !== undefined && { timeOfDay: data.timeOfDay }),
       ...(data.dayOfWeek !== undefined && { dayOfWeek: data.dayOfWeek }),
       ...(data.dayOfMonth !== undefined && { dayOfMonth: data.dayOfMonth }),
-      ...(data.ficheSelection && {
-        ficheSelection: toPrismaJsonValue(data.ficheSelection),
-      }),
+      ...(data.ficheSelection ? toFicheSelectionColumns(data.ficheSelection) : {}),
       ...(data.runTranscription !== undefined && {
         runTranscription: data.runTranscription,
       }),
@@ -298,6 +331,91 @@ export async function updateAutomationRun(
   });
 }
 
+export type AutomationRunFicheResultsInput = {
+  successful: string[];
+  failed: Array<{ ficheId: string; error: string }>;
+  ignored: Array<{ ficheId: string; reason: string; recordingsCount?: number }>;
+};
+
+/**
+ * Finalize an automation run while storing per-fiche results in a normalized table.
+ *
+ * This keeps `automation_runs.result_summary` minimal (avoid large arrays).
+ * The API can reconstruct the legacy shape from `automation_run_fiche_results`.
+ */
+export async function finalizeAutomationRunWithFicheResults(
+  id: bigint,
+  data: {
+    status: string;
+    completedAt: Date;
+    durationMs: number;
+    totalFiches: number;
+    successfulFiches: number;
+    failedFiches: number;
+    transcriptionsRun: number;
+    auditsRun: number;
+  },
+  results: AutomationRunFicheResultsInput
+) {
+  const rows: Prisma.AutomationRunFicheResultCreateManyInput[] = [
+    ...results.successful
+      .filter((ficheId) => typeof ficheId === "string" && ficheId.trim().length > 0)
+      .map((ficheId) => ({
+        runId: id,
+        ficheId,
+        status: "successful",
+      })),
+    ...results.failed
+      .filter((f) => f && typeof f.ficheId === "string" && f.ficheId.trim().length > 0)
+      .map((f) => ({
+        runId: id,
+        ficheId: f.ficheId,
+        status: "failed",
+        error: typeof f.error === "string" ? f.error : "Unknown error",
+      })),
+    ...results.ignored
+      .filter((f) => f && typeof f.ficheId === "string" && f.ficheId.trim().length > 0)
+      .map((f) => ({
+        runId: id,
+        ficheId: f.ficheId,
+        status: "ignored",
+        ignoreReason: typeof f.reason === "string" ? f.reason : "Ignored",
+        recordingsCount:
+          typeof f.recordingsCount === "number" && Number.isFinite(f.recordingsCount)
+            ? Math.trunc(f.recordingsCount)
+            : null,
+      })),
+  ];
+
+  const updateData: Prisma.AutomationRunUpdateInput = {
+    status: data.status,
+    completedAt: data.completedAt,
+    durationMs: data.durationMs,
+    totalFiches: data.totalFiches,
+    successfulFiches: data.successfulFiches,
+    failedFiches: data.failedFiches,
+    transcriptionsRun: data.transcriptionsRun,
+    auditsRun: data.auditsRun,
+    // Keep JSON minimal: arrays live in `automation_run_fiche_results`.
+    resultSummary: toPrismaJsonValue({}),
+  };
+
+  const resultsTx = await prisma.$transaction([
+    prisma.automationRunFicheResult.deleteMany({ where: { runId: id } }),
+    ...(rows.length > 0
+      ? [
+          prisma.automationRunFicheResult.createMany({
+            data: rows,
+            skipDuplicates: true,
+          }),
+        ]
+      : []),
+    prisma.automationRun.update({ where: { id }, data: updateData }),
+  ]);
+
+  return resultsTx[resultsTx.length - 1];
+}
+
 /**
  * Update schedule statistics after run
  */
@@ -352,6 +470,9 @@ export async function getAutomationRunById(id: bigint) {
     include: {
       logs: {
         orderBy: { timestamp: "asc" },
+      },
+      ficheResults: {
+        orderBy: { ficheId: "asc" },
       },
     },
   });

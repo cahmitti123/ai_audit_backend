@@ -14,18 +14,20 @@ import type {
 } from "../../schemas.js";
 import { logger } from "../../shared/logger.js";
 import { prisma } from "../../shared/prisma.js";
+import { buildConversationChunksFromWords } from "../../utils/transcription-chunks.js";
 import { buildTimelineText } from "../audits/audits.prompts.js";
 import { getAuditById } from "../audits/audits.repository.js";
-import { generateTimeline } from "../audits/audits.timeline.js";
 import { getCachedFiche } from "../fiches/fiches.repository.js";
-import { getRecordingsByFiche } from "../recordings/recordings.repository.js";
+import { getRecordingsWithTranscriptionChunksByFiche } from "../recordings/recordings.repository.js";
 
 const DEFAULT_CHAT_MODEL =
   process.env.OPENAI_MODEL_CHAT || process.env.OPENAI_MODEL || "gpt-5.2";
 const DEFAULT_CHAT_TEMPERATURE = Number(process.env.OPENAI_TEMPERATURE_CHAT || 0);
 const DEFAULT_CHAT_MAX_TOKENS = Number(process.env.OPENAI_MAX_TOKENS_CHAT || 3000);
 
-type DbRecording = Awaited<ReturnType<typeof getRecordingsByFiche>>[number];
+type DbRecording = Awaited<
+  ReturnType<typeof getRecordingsWithTranscriptionChunksByFiche>
+>[number];
 
 function normalizeForMatch(s: string): string {
   return String(s || "")
@@ -176,48 +178,61 @@ function buildParsedMetadata(rec: DbRecording): {
   };
 }
 
-function buildTranscriptionsFromRecordings(
-  recordings: DbRecording[]
-): Transcription[] {
-  const transcriptions: Transcription[] = [];
+function buildTimelineFromRecordings(recordings: DbRecording[]): TimelineRecording[] {
+  const timeline: TimelineRecording[] = [];
 
   for (const rec of recordings) {
     if (!rec.hasTranscription || !rec.recordingUrl) {continue;}
 
     const parsed = buildParsedMetadata(rec);
 
-    let transcriptionData: Transcription["transcription"] | null =
-      toTranscriptionPayload(rec.transcriptionData as unknown);
+    // Prefer normalized chunks (stable indices; much smaller than word-level JSON).
+    let chunks = rec.transcriptionChunks.map((c) => ({
+      chunk_index: c.chunkIndex,
+      start_timestamp: c.startTimestamp,
+      end_timestamp: c.endTimestamp,
+      message_count: c.messageCount,
+      speakers: c.speakers,
+      full_text: c.fullText,
+    }));
 
-    if (!transcriptionData) {
-      const text = rec.transcriptionText;
-      if (typeof text === "string" && text.trim().length > 0) {
-        transcriptionData = {
-          text,
-          language_code: "fr",
-          words: synthesizeWordsFromText(text, rec.durationSeconds ?? 0),
-        };
+    if (chunks.length === 0) {
+      // Legacy fallback: derive chunks from word-level payload or from plain text.
+      let transcriptionData: Transcription["transcription"] | null =
+        toTranscriptionPayload(rec.transcriptionData as unknown);
+
+      if (!transcriptionData) {
+        const text = rec.transcriptionText;
+        if (typeof text === "string" && text.trim().length > 0) {
+          transcriptionData = {
+            text,
+            language_code: "fr",
+            words: synthesizeWordsFromText(text, rec.durationSeconds ?? 0),
+          };
+        }
       }
+
+      if (!transcriptionData) {continue;}
+
+      chunks = buildConversationChunksFromWords(transcriptionData.words);
     }
 
-    if (!transcriptionData) {continue;}
-
-    transcriptions.push({
-      recording_url: rec.recordingUrl,
-      transcription_id: rec.transcriptionId ?? undefined,
+    timeline.push({
+      recording_index: timeline.length,
       call_id: rec.callId,
-      recording: {
-        recording_url: rec.recordingUrl,
-        call_id: rec.callId,
-        start_time: rec.startTime?.toISOString(),
-        duration_seconds: rec.durationSeconds ?? 0,
-        parsed,
-      },
-      transcription: transcriptionData,
+      start_time: rec.startTime?.toISOString(),
+      duration_seconds: rec.durationSeconds ?? 0,
+      recording_url: rec.recordingUrl,
+      recording_date: parsed.date || "",
+      recording_time: parsed.time || "",
+      from_number: parsed.from_number || "",
+      to_number: parsed.to_number || "",
+      total_chunks: chunks.length,
+      chunks,
     });
   }
 
-  return transcriptions;
+  return timeline;
 }
 
 interface AuditContextResult {
@@ -240,7 +255,7 @@ export async function buildAuditContext(
   const [audit, fiche, recordings] = await Promise.all([
     getAuditById(auditId),
     getCachedFiche(ficheId),
-    getRecordingsByFiche(ficheId),
+    getRecordingsWithTranscriptionChunksByFiche(ficheId),
   ]);
 
   if (!audit) {throw new Error("Audit not found");}
@@ -250,24 +265,20 @@ export async function buildAuditContext(
     prospect?: { prenom?: string; nom?: string };
     information?: { groupe?: string };
   };
-  const auditData = audit.resultData as {
-    audit?: {
-      config?: { name?: string };
-      results?: {
-        steps?: Array<{
-          step_metadata?: { name?: string; weight?: number };
-          conforme?: string;
-          score?: number;
-        }>;
-      };
-    };
-  };
+  const stepLines = Array.isArray(audit.stepResults)
+    ? audit.stepResults
+        .map((s, i) => {
+          const name = typeof s.stepName === "string" ? s.stepName : "Unknown";
+          const conforme = typeof s.conforme === "string" ? s.conforme : "N/A";
+          const score = typeof s.score === "number" ? s.score : 0;
+          const weight = typeof s.weight === "number" ? s.weight : 0;
+          return `${i + 1}. ${name}: ${conforme} (${score}/${weight})`;
+        })
+        .join("\n")
+    : "No step results";
 
   // DB-only (multi-replica safe)
-  const transcriptions = buildTranscriptionsFromRecordings(recordings);
-
-  // Generate timeline
-  const timeline = generateTimeline(transcriptions);
+  const timeline = buildTimelineFromRecordings(recordings);
   const timelineText = buildTimelineText(timeline);
 
   return {
@@ -277,10 +288,10 @@ export async function buildAuditContext(
 - ID: ${ficheId}
 - Prospect: ${ficheData.prospect?.prenom || ""} ${ficheData.prospect?.nom || ""}
 - Groupe: ${ficheData.information?.groupe || "N/A"}
-- Recordings: ${recordings.length} total (${transcriptions.length} transcribed)
+- Recordings: ${recordings.length} total (${timeline.length} transcribed)
 
 **Audit Results:**
-- Config: ${auditData.audit?.config?.name || "N/A"}
+- Config: ${audit.auditConfig?.name || "N/A"}
 - Score: ${audit.scorePercentage}% - ${audit.niveau}
 - Compliant: ${audit.isCompliant ? "YES" : "NO"}
 - Critical Points: ${audit.criticalPassed}/${audit.criticalTotal}
@@ -290,16 +301,7 @@ export async function buildAuditContext(
 - Tokens Used: ${audit.totalTokens?.toLocaleString() || 0}
 
 **Step Results:**
-${
-  auditData.audit?.results?.steps
-    ?.map(
-      (s, i) =>
-        `${i + 1}. ${s.step_metadata?.name || "Unknown"}: ${
-          s.conforme || "N/A"
-        } (${s.score || 0}/${s.step_metadata?.weight || 0})`
-    )
-    .join("\n") || "No step results"
-}
+${stepLines}
 
 ${timelineText}
 
@@ -346,11 +348,14 @@ export async function buildFicheContext(
 ): Promise<FicheContextResult> {
   const [fiche, recordings, audits] = await Promise.all([
     getCachedFiche(ficheId),
-    getRecordingsByFiche(ficheId),
+    getRecordingsWithTranscriptionChunksByFiche(ficheId),
     prisma.audit.findMany({
       where: { ficheCache: { ficheId } },
       orderBy: { createdAt: "desc" },
-      include: { stepResults: true },
+      include: {
+        auditConfig: { select: { name: true } },
+        stepResults: true,
+      },
     }),
   ]);
 
@@ -367,10 +372,7 @@ export async function buildFicheContext(
   };
 
   // DB-only (multi-replica safe)
-  const transcriptions = buildTranscriptionsFromRecordings(recordings);
-
-  // Generate timeline
-  const timeline = generateTimeline(transcriptions);
+  const timeline = buildTimelineFromRecordings(recordings);
   const timelineText = buildTimelineText(timeline);
 
   const totalDuration = recordings.reduce(
@@ -390,7 +392,7 @@ export async function buildFicheContext(
 
 **Recordings:**
 - Total: ${recordings.length}
-- Transcribed: ${transcriptions.length}
+- Transcribed: ${timeline.length}
 - Total Duration: ${Math.round(totalDuration / 60)} minutes
 
 ${timelineText}
@@ -400,10 +402,7 @@ ${
   audits.length > 0
     ? audits
         .map((a, i) => {
-          const auditData = a.resultData as {
-            audit?: { config?: { name?: string } };
-          };
-          return `${i + 1}. ${auditData.audit?.config?.name || "Unknown"} - ${
+          return `${i + 1}. ${a.auditConfig?.name || "Unknown"} - ${
             a.scorePercentage
           }% (${a.niveau})
    - Date: ${a.createdAt.toISOString().split("T")[0]}

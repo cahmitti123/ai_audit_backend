@@ -11,8 +11,8 @@ COPY package*.json ./
 COPY prisma.config.ts ./
 COPY prisma ./prisma/
 
-# Install dependencies
-RUN npm ci
+# Install dependencies (npm install is more forgiving than npm ci for edge cases)
+RUN npm install
 
 # Copy source code
 COPY . .

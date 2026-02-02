@@ -8,16 +8,14 @@ WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
+COPY prisma.config.ts ./
 COPY prisma ./prisma/
 
 # Install dependencies
-RUN npm install
+RUN npm ci
 
 # Copy source code
 COPY . .
-
-# Generate Prisma client
-RUN npx prisma generate
 
 # Build TypeScript (if needed)
 RUN npm run build || echo "No build step defined"
@@ -27,28 +25,22 @@ FROM node:20-alpine AS production
 
 WORKDIR /app
 
-# Install OpenSSL 3 for Prisma
-RUN apk add --no-cache openssl
+# Install OpenSSL 3 for Prisma and create a non-root user.
+# Create the user before COPY so we can use --chown and avoid an expensive chown -R.
+RUN apk add --no-cache openssl && \
+    addgroup -g 1001 -S nodejs && \
+    adduser -S -u 1001 -G nodejs nodejs
 
-# Install all dependencies (including tsx for runtime)
-COPY package*.json ./
-COPY prisma.config.ts ./
-COPY prisma ./prisma/
+# Runtime files (deps installed in builder and copied here)
+COPY --chown=nodejs:nodejs package*.json ./
+COPY --chown=nodejs:nodejs prisma.config.ts ./
+COPY --chown=nodejs:nodejs prisma ./prisma/
+COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 
-RUN npm install && \
-    npx prisma generate
-
-# Copy built artifacts from builder
-COPY --from=builder /app/src ./src
-COPY --from=builder /app/config ./config
-# COPY --from=builder /app/scripts ./scripts  # Directory doesn't exist
-
-# Create non-root user
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001
-
-# Change ownership
-RUN chown -R nodejs:nodejs /app
+# App code
+COPY --from=builder --chown=nodejs:nodejs /app/src ./src
+COPY --from=builder --chown=nodejs:nodejs /app/config ./config
+# COPY --from=builder --chown=nodejs:nodejs /app/scripts ./scripts  # Directory doesn't exist
 
 # Switch to non-root user
 USER nodejs

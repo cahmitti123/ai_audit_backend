@@ -48,6 +48,18 @@ services:
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
       - FICHE_API_BASE_URL=${FICHE_API_BASE_URL}
       - FICHE_API_AUTH_TOKEN=${FICHE_API_AUTH_TOKEN}
+      # User authentication (JWT + refresh tokens)
+      - JWT_ACCESS_SECRET=${JWT_ACCESS_SECRET}
+      - JWT_ISSUER=${JWT_ISSUER:-ai-audit}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:-ai-audit}
+      - AUTH_ACCESS_TTL_SECONDS=${AUTH_ACCESS_TTL_SECONDS:-900}
+      - AUTH_REFRESH_TTL_SECONDS=${AUTH_REFRESH_TTL_SECONDS:-2592000}
+      - AUTH_REFRESH_COOKIE_NAME=${AUTH_REFRESH_COOKIE_NAME:-refresh_token}
+      - AUTH_COOKIE_SECURE=${AUTH_COOKIE_SECURE}
+      - AUTH_COOKIE_SAMESITE=${AUTH_COOKIE_SAMESITE:-lax}
+      # Optional: seed an initial admin user (idempotent). Remove after first deploy if desired.
+      - AUTH_SEED_ADMIN_EMAIL=${AUTH_SEED_ADMIN_EMAIL}
+      - AUTH_SEED_ADMIN_PASSWORD=${AUTH_SEED_ADMIN_PASSWORD}
       # Optional AI/model tuning
       - OPENAI_MODEL_AUDIT=${OPENAI_MODEL_AUDIT:-gpt-5.2}
       - OPENAI_MODEL_CHAT=${OPENAI_MODEL_CHAT:-gpt-5.2}

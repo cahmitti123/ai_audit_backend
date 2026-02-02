@@ -6,6 +6,7 @@ import { cacheFicheSalesSummary } from "../../src/modules/fiches/fiches.cache.js
 import { disconnectDb,prisma } from "../../src/shared/prisma.js";
 import type { RecordingLike } from "../../src/utils/recording-parser.js";
 import { makeApp } from "../test-app.js";
+import { getTestAccessToken } from "../test-auth.js";
 import { isIntegrationEnabled, readIsoDate } from "./_integration.env.js";
 
 const describeIntegration = isIntegrationEnabled() ? describe : describe.skip;
@@ -31,7 +32,7 @@ async function findMissingSalesDateAfter(
   );
 }
 
-async function findRecentSalesDateWithFiches(app: ReturnType<typeof makeApp>) {
+async function findRecentSalesDateWithFiches(app: ReturnType<typeof makeApp>, token: string) {
   const maxLookback = Number.parseInt(
     process.env.INTEGRATION_SALES_LOOKBACK_DAYS || "30",
     10
@@ -43,9 +44,9 @@ async function findRecentSalesDateWithFiches(app: ReturnType<typeof makeApp>) {
     d.setUTCDate(d.getUTCDate() - i);
     const iso = d.toISOString().split("T")[0];
 
-    const res = await request(app).get(
-      `/api/fiches/search?date=${encodeURIComponent(iso)}&includeStatus=false`
-    );
+    const res = await request(app)
+      .get(`/api/fiches/search?date=${encodeURIComponent(iso)}&includeStatus=false`)
+      .set("Authorization", `Bearer ${token}`);
 
     // If CRM errors (rate limit / downtime), surface it immediately
     if (res.status >= 400) {
@@ -72,6 +73,7 @@ async function findRecentSalesDateWithFiches(app: ReturnType<typeof makeApp>) {
 
 describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => {
   let app: ReturnType<typeof makeApp>;
+  let token: string;
   let date: string;
   let ficheId: string;
   let ficheCle: string;
@@ -83,12 +85,14 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
     await prisma.$connect();
     app = makeApp();
 
-    date = readIsoDate("INTEGRATION_SALES_DATE") || (await findRecentSalesDateWithFiches(app));
+    token = await getTestAccessToken();
+    date =
+      readIsoDate("INTEGRATION_SALES_DATE") || (await findRecentSalesDateWithFiches(app, token));
 
     // 1) Use real endpoint to fetch the CRM sales list so we can discover real fiche IDs + cle
-    const salesRes = await request(app).get(
-      `/api/fiches/search?date=${encodeURIComponent(date)}&includeStatus=false`
-    );
+    const salesRes = await request(app)
+      .get(`/api/fiches/search?date=${encodeURIComponent(date)}&includeStatus=false`)
+      .set("Authorization", `Bearer ${token}`);
     expect(salesRes.status).toBe(200);
     expect(salesRes.body).toEqual(
       expect.objectContaining({
@@ -184,9 +188,9 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
   });
 
   it("GET /api/fiches/search (includeStatus=true) returns status and reflects hasData=true for cached fiche", async () => {
-    const res = await request(app).get(
-      `/api/fiches/search?date=${encodeURIComponent(date)}`
-    );
+    const res = await request(app)
+      .get(`/api/fiches/search?date=${encodeURIComponent(date)}`)
+      .set("Authorization", `Bearer ${token}`);
     expect(res.status).toBe(200);
     expect(res.body).toEqual(
       expect.objectContaining({
@@ -206,9 +210,12 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
   }, 120_000);
 
   it("POST /api/fiches/status/batch returns status map for cached fiche", async () => {
-    const res = await request(app).post("/api/fiches/status/batch").send({
-      ficheIds: [ficheId, "999999999999"],
-    });
+    const res = await request(app)
+      .post("/api/fiches/status/batch")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        ficheIds: [ficheId, "999999999999"],
+      });
     expect(res.status).toBe(200);
     expect(res.body).toEqual(
       expect.objectContaining({
@@ -227,9 +234,9 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
   });
 
   it("GET /api/fiches/status/by-date returns cached fiche for that sales date", async () => {
-    const res = await request(app).get(
-      `/api/fiches/status/by-date?date=${encodeURIComponent(date)}`
-    );
+    const res = await request(app)
+      .get(`/api/fiches/status/by-date?date=${encodeURIComponent(date)}`)
+      .set("Authorization", `Bearer ${token}`);
     expect(res.status).toBe(200);
     expect(res.body).toEqual(
       expect.objectContaining({
@@ -249,7 +256,9 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
 
   it("GET /api/fiches/:id upgrades cache to full details and writes recordings to DB", async () => {
     // 1) This call should fetch from CRM because cache is sales-list-only
-    const detailsRes = await request(app).get(`/api/fiches/${ficheId}`);
+    const detailsRes = await request(app)
+      .get(`/api/fiches/${ficheId}`)
+      .set("Authorization", `Bearer ${token}`);
     expect(detailsRes.status).toBe(200);
     expect(detailsRes.body).toEqual(
       expect.objectContaining({
@@ -270,7 +279,9 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
     expect(rawAfter._salesListOnly).toBeUndefined();
 
     // 3) Recordings endpoint should return a list (possibly empty)
-    const recRes = await request(app).get(`/api/recordings/${ficheId}`);
+    const recRes = await request(app)
+      .get(`/api/recordings/${ficheId}`)
+      .set("Authorization", `Bearer ${token}`);
     expect(recRes.status).toBe(200);
     expect(recRes.body).toEqual(
       expect.objectContaining({
@@ -281,7 +292,9 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
     );
 
     // 4) Cache metadata endpoint should now exist
-    const cacheRes = await request(app).get(`/api/fiches/${ficheId}/cache`);
+    const cacheRes = await request(app)
+      .get(`/api/fiches/${ficheId}/cache`)
+      .set("Authorization", `Bearer ${token}`);
     expect(cacheRes.status).toBe(200);
     expect(cacheRes.body).toEqual(
       expect.objectContaining({
@@ -294,7 +307,9 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
     );
 
     // 5) Status should say hasData=true
-    const statusRes = await request(app).get(`/api/fiches/${ficheId}/status`);
+    const statusRes = await request(app)
+      .get(`/api/fiches/${ficheId}/status`)
+      .set("Authorization", `Bearer ${token}`);
     expect(statusRes.status).toBe(200);
     expect(statusRes.body).toEqual(
       expect.objectContaining({
@@ -308,11 +323,13 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
   }, 180_000);
 
   it("GET /api/fiches/status/by-date-range creates a progressive job when at least one day is missing, and polling endpoints work", async () => {
-    const res = await request(app).get(
-      `/api/fiches/status/by-date-range?startDate=${encodeURIComponent(
-        date
-      )}&endDate=${encodeURIComponent(missingDate)}`
-    );
+    const res = await request(app)
+      .get(
+        `/api/fiches/status/by-date-range?startDate=${encodeURIComponent(
+          date
+        )}&endDate=${encodeURIComponent(missingDate)}`
+      )
+      .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual(
@@ -338,9 +355,9 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
     createdJobId = jobId;
 
     // Poll endpoint (frontend alternative to webhook)
-    const pollRes = await request(app).get(
-      `/api/fiches/webhooks/fiches?jobId=${encodeURIComponent(jobId)}`
-    );
+    const pollRes = await request(app)
+      .get(`/api/fiches/webhooks/fiches?jobId=${encodeURIComponent(jobId)}`)
+      .set("Authorization", `Bearer ${token}`);
     expect(pollRes.status).toBe(200);
     expect(pollRes.body).toEqual(
       expect.objectContaining({
@@ -356,7 +373,9 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
     );
 
     // Job details endpoint
-    const jobRes = await request(app).get(`/api/fiches/jobs/${jobId}`);
+    const jobRes = await request(app)
+      .get(`/api/fiches/jobs/${jobId}`)
+      .set("Authorization", `Bearer ${token}`);
     expect(jobRes.status).toBe(200);
     expect(jobRes.body).toEqual(
       expect.objectContaining({
@@ -371,7 +390,9 @@ describeIntegration("Integration: fiches endpoints (real CRM + real DB)", () => 
     );
 
     // Jobs list endpoint (should include the job, but don't over-assert ordering)
-    const listRes = await request(app).get("/api/fiches/jobs?limit=10");
+    const listRes = await request(app)
+      .get("/api/fiches/jobs?limit=10")
+      .set("Authorization", `Bearer ${token}`);
     expect(listRes.status).toBe(200);
     expect(listRes.body).toEqual(
       expect.objectContaining({

@@ -73,14 +73,26 @@ Automation runs now emit dedicated Pusher events on a job channel:
 **Frontend recommendation**:
 - Handle `503 SERVICE_UNAVAILABLE` and show “Batch audits unavailable (Redis not configured)”.
 
-### 5) Optional API token auth (can gate all `/api/*`)
+### 5) Authentication (JWT + RBAC) (new)
 
-If `API_AUTH_TOKEN` or `API_AUTH_TOKENS` is configured, then all `/api/*` requests (including Pusher auth + chat streaming endpoints) require either:
+All `/api/*` routes used by the frontend now require **authentication**.
 
-- `Authorization: Bearer <token>` **or**
-- `X-API-Key: <token>`
+- **User sessions (preferred)**:
+  - `POST /api/auth/login` → returns an **access token** (JWT)
+  - Send it on every API call: `Authorization: Bearer <access_token>`
+  - Use `GET /api/auth/me` to fetch current `roles` + `permissions` for UI gating.
+- **Refresh token (cookie, rotated)**:
+  - On login/refresh, the backend sets an HttpOnly cookie (default `refresh_token`, scoped to `Path=/api/auth`)
+  - Use it via:
+    - `POST /api/auth/refresh`
+    - `POST /api/auth/logout`
+  - Frontend must call those with `credentials: "include"` (or `withCredentials: true`) so cookies are stored/sent.
+- **Machine-to-machine token (optional)**:
+  - If `API_AUTH_TOKEN`/`API_AUTH_TOKENS` is configured, the backend also accepts:
+    - `Authorization: Bearer <api_token>` **or** `X-API-Key: <api_token>`
+  - Treat this as a server-side secret (do **not** use from browsers).
 
-(`GET /health` and `/api-docs*` stay public; `/api/inngest` is excluded.)
+Important: private channel auth (`POST /api/realtime/pusher/auth`) now requires a **user access token** and the `realtime.auth` permission (see realtime section below).
 
 ### 6) Webhook URL SSRF guard (automation + progressive fetch)
 
@@ -119,6 +131,8 @@ Examples (non-exhaustive):
   - `GET /api-docs` (Swagger UI)
   - `GET /api-docs.json` (OpenAPI JSON)
 - **API routers** (mounted in `src/app.ts`):
+  - `/api/auth/*` (JWT login/refresh/logout/me)
+  - `/api/admin/*` (users/roles/permissions management)
   - `/api/fiches/*`
   - `/api/recordings/*`
   - `/api/transcriptions/*`
@@ -128,7 +142,6 @@ Examples (non-exhaustive):
   - `/api/products/*`
   - `/api/realtime/*` (Pusher Channels)
   - `/api/*` (chat endpoints are mounted here)
-  - `/api/webhooks/*` (testing endpoints)
   - `/api/inngest/*` (**internal** Inngest handler; not intended for frontend)
 
 ### CORS (browser access)
@@ -171,20 +184,37 @@ Notes:
 
 ### Auth / permissions
 
-This backend does **not** implement user/org auth (no JWT/session/tenant membership checks).
+This backend implements **user authentication** (JWT) and **RBAC** (roles/permissions).
 
-However, it supports an **optional API token** middleware:
+#### Access token (JWT)
+- Obtain via:
+  - `POST /api/auth/login` (email/password), or
+  - `POST /api/auth/refresh` (refresh cookie / refresh token rotation)
+- Send on every authenticated API request:
+  - `Authorization: Bearer <access_token>`
 
-- If `API_AUTH_TOKEN` or `API_AUTH_TOKENS` is set, then **all** `/api/*` routes require a token:
-  - `Authorization: Bearer <token>` or `X-API-Key: <token>`
-- Exceptions:
-  - `/api/inngest` is excluded (Inngest uses its own signing)
-  - `/health` and `/api-docs*` are not under `/api` and remain public
+#### Refresh token (cookie, rotated)
+- On login/refresh, the backend sets an HttpOnly cookie (default name `refresh_token`, `Path=/api/auth`).
+- Browser clients must call refresh/logout with credentials enabled:
+  - `fetch(..., { credentials: "include" })`
+- Refresh tokens are **rotated** on every refresh.
 
-If you enable the API token, the frontend must attach the token to:
-- normal REST calls
-- `/api/realtime/pusher/auth`
-- chat streaming endpoints (`/api/*/chat`)
+#### Roles/permissions (for UI gating)
+- `GET /api/auth/me` returns `roles` + `permissions`.
+- Some backend endpoints enforce permissions (e.g. `realtime.auth`, admin endpoints).
+- `403` responses use `code: "AUTHORIZATION_ERROR"`.
+
+#### Machine API token (optional)
+- If `API_AUTH_TOKEN` or `API_AUTH_TOKENS` is set, the backend also accepts:
+  - `Authorization: Bearer <api_token>` or `X-API-Key: <api_token>`
+- In code, API tokens are treated as **trusted callers** and bypass `requirePermission()` checks.
+  - Do **not** use API tokens from browsers.
+
+#### Protected routes (summary)
+- All `/api/*` routes are protected **except**:
+  - `/api/auth/*` (bootstrap/login/refresh)
+  - `/api/inngest/*` (Inngest uses its own signing)
+- `GET /health` and `/api-docs*` remain public.
 
 ---
 
@@ -215,6 +245,115 @@ Below is the **full list** of routes defined in `src/modules/*/*.routes.ts` plus
 - **Purpose**: Swagger UI + OpenAPI JSON exported from JSDoc comments (`swagger-jsdoc` scans `./src/app.ts` and `./src/modules/**/*.routes.ts`).
 - **OpenAPI version**: `3.0.0` (see `src/config/swagger.ts`).
 - **Repo copy (last exported from a running server)**: `docs/openapi.swagger.json`
+
+---
+
+## Authentication API (`/api/auth/*`)
+
+### POST `/api/auth/login`
+
+- **Purpose**: login with email/password and receive an access token (JWT). Also sets refresh cookie.
+- **Auth**: none (bootstrap).
+- **Body**:
+
+```json
+{ "email": "admin@example.com", "password": "change-me" }
+```
+
+- **Response 200** (`success` wrapper; access token in JSON, refresh token in cookie):
+
+```json
+{
+  "success": true,
+  "data": {
+    "access_token": "eyJ...",
+    "token_type": "Bearer",
+    "expires_in": 900,
+    "user": {
+      "id": "1",
+      "email": "admin@example.com",
+      "roles": ["admin"],
+      "permissions": ["realtime.auth", "audits.read"]
+    }
+  }
+}
+```
+
+Notes:
+- The refresh cookie is scoped to `Path=/api/auth`, so it is only sent to `/api/auth/*`.
+- For cross-origin frontends, call login with `credentials: "include"` so the browser accepts `Set-Cookie`.
+
+### POST `/api/auth/refresh`
+
+- **Purpose**: rotate refresh token and return a new access token (JWT).
+- **Auth**: requires refresh cookie by default.
+- **Body**:
+  - Optional `refresh_token` for non-cookie clients (CLI/tests).
+
+```json
+{ "refresh_token": "optional" }
+```
+
+- **Response 200**: same shape as login.
+
+### POST `/api/auth/logout`
+
+- **Purpose**: revoke refresh token and clear refresh cookie.
+- **Auth**: requires refresh cookie by default.
+- **Response 200**:
+
+```json
+{ "success": true, "data": { "logged_out": true } }
+```
+
+### GET `/api/auth/me`
+
+- **Purpose**: returns current user identity + roles/permissions (use for UI gating).
+- **Auth**: requires access token:
+  - `Authorization: Bearer <access_token>`
+- **Response 200**:
+
+```json
+{
+  "success": true,
+  "data": {
+    "user": {
+      "id": "1",
+      "email": "admin@example.com",
+      "roles": ["admin"],
+      "permissions": ["realtime.auth", "audits.read"]
+    }
+  }
+}
+```
+
+---
+
+## Admin API (`/api/admin/*`)
+
+These endpoints are intended for an admin UI and require RBAC permissions:
+- `admin.users`
+- `admin.roles`
+- `admin.permissions`
+
+### GET `/api/admin/users`
+- **Response 200**: `{ success:true, data:{ users:[...], count } }`
+
+### POST `/api/admin/users`
+- **Body**:
+
+```json
+{ "email": "user@example.com", "password": "change-me", "role_keys": ["viewer"] }
+```
+
+### PATCH `/api/admin/users/:userId`
+- **Body**: one of `status`, `password`, `role_keys`.
+
+### GET `/api/admin/roles`
+### GET `/api/admin/permissions`
+
+Note:
+- If you authenticate with an API token (when `API_AUTH_TOKEN(S)` is configured), permission checks are bypassed (treated as a trusted caller). Browsers should use user JWTs instead.
 
 ---
 
@@ -1126,9 +1265,15 @@ This backend can publish realtime events via **Pusher Channels**.
 
 - **Purpose**: sign subscriptions for **private/presence** channels (Pusher JS `authEndpoint`).
 - **Auth**:
-  - If API token auth is **disabled**, this endpoint is public and only validates channel naming.
-  - If API token auth is **enabled**, you must include `Authorization: Bearer <token>` (or `X-API-Key`) or you will receive `401`.
-  - Note: this is **not user membership validation**; it’s only a shared-token gate + naming allowlist.
+  - Requires a **user access token** (JWT) via `Authorization: Bearer <access_token>`.
+  - Requires permission: `realtime.auth`.
+  - `user_id` for presence channels is derived from the JWT; client-provided `user_id` is ignored.
+- **Authorization rules (coarse RBAC by channel kind)**:
+  - `private-audit-*` requires `audits.read`
+  - `private-fiche-*` requires `fiches.read`
+  - `private-job-*` requires one of: `automation.read` / `audits.read` / `fiches.read`
+  - `private-global` and `presence-global` are allowed for users with `realtime.auth`
+  - `presence-org-*` requires `automation.read`
 - **Body**:
 
 ```json
@@ -1144,6 +1289,7 @@ This backend can publish realtime events via **Pusher Channels**.
 ### POST `/api/realtime/pusher/test`
 
 - **Purpose**: publish a simple event for quick end-to-end verification.
+- **Auth**: required (any authenticated caller; in practice use a user JWT).
 - **Body** (optional):
   - `channel` (default: `private-realtime-test` or `realtime-test`)
   - `event` (default: `realtime.test`)
@@ -1224,6 +1370,38 @@ export type ApiErrorResponse = {
   message?: string;
   stack?: string; // dev only
 };
+
+export type ApiSuccessResponse<T> = {
+  success: true;
+  data: T;
+};
+
+// --------------------------------------------
+// Authentication (JWT)
+// --------------------------------------------
+
+export type AuthUserDto = {
+  id: string; // BigInt serialized as string
+  email: string;
+  roles: string[];
+  permissions: string[];
+};
+
+export type AuthTokensDto = {
+  access_token: string;
+  token_type: "Bearer";
+  expires_in: number; // seconds
+  user: AuthUserDto;
+};
+
+export type LoginRequest = { email: string; password: string };
+export type LoginResponse = ApiSuccessResponse<AuthTokensDto>;
+
+export type RefreshRequest = { refresh_token?: string };
+export type RefreshResponse = ApiSuccessResponse<AuthTokensDto>;
+
+export type LogoutResponse = ApiSuccessResponse<{ logged_out: true }>;
+export type MeResponse = ApiSuccessResponse<{ user: AuthUserDto }>;
 
 // --------------------------------------------
 // Health
@@ -1518,6 +1696,11 @@ export type ChatCitation = {
 ## Frontend action list (practical)
 
 - **Base URL**: keep using `http://localhost:3002` (or the load balancer URL in prod). API paths stay the same.
+- **Authentication**:
+  - Call `POST /api/auth/login` → store `access_token` (JWT) in memory.
+  - Attach `Authorization: Bearer <access_token>` to **all** `/api/*` calls (including `POST /api/realtime/pusher/auth`).
+  - When you get a `401` due to expiry, call `POST /api/auth/refresh` (with `credentials: "include"`) then retry the failed call.
+  - On logout, call `POST /api/auth/logout` (with `credentials: "include"`) and clear the in-memory access token.
 - **Progressive fetch**:
   - Call `GET /api/fiches/status/by-date-range?...`
   - If `meta.backgroundJobId` exists, either:

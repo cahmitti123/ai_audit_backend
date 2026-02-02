@@ -95,6 +95,72 @@ This document explains **what each variable does**, **what happens if it’s mis
 
 ---
 
+## User authentication (JWT + RBAC)
+
+This backend supports **user sessions** using:
+- **Access token**: JWT, sent as `Authorization: Bearer <jwt>`
+- **Refresh token**: DB-backed, **rotated** on refresh (cookie-friendly)
+
+Auth endpoints:
+- `POST /api/auth/login`
+- `POST /api/auth/refresh`
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
+
+Admin endpoints (require permissions):
+- `GET/POST/PATCH /api/admin/users...`
+- `GET /api/admin/roles`
+- `GET /api/admin/permissions`
+
+### `JWT_ACCESS_SECRET`
+- **What it does**: HMAC secret used to sign/verify JWT access tokens.
+- **If missing**: JWT auth will fail (login/refresh/me will error).
+- **Where to get it**: generate a random secret (example: `openssl rand -hex 32`).
+
+### `JWT_ISSUER`
+- **What it does**: JWT `iss` claim used to validate tokens.
+- **If missing**: defaults to `"ai-audit"`.
+- **Where to get it**: you choose the value (keep consistent across environments).
+
+### `JWT_AUDIENCE`
+- **What it does**: JWT `aud` claim used to validate tokens.
+- **If missing**: defaults to `"ai-audit"`.
+- **Where to get it**: you choose the value (keep consistent across environments).
+
+### `AUTH_ACCESS_TTL_SECONDS`
+- **What it does**: Access token TTL in seconds.
+- **If missing**: defaults to 900 (15 minutes).
+- **Where to get it**: you choose the value.
+
+### `AUTH_REFRESH_TTL_SECONDS`
+- **What it does**: Refresh token TTL in seconds.
+- **If missing**: defaults to 2,592,000 (30 days).
+- **Where to get it**: you choose the value.
+
+### `AUTH_REFRESH_COOKIE_NAME`
+- **What it does**: Cookie name used for refresh tokens (when using cookies).
+- **If missing**: defaults to `"refresh_token"`.
+- **Where to get it**: you choose the value.
+
+### `AUTH_COOKIE_SECURE`
+- **What it does**: Sets the refresh cookie `Secure` attribute.
+- **If missing**: defaults to `true` in production, `false` otherwise.
+- **Where to get it**: set to `"1"` in production when using HTTPS.
+
+### `AUTH_COOKIE_SAMESITE`
+- **What it does**: Sets the refresh cookie `SameSite` attribute (`lax|strict|none`).
+- **If missing**: defaults to `"lax"`.
+- **Where to get it**:
+  - same-site frontend/backend: `"lax"` is usually OK
+  - cross-site frontend/backend: use `"none"` **and** `AUTH_COOKIE_SECURE="1"`
+
+### `AUTH_SEED_ADMIN_EMAIL` / `AUTH_SEED_ADMIN_PASSWORD`
+- **What it does**: When set, `npm run seed` creates (or updates) an initial admin user and assigns the `admin` role.
+- **If missing**: user seeding is skipped (roles/permissions are still created).
+- **Where to get it**: you choose values (do not commit real credentials).
+
+---
+
 ## AI (OpenAI / Anthropic)
 
 ### `OPENAI_API_KEY`

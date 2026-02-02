@@ -21,13 +21,17 @@ import { swaggerSpec } from "./config/swagger.js";
 // Inngest
 import { inngest } from "./inngest/client.js";
 import { functions } from "./inngest/index.js";
-// Optional API auth
 import { apiAuthMiddleware } from "./middleware/api-auth.js";
+// Optional API auth
+import { authContextMiddleware } from "./middleware/auth-context.js";
+import { requireAuth } from "./middleware/authz.js";
 import { errorHandler } from "./middleware/error-handler.js";
 // Error handling
 import { notFoundHandler } from "./middleware/not-found.js";
+import { adminRouter } from "./modules/admin/index.js";
 import { auditConfigsRouter } from "./modules/audit-configs/index.js";
 import { auditRerunRouter,auditsRouter } from "./modules/audits/index.js";
+import { authRouter } from "./modules/auth/index.js";
 import { automationRouter } from "./modules/automation/index.js";
 import { chatRouter } from "./modules/chat/index.js";
 // Module routers
@@ -61,6 +65,9 @@ export function createApp() {
     })
   );
   app.use(express.json({ limit: "50mb" })); // Increase limit for Inngest workflows with large timelines
+
+  // Parse credentials (JWT/API token) into `req.auth`.
+  app.use(authContextMiddleware);
 
   // Optional API authentication (disabled unless API_AUTH_TOKEN(S) is set)
   app.use(apiAuthMiddleware);
@@ -98,16 +105,18 @@ export function createApp() {
   });
 
   // Register module routes
-  app.use("/api/fiches", fichesRouter);
-  app.use("/api/recordings", recordingsRouter);
-  app.use("/api/transcriptions", transcriptionsRouter);
-  app.use("/api/audit-configs", auditConfigsRouter);
-  app.use("/api/audits", auditsRouter);
-  app.use("/api/audits", auditRerunRouter); // Step re-run endpoints
-  app.use("/api/automation", automationRouter);
-  app.use("/api/products", productsRouter);
-  app.use("/api/realtime", realtimeRouter);
-  app.use("/api", chatRouter);
+  app.use("/api/auth", authRouter);
+  app.use("/api/admin", requireAuth(), adminRouter);
+  app.use("/api/fiches", requireAuth(), fichesRouter);
+  app.use("/api/recordings", requireAuth(), recordingsRouter);
+  app.use("/api/transcriptions", requireAuth(), transcriptionsRouter);
+  app.use("/api/audit-configs", requireAuth(), auditConfigsRouter);
+  app.use("/api/audits", requireAuth(), auditsRouter);
+  app.use("/api/audits", requireAuth(), auditRerunRouter); // Step re-run endpoints
+  app.use("/api/automation", requireAuth(), automationRouter);
+  app.use("/api/products", requireAuth(), productsRouter);
+  app.use("/api/realtime", requireAuth(), realtimeRouter);
+  app.use("/api", requireAuth(), chatRouter);
 
   // 404 + error handling (keep last)
   app.use(notFoundHandler);

@@ -2,6 +2,7 @@ import request from "supertest";
 import { describe, expect, it } from "vitest";
 
 import { makeApp } from "./test-app.js";
+import { getTestAccessToken } from "./test-auth.js";
 
 describe("HTTP core", () => {
   it("GET /health returns ok + instance header", async () => {
@@ -43,7 +44,10 @@ describe("HTTP core", () => {
   it("Unknown /api route returns structured 404", async () => {
     const app = makeApp();
 
-    const res = await request(app).get("/api/does-not-exist");
+    const token = await getTestAccessToken();
+    const res = await request(app)
+      .get("/api/does-not-exist")
+      .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(404);
     expect(res.body).toEqual(

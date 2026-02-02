@@ -1,57 +1,9 @@
-import { timingSafeEqual } from "node:crypto";
-
 import type { RequestHandler } from "express";
 
-import { AuthenticationError } from "../shared/errors.js";
-
-function uniq(values: string[]): string[] {
-  return Array.from(new Set(values));
-}
-
-function getConfiguredTokens(): string[] {
-  const single = (process.env.API_AUTH_TOKEN || "").trim();
-  const multi = (process.env.API_AUTH_TOKENS || "").trim();
-
-  const tokens = [
-    ...(single ? [single] : []),
-    ...(multi
-      ? multi
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : []),
-  ];
-
-  return uniq(tokens);
-}
-
-function safeEqual(a: string, b: string): boolean {
-  const aa = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (aa.length !== bb.length) {return false;}
-  return timingSafeEqual(aa, bb);
-}
-
-function extractBearerToken(value: unknown): string | null {
-  if (typeof value !== "string") {return null;}
-  const v = value.trim();
-  if (!v) {return null;}
-  const m = /^Bearer\s+(.+)$/i.exec(v);
-  if (!m) {return null;}
-  const token = m[1]?.trim();
-  return token ? token : null;
-}
-
-function extractApiTokenFromRequest(req: Parameters<RequestHandler>[0]): string | null {
-  const authHeader = req.headers.authorization;
-  const bearer = extractBearerToken(authHeader);
-  if (bearer) {return bearer;}
-
-  const apiKey = req.headers["x-api-key"];
-  if (typeof apiKey === "string" && apiKey.trim()) {return apiKey.trim();}
-
-  return null;
-}
+import { extractApiTokenFromRequest, getConfiguredApiTokens, isValidApiToken } from "../shared/api-tokens.js";
+import { extractBearerToken, verifyAccessToken } from "../shared/auth.js";
+import { getRequestAuth } from "../shared/auth-context.js";
+import { AuthenticationError, ConfigurationError } from "../shared/errors.js";
 
 /**
  * Optional API authentication middleware.
@@ -66,7 +18,7 @@ function extractApiTokenFromRequest(req: Parameters<RequestHandler>[0]): string 
  * - `API_AUTH_TOKENS="token1,token2"` (for rotation)
  */
 export const apiAuthMiddleware: RequestHandler = (req, _res, next) => {
-  const tokens = getConfiguredTokens();
+  const tokens = getConfiguredApiTokens();
   if (tokens.length === 0) {return next();}
 
   // Only protect API routes; `/health` stays public.
@@ -76,16 +28,24 @@ export const apiAuthMiddleware: RequestHandler = (req, _res, next) => {
   // Inngest endpoint has its own auth/signing; do not require the API token here.
   if (path.startsWith("/api/inngest")) {return next();}
 
+  // Auth endpoints must remain reachable to bootstrap user sessions.
+  if (path.startsWith("/api/auth")) {return next();}
+
+  // If auth context was already established (JWT or API token), allow.
+  if (getRequestAuth(req)) {return next();}
+
+  // Fallback: validate credentials directly (useful if middleware ordering changes).
   const provided = extractApiTokenFromRequest(req);
-  const ok =
-    typeof provided === "string" &&
-    provided.length > 0 &&
-    tokens.some((t) => safeEqual(provided, t));
+  if (provided && isValidApiToken(provided)) {return next();}
 
-  if (!ok) {
-    return next(new AuthenticationError("Missing or invalid API token"));
-  }
+  const bearer = extractBearerToken(req.headers.authorization);
+  if (!bearer) {return next(new AuthenticationError("Missing or invalid credentials"));}
 
-  return next();
+  void verifyAccessToken(bearer)
+    .then(() => next())
+    .catch((err: unknown) => {
+      if (err instanceof ConfigurationError) {return next(err);}
+      return next(new AuthenticationError("Missing or invalid credentials"));
+    });
 };
 

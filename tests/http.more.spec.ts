@@ -2,13 +2,17 @@ import request from "supertest";
 import { describe, expect, it } from "vitest";
 
 import { makeApp } from "./test-app.js";
+import { getTestAccessToken } from "./test-auth.js";
 import { withTestServer } from "./test-server.js";
 
 describe("More HTTP endpoints (DB-free)", () => {
   it("GET /api/automation/diagnostic returns diagnostics payload", async () => {
     const app = makeApp();
 
-    const res = await request(app).get("/api/automation/diagnostic");
+    const token = await getTestAccessToken();
+    const res = await request(app)
+      .get("/api/automation/diagnostic")
+      .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual(
@@ -32,7 +36,11 @@ describe("More HTTP endpoints (DB-free)", () => {
   it("Legacy /api/webhooks routes are removed -> 404", async () => {
     const app = makeApp();
 
-    const res = await request(app).post("/api/webhooks/test").send({});
+    const token = await getTestAccessToken();
+    const res = await request(app)
+      .post("/api/webhooks/test")
+      .set("Authorization", `Bearer ${token}`)
+      .send({});
 
     expect(res.status).toBe(404);
     expect(res.body).toEqual(
@@ -45,7 +53,12 @@ describe("More HTTP endpoints (DB-free)", () => {
 
   it("Legacy SSE /api/realtime/* streaming routes are removed -> 404", async () => {
     await withTestServer(async ({ baseUrl }) => {
-      const res = await fetch(`${baseUrl}/api/realtime/jobs/test-job-1`);
+      const token = await getTestAccessToken();
+      const res = await fetch(`${baseUrl}/api/realtime/jobs/test-job-1`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
       expect(res.status).toBe(404);
       await res.body?.cancel();
     });

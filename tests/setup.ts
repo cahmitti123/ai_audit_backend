@@ -19,6 +19,11 @@ if (process.env.RUN_INTEGRATION_TESTS === "1") {
 // Ensure consistent env
 process.env.NODE_ENV = "test";
 
+// Auth (JWT) defaults for unit tests
+process.env.JWT_ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || "test-jwt-access-secret";
+process.env.JWT_ISSUER = process.env.JWT_ISSUER || "ai-audit";
+process.env.JWT_AUDIENCE = process.env.JWT_AUDIENCE || "ai-audit";
+
 // Inngest: force dev-mode so it doesn't require cloud keys in tests
 process.env.INNGEST_DEV = "1";
 

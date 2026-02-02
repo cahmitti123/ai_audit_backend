@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { __resetPusherClientForTests } from "../src/shared/pusher.js";
 import { makeApp } from "./test-app.js";
+import { getTestAccessToken } from "./test-auth.js";
 
 describe("Realtime (Pusher)", () => {
   const originalEnv: Partial<Record<string, string | undefined>> = {};
@@ -40,8 +41,10 @@ describe("Realtime (Pusher)", () => {
   it("POST /api/realtime/pusher/auth returns Pusher auth for allowed private channels", async () => {
     const app = makeApp();
 
+    const token = await getTestAccessToken();
     const res = await request(app)
       .post("/api/realtime/pusher/auth")
+      .set("Authorization", `Bearer ${token}`)
       .send({ socket_id: "123.456", channel_name: "private-audit-audit-123" });
 
     expect(res.status).toBe(200);
@@ -55,8 +58,10 @@ describe("Realtime (Pusher)", () => {
   it("POST /api/realtime/pusher/auth rejects invalid channel names", async () => {
     const app = makeApp();
 
+    const token = await getTestAccessToken();
     const res = await request(app)
       .post("/api/realtime/pusher/auth")
+      .set("Authorization", `Bearer ${token}`)
       .send({ socket_id: "123.456", channel_name: "private-audit-bad:chars" });
 
     expect(res.status).toBe(400);
@@ -71,8 +76,10 @@ describe("Realtime (Pusher)", () => {
   it("POST /api/realtime/pusher/auth rejects disallowed channels", async () => {
     const app = makeApp();
 
+    const token = await getTestAccessToken();
     const res = await request(app)
       .post("/api/realtime/pusher/auth")
+      .set("Authorization", `Bearer ${token}`)
       .send({ socket_id: "123.456", channel_name: "private-admin-123" });
 
     expect(res.status).toBe(403);
@@ -87,8 +94,10 @@ describe("Realtime (Pusher)", () => {
   it("POST /api/realtime/pusher/test succeeds (dry-run)", async () => {
     const app = makeApp();
 
+    const token = await getTestAccessToken();
     const res = await request(app)
       .post("/api/realtime/pusher/test")
+      .set("Authorization", `Bearer ${token}`)
       .send({ channel: "realtime-test", event: "realtime.test", payload: { ok: true } });
 
     expect(res.status).toBe(200);

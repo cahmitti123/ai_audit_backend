@@ -1,6 +1,8 @@
 import { type Request, type Response,Router } from "express";
 
 import { asyncHandler } from "../../middleware/async-handler.js";
+import { requirePermission, requireUserAuth } from "../../middleware/authz.js";
+import { getRequestAuth, isUserAuth } from "../../shared/auth-context.js";
 import { ValidationError } from "../../shared/errors.js";
 import {
   getPusherClient,
@@ -26,6 +28,8 @@ export const realtimeRouter = Router();
  */
 realtimeRouter.post(
   "/pusher/auth",
+  requireUserAuth(),
+  requirePermission("realtime.auth"),
   asyncHandler(async (req: Request, res: Response) => {
     const input = validatePusherAuthInput(req.body);
 
@@ -49,24 +53,49 @@ realtimeRouter.post(
       });
     }
 
+    const userAuth = getRequestAuth(req);
+    if (!isUserAuth(userAuth)) {
+      // Should be unreachable due to requireUserAuth(), but keep defensive.
+      throw new ValidationError("User auth required");
+    }
+
     const isPresence = input.channel_name.startsWith("presence-");
-    if (isPresence && !input.user_id) {
-      throw new ValidationError("user_id is required for presence channels");
+
+    // Additional coarse RBAC checks by channel kind (resource-level checks can be added later).
+    const has = (perm: string) => userAuth.permissions.includes(perm);
+    const ch = input.channel_name;
+    const allowed =
+      ch === "private-global" ||
+      ch === "presence-global" ||
+      (ch.startsWith("private-audit-") && has("audits.read")) ||
+      (ch.startsWith("private-fiche-") && has("fiches.read")) ||
+      (ch.startsWith("private-job-") && (has("automation.read") || has("audits.read") || has("fiches.read"))) ||
+      (ch.startsWith("presence-org-") && has("automation.read"));
+
+    if (!allowed) {
+      return res.status(403).json({
+        success: false,
+        error: "Forbidden",
+      });
     }
 
     // Pusher expects the raw auth response (not wrapped in {success:true}).
-    const auth = pusher.authorizeChannel(
+    const pusherAuth = pusher.authorizeChannel(
       input.socket_id,
       input.channel_name,
       isPresence
         ? {
-            user_id: input.user_id!,
-            user_info: input.user_info || {},
+            user_id: userAuth.userId,
+            user_info: {
+              ...(input.user_info || {}),
+              email: userAuth.email,
+              roles: userAuth.roles,
+            },
           }
         : undefined
     );
 
-    return res.json(auth);
+    return res.json(pusherAuth);
   })
 );
 

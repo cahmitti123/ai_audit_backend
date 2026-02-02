@@ -1,15 +1,22 @@
 import request from "supertest";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import { makeApp } from "./test-app.js";
+import { getTestAccessToken } from "./test-auth.js";
 
 describe("HTTP validation (no DB required)", () => {
+  let token = "";
+
+  beforeAll(async () => {
+    token = await getTestAccessToken();
+  });
+
   it("GET /api/fiches/status/by-date-range missing startDate -> 400", async () => {
     const app = makeApp();
 
-    const res = await request(app).get(
-      "/api/fiches/status/by-date-range?endDate=2025-12-01"
-    );
+    const res = await request(app)
+      .get("/api/fiches/status/by-date-range?endDate=2025-12-01")
+      .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual(
@@ -24,9 +31,9 @@ describe("HTTP validation (no DB required)", () => {
   it("GET /api/fiches/status/by-date-range invalid date format -> 400", async () => {
     const app = makeApp();
 
-    const res = await request(app).get(
-      "/api/fiches/status/by-date-range?startDate=2025-1-1&endDate=2025-12-01"
-    );
+    const res = await request(app)
+      .get("/api/fiches/status/by-date-range?startDate=2025-1-1&endDate=2025-12-01")
+      .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual(
@@ -41,9 +48,9 @@ describe("HTTP validation (no DB required)", () => {
   it("GET /api/fiches/status/by-date-range startDate after endDate -> 400", async () => {
     const app = makeApp();
 
-    const res = await request(app).get(
-      "/api/fiches/status/by-date-range?startDate=2025-12-10&endDate=2025-12-01"
-    );
+    const res = await request(app)
+      .get("/api/fiches/status/by-date-range?startDate=2025-12-10&endDate=2025-12-01")
+      .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual(
@@ -58,9 +65,11 @@ describe("HTTP validation (no DB required)", () => {
   it("GET /api/fiches/status/by-date-range blocks private IP webhookUrl -> 400", async () => {
     const app = makeApp();
 
-    const res = await request(app).get(
-      "/api/fiches/status/by-date-range?startDate=2025-12-01&endDate=2025-12-01&webhookUrl=http%3A%2F%2F10.0.0.1%2Fhook"
-    );
+    const res = await request(app)
+      .get(
+        "/api/fiches/status/by-date-range?startDate=2025-12-01&endDate=2025-12-01&webhookUrl=http%3A%2F%2F10.0.0.1%2Fhook"
+      )
+      .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual(
@@ -75,7 +84,10 @@ describe("HTTP validation (no DB required)", () => {
   it("POST /api/fiches/status/batch missing ficheIds -> 400", async () => {
     const app = makeApp();
 
-    const res = await request(app).post("/api/fiches/status/batch").send({});
+    const res = await request(app)
+      .post("/api/fiches/status/batch")
+      .set("Authorization", `Bearer ${token}`)
+      .send({});
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual(
@@ -90,7 +102,10 @@ describe("HTTP validation (no DB required)", () => {
   it("POST /api/transcriptions/batch missing fiche_ids -> 400", async () => {
     const app = makeApp();
 
-    const res = await request(app).post("/api/transcriptions/batch").send({});
+    const res = await request(app)
+      .post("/api/transcriptions/batch")
+      .set("Authorization", `Bearer ${token}`)
+      .send({});
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual(
@@ -104,7 +119,10 @@ describe("HTTP validation (no DB required)", () => {
   it("POST /api/audits/run missing fields -> 400", async () => {
     const app = makeApp();
 
-    const res = await request(app).post("/api/audits/run").send({});
+    const res = await request(app)
+      .post("/api/audits/run")
+      .set("Authorization", `Bearer ${token}`)
+      .send({});
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual(
@@ -119,7 +137,10 @@ describe("HTTP validation (no DB required)", () => {
   it("POST /api/automation/trigger missing scheduleId -> 400 (schema validator)", async () => {
     const app = makeApp();
 
-    const res = await request(app).post("/api/automation/trigger").send({});
+    const res = await request(app)
+      .post("/api/automation/trigger")
+      .set("Authorization", `Bearer ${token}`)
+      .send({});
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual(
@@ -136,6 +157,7 @@ describe("HTTP validation (no DB required)", () => {
 
     const res = await request(app)
       .post("/api/fiches/1762209/chat")
+      .set("Authorization", `Bearer ${token}`)
       .send({ message: "" });
 
     expect(res.status).toBe(400);
@@ -153,6 +175,7 @@ describe("HTTP validation (no DB required)", () => {
 
     const res = await request(app)
       .post("/api/audits/not-a-bigint/chat")
+      .set("Authorization", `Bearer ${token}`)
       .send({ message: "hello" });
 
     expect(res.status).toBe(400);
@@ -170,6 +193,7 @@ describe("HTTP validation (no DB required)", () => {
 
     const res = await request(app)
       .patch("/api/audits/not-a-bigint/steps/1/review")
+      .set("Authorization", `Bearer ${token}`)
       .send({ conforme: "CONFORME" });
 
     expect(res.status).toBe(400);
@@ -187,6 +211,7 @@ describe("HTTP validation (no DB required)", () => {
 
     const res = await request(app)
       .patch("/api/audits/1/steps/not-an-int/review")
+      .set("Authorization", `Bearer ${token}`)
       .send({ conforme: "CONFORME" });
 
     expect(res.status).toBe(400);
@@ -204,6 +229,7 @@ describe("HTTP validation (no DB required)", () => {
 
     const res = await request(app)
       .patch("/api/audits/1/steps/1/review")
+      .set("Authorization", `Bearer ${token}`)
       .send({});
 
     expect(res.status).toBe(400);
@@ -219,7 +245,9 @@ describe("HTTP validation (no DB required)", () => {
   it("GET /api/audits/control-points/statuses returns allowed checkpoint statuses", async () => {
     const app = makeApp();
 
-    const res = await request(app).get("/api/audits/control-points/statuses");
+    const res = await request(app)
+      .get("/api/audits/control-points/statuses")
+      .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual(
@@ -235,9 +263,9 @@ describe("HTTP validation (no DB required)", () => {
   it("GET /api/audits/:audit_id/steps/:step_position/control-points/:control_point_index invalid control_point_index -> 400", async () => {
     const app = makeApp();
 
-    const res = await request(app).get(
-      "/api/audits/1/steps/1/control-points/not-an-int"
-    );
+    const res = await request(app)
+      .get("/api/audits/1/steps/1/control-points/not-an-int")
+      .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual(
@@ -254,6 +282,7 @@ describe("HTTP validation (no DB required)", () => {
 
     const res = await request(app)
       .patch("/api/audits/not-a-bigint/steps/1/control-points/1/review")
+      .set("Authorization", `Bearer ${token}`)
       .send({ statut: "PRESENT" });
 
     expect(res.status).toBe(400);
@@ -271,6 +300,7 @@ describe("HTTP validation (no DB required)", () => {
 
     const res = await request(app)
       .patch("/api/audits/1/steps/1/control-points/1/review")
+      .set("Authorization", `Bearer ${token}`)
       .send({});
 
     expect(res.status).toBe(400);

@@ -11,7 +11,9 @@ export default defineConfig({
   datasource: {
     // Prisma ORM v7+ expects the datasource URL to live in prisma.config.ts (not schema.prisma).
     // Prefer a direct connection for migrations when available.
-    url: process.env.DIRECT_URL ?? process.env.DATABASE_URL ?? "",
+    // NOTE: in Docker Compose, `${DIRECT_URL}` may be injected as an empty string when not set.
+    // Use `||` (not `??`) so an empty DIRECT_URL doesn't mask a valid DATABASE_URL.
+    url: process.env.DIRECT_URL?.trim() || process.env.DATABASE_URL?.trim() || "",
   },
 });
 

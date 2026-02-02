@@ -20,6 +20,7 @@
     "build": "tsc && tsc -p tests/tsconfig.json --noEmit && npm run typecheck",
     "setup": "node setup.js",
     "seed": "tsx seed.ts",
+    "seed:auth": "tsx src/scripts/seed-auth.ts",
     "export:audit-configs": "tsx scripts/export-audit-configs.ts",
     "abtest:audits": "tsx scripts/ab-test-audits.ts",
     "prisma:generate": "prisma generate",

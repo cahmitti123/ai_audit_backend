@@ -9,6 +9,7 @@
     "tests/**/*.ts",
     "scripts/**/*.ts",
     "seed.ts",
+    "prisma.config.ts",
     "types/**/*.ts",
     "types/**/*.d.ts",
     "vitest.config.js",

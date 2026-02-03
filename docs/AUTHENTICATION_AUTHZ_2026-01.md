@@ -3,6 +3,11 @@
 **Repo**: `ai-audit` (Express + TS + Prisma + Postgres, ESM)  
 **Goal**: add **real user authentication** (JWT access + refresh) and **in-app authorization** (roles/permissions) while preserving existing **optional** `API_AUTH_TOKEN(S)` machine auth.
 
+**Status (2026-02)**: Implemented. This document is now a design record and may drift.
+For the current API contract (frontend-ready), see:
+- `docs/BACKEND_FRONTEND_CONTRACT.md`
+- `docs/api.md`
+
 ---
 
 ## Current state (what exists today)
@@ -14,8 +19,9 @@
 - **Realtime**:
   - Pusher helpers + allowlisted channel names: `src/shared/pusher.ts`
   - Pusher auth endpoint: `POST /api/realtime/pusher/auth` (`src/modules/realtime/realtime.routes.ts`)
-  - **No real user/org membership checks yet** (explicitly documented in code).
-- **No** `User/Role/Permission` tables in Prisma yet (`prisma/schema.prisma`).
+  - Requires user JWT + RBAC (`realtime.auth`) and performs per-entity scope checks for audit/fiche channels.
+- **Auth (JWT + refresh)** is implemented under `/api/auth/*` and enforced for all `/api/*` routes via `requireAuth()` in `src/app.ts`.
+- **RBAC + scope** is implemented and enforced via `requirePermission()` (see `src/middleware/authz.ts`).
 
 ---
 
@@ -30,14 +36,17 @@
 
 ### Authorization (RBAC)
 - Users have **roles**
-- Roles have **permissions** (string keys)
+- Roles have **permissions** as **grants**:
+  - `read: boolean`, `write: boolean`
+  - `scope: SELF | GROUP | ALL`
 - Access token embeds:
   - `sub` = user id
   - `roles` = role keys
-  - `permissions` = permission keys (computed at login/refresh)
+  - `crm_user_id` + `groupes` (team/group names)
+  - `permission_grants` (effective `PermissionGrant[]`, computed at login/refresh)
 - **Enforcement**:
   - `requireAuth()` for protected endpoints
-  - `requirePermission("...")` for sensitive operations
+  - `requirePermission("...")` for sensitive operations (supports suffixes like `.read|.write|.run|.rerun|.use|.auth`)
   - Pusher channel auth requires user auth + per-channel authorization
 
 ---
@@ -60,42 +69,30 @@
 
 ## Permission matrix (v1)
 
-### Core permissions
-- **audits**
-  - `audits.read`
-  - `audits.run`
-  - `audits.rerun`
-- **audit-configs**
-  - `audit-configs.read`
-  - `audit-configs.write`
-- **automation**
-  - `automation.read`
-  - `automation.run`
-  - `automation.write` (schedules, notifications)
-- **fiches**
-  - `fiches.read`
-  - `fiches.fetch` (trigger background jobs / refresh)
-- **recordings**
-  - `recordings.read`
-- **transcriptions**
-  - `transcriptions.read`
-- **products**
-  - `products.read`
-  - `products.write`
-- **chat**
-  - `chat.use`
-- **realtime**
-  - `realtime.auth` (Pusher auth endpoint)
-  - `realtime.test` (Pusher test endpoint)
-- **admin**
-  - `admin.users`
-  - `admin.roles`
-  - `admin.permissions`
+### Core permission keys (base)
+- `fiches`
+- `audits`
+- `audit-configs`
+- `automation`
+- `recordings`
+- `transcriptions`
+- `products`
+- `chat`
+- `realtime`
+- `admin.users`
+- `admin.roles`
+- `admin.permissions`
+
+### Suffix convention (route guards)
+Backend route guards accept strings like `audits.read`, `audits.run`, `chat.use`, `realtime.auth`, etc.
+They are mapped to the **base key** + grant `read|write`:
+- Suffixes that map to **read**: `.read`, `.auth` (and default/no suffix)
+- Suffixes that map to **write**: `.write`, `.run`, `.rerun`, `.fetch`, `.use`, `.test`
 
 ### Default roles
-- **admin**: all permissions
-- **operator**: day-to-day operations (run/read audits, automation, fiches, chat, realtime)
-- **viewer**: read-only
+- **admin**: all permissions, scope `ALL`
+- **operator**: day-to-day ops, scope `GROUP` for fiche-linked data
+- **viewer**: read-only, scope `GROUP` for fiche-linked data
 
 ---
 
@@ -120,6 +117,7 @@
 ### Public
 - `POST /api/auth/login`
 - `POST /api/auth/refresh`
+- `POST /api/auth/invite/accept`
 
 ### Authenticated
 - `POST /api/auth/logout`
@@ -131,6 +129,11 @@
 - `PATCH /api/admin/users/:id`
 - `POST /api/admin/roles`
 - `POST /api/admin/roles/:roleId/permissions`
+
+Additional admin utilities (CRM integration):
+- `GET /api/admin/crm/users`
+- `GET /api/admin/crm/teams`
+- `POST /api/admin/users/from-crm` (one-click user creation/linking)
 
 ---
 

@@ -1,6 +1,12 @@
 ## Progress
 
 ### Working now
+- **Authentication + scoped RBAC (JWT)**:
+  - Roles/permissions are managed dynamically (read/write + `SELF|GROUP|ALL` scope) and shipped in JWT claims.
+  - Fiches/audits visibility is restricted by user scope (self/group/all) to support “team/groupe” partitioning.
+  - Chat + realtime access for audits/fiches is scope-checked (prevents cross-team subscriptions/LLM context leaks).
+  - Recordings/transcriptions endpoints are permission-checked and scope-checked by fiche id (prevents direct ID-guess data leaks).
+  - Other core routers (`audit-configs`, `automation`, `products`) are now permission-checked (read vs write).
 - **Scaled backend** behind nginx load balancer (3 replicas).
 - **Audit pipeline** executes in parallel at the **step** level across replicas.
 - **Optional audit transcript tools mode** (`use_rlm: true` per request) keeps long timelines out of prompts and lets the LLM fetch/quote evidence via constrained tools.
@@ -21,7 +27,7 @@
 - Recording transcription backfill is in progress: transcription chunks are being created and `recordings.transcription_data` is being cleared (see `scripts/transcription-chunks-status.ts`).
 - **ElevenLabs transcription** validates/normalizes `ELEVENLABS_API_KEY` and sanitizes Axios errors (avoid leaking request headers in logs).
 - TypeScript build is green (`npm run build`).
-- Docker startup runs `prisma migrate deploy` so DB schema stays aligned with Prisma (prevents runtime column-missing crashes).
+- Docker startup runs `prisma migrate deploy` + `npm run seed:auth` so DB schema stays aligned with Prisma and RBAC roles/permissions exist (prevents runtime authZ “empty roles” issues).
 
 ### Verified smoke tests (local)
 - Created progressive fetch job for missing dates and confirmed it progressed to **complete** via `/api/fiches/jobs/:jobId`.

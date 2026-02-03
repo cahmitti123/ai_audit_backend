@@ -10,8 +10,21 @@ If you’re updating the frontend, start here:
 
 - **JWT authentication + RBAC (new)**:
   - All `/api/*` routes used by the app now require `Authorization: Bearer <access_token>` (JWT).
-  - New auth endpoints: `POST /api/auth/login`, `POST /api/auth/refresh`, `POST /api/auth/logout`, `GET /api/auth/me`.
+  - New auth endpoints: `POST /api/auth/login`, `POST /api/auth/refresh`, `POST /api/auth/logout`, `POST /api/auth/invite/accept`, `GET /api/auth/me`.
   - Private channel auth (`POST /api/realtime/pusher/auth`) now requires a user JWT + permission `realtime.auth`.
+  - `GET /api/auth/me` now returns extra RBAC/scope context:
+    - `crm_user_id: string | null`
+    - `groupes: string[]` (team/group names; “team” == “groupe”)
+    - `permissions: Array<{ key, read, write, read_scope, write_scope }>` (effective grants)
+  - Scope (`SELF|GROUP|ALL`) is enforced for fiche-linked data across:
+    - fiches/sales, audits, recordings, transcriptions, chat, and realtime channel auth.
+  - **Seeding (Docker)**:
+    - Container startup runs: `prisma migrate deploy` then `npm run seed:auth`.
+    - Roles/permissions are always upserted.
+    - No user is created unless you set `AUTH_SEED_ADMIN_EMAIL` + `AUTH_SEED_ADMIN_PASSWORD` (idempotent).
+- **CRM one-click users + first login password**:
+  - Admin creates/links a user from CRM via `POST /api/admin/users/from-crm` (may return `invite_token`).
+  - The invited user sets a password via `POST /api/auth/invite/accept`, which returns a normal session (access token + refresh cookie).
 - **Reruns now update stored audits**: step reruns and control-point reruns persist updates (step summary + normalized control points/trails) and recompute audit compliance; UI should refetch `GET /api/audits/:audit_id` after rerun completion.
 - **Automation has dedicated realtime events**: `automation.run.*` events are emitted on `private-job-automation-run-{run_id}` (see contract + checklist).
 - **Automation run results are normalized**: per-fiche outcomes live in `automation_run_fiche_results`; run detail endpoints can reconstruct the legacy `resultSummary` shape even when `automation_runs.result_summary` is minimal.
@@ -41,20 +54,28 @@ See:
 - `POST /api/auth/login`
 - `POST /api/auth/refresh`
 - `POST /api/auth/logout`
+- `POST /api/auth/invite/accept`
 - `GET /api/auth/me`
 
 ### Admin (`/api/admin`)
 
-These endpoints require RBAC permissions (`admin.users`, `admin.roles`, `admin.permissions`):
+These endpoints require RBAC permissions:
+- `admin.users.read` / `admin.users.write`
+- `admin.roles.read` / `admin.roles.write`
+- `admin.permissions.read`
 
 - `GET /api/admin/users`
 - `POST /api/admin/users`
+- `POST /api/admin/users/from-crm`
 - `PATCH /api/admin/users/:userId`
 - `GET /api/admin/roles`
 - `GET /api/admin/permissions`
+- `GET /api/admin/crm/users`
+- `GET /api/admin/crm/teams`
 
 ### Fiches (`/api/fiches`)
 
+- All routes require `fiches.read` (user JWT). `refresh=true` requires `fiches.write`.
 - `GET /api/fiches/search?date=YYYY-MM-DD`
 - `GET /api/fiches/:fiche_id?refresh=true|false&include_mail_devis=true|false`
 - `GET /api/fiches/:fiche_id/cache`
@@ -67,10 +88,12 @@ These endpoints require RBAC permissions (`admin.users`, `admin.roles`, `admin.p
 
 ### Recordings (`/api/recordings`)
 
+- Requires `recordings.read` and enforces fiche scope.
 - `GET /api/recordings/:fiche_id`
 
 ### Transcriptions (`/api/transcriptions`)
 
+- `GET` routes require `transcriptions.read`. Queue routes require `transcriptions.write`. All enforce fiche scope.
 - `POST /api/transcriptions/:fiche_id?priority=high|normal|low`
 - `GET /api/transcriptions/:fiche_id/status`
 - `GET /api/transcriptions/:fiche_id/recordings/:call_id`
@@ -78,6 +101,7 @@ These endpoints require RBAC permissions (`admin.users`, `admin.roles`, `admin.p
 
 ### Audit configs (`/api/audit-configs`)
 
+- All routes require `audit-configs.read`. Mutations require `audit-configs.write`.
 - `GET /api/audit-configs`
 - `GET /api/audit-configs/:id`
 - `POST /api/audit-configs`
@@ -92,6 +116,7 @@ These endpoints require RBAC permissions (`admin.users`, `admin.roles`, `admin.p
 
 ### Audits (`/api/audits`)
 
+- Read routes require `audits.read`. Run/queue routes require `audits.run`. Re-run routes require `audits.rerun`. Review/update/delete routes require `audits.write`. All enforce scope (SELF/GROUP/ALL).
 - `GET /api/audits`
 - `GET /api/audits` supports additional fiche filters:
   - `sales_dates` (CSV `YYYY-MM-DD`)
@@ -137,6 +162,7 @@ These endpoints require RBAC permissions (`admin.users`, `admin.roles`, `admin.p
 
 ### Automation (`/api/automation`)
 
+- All routes require `automation.read`. Mutations/trigger require `automation.write`.
 - `POST /api/automation/schedules`
 - `GET /api/automation/schedules`
 - `GET /api/automation/schedules/:id`
@@ -155,6 +181,7 @@ These endpoints require RBAC permissions (`admin.users`, `admin.roles`, `admin.p
 
 ### Products (`/api/products`)
 
+- All routes require `products.read`. Mutations require `products.write`.
 - `GET /api/products/stats`
 - `GET /api/products/search?q=...`
 - `GET /api/products/link-fiche/:ficheId`
@@ -169,6 +196,7 @@ These endpoints require RBAC permissions (`admin.users`, `admin.roles`, `admin.p
 
 - `POST /api/realtime/pusher/auth`
 - `POST /api/realtime/pusher/test`
+  - `POST /api/realtime/pusher/auth` requires `realtime.auth` and enforces scope on `private-audit-*` / `private-fiche-*` subscriptions in non-test environments.
 
 ### Chat (mounted under `/api`)
 
@@ -176,6 +204,7 @@ These endpoints require RBAC permissions (`admin.users`, `admin.roles`, `admin.p
 - `POST /api/audits/:audit_id/chat` (streaming)
 - `GET /api/fiches/:fiche_id/chat/history`
 - `POST /api/fiches/:fiche_id/chat` (streaming)
+  - Chat endpoints require `chat.read` / `chat.use` plus the underlying resource read permission (`audits.read` or `fiches.read`), and enforce scope.
 
 ### Webhooks
 

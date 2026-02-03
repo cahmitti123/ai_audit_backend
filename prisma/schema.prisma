@@ -1535,6 +1535,7 @@ model Document {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 enum UserStatus {
+    INVITED
     ACTIVE
     DISABLED
 }
@@ -1543,8 +1544,10 @@ model User {
     id BigInt @id @default(autoincrement())
 
     email        String     @unique
-    passwordHash String     @map("password_hash") @db.Text
+    passwordHash String?    @map("password_hash") @db.Text
     status       UserStatus @default(ACTIVE)
+
+    crmUserId String? @unique @map("crm_user_id")
 
     lastLoginAt DateTime? @map("last_login_at")
     createdAt   DateTime  @default(now()) @map("created_at")
@@ -1552,8 +1555,11 @@ model User {
 
     roles         UserRole[]
     refreshTokens RefreshToken[]
+    teams         UserTeam[]
+    inviteTokens  UserInviteToken[]
 
     @@index([status])
+    @@index([crmUserId])
     @@index([createdAt])
     @@map("users")
 }
@@ -1590,6 +1596,12 @@ model Permission {
     @@map("permissions")
 }
 
+enum PermissionScope {
+    SELF
+    GROUP
+    ALL
+}
+
 model UserRole {
     id BigInt @id @default(autoincrement())
 
@@ -1615,6 +1627,10 @@ model RolePermission {
 
     permissionId BigInt      @map("permission_id")
     permission   Permission  @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+    canRead  Boolean @default(false) @map("can_read")
+    canWrite Boolean @default(false) @map("can_write")
+    scope    PermissionScope @default(SELF) @map("scope")
 
     createdAt DateTime @default(now()) @map("created_at")
 
@@ -1652,4 +1668,58 @@ model RefreshToken {
     @@index([expiresAt])
     @@index([revokedAt])
     @@map("refresh_tokens")
+}
+
+model Team {
+    id BigInt @id @default(autoincrement())
+
+    crmGroupId String @unique @map("crm_group_id")
+    name       String
+
+    responsable1 String? @map("responsable_1")
+    responsable2 String? @map("responsable_2")
+    responsable3 String? @map("responsable_3")
+
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    members UserTeam[]
+
+    @@index([crmGroupId])
+    @@map("teams")
+}
+
+model UserTeam {
+    id BigInt @id @default(autoincrement())
+
+    userId BigInt @map("user_id")
+    user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    teamId BigInt @map("team_id")
+    team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@unique([userId, teamId])
+    @@index([userId])
+    @@index([teamId])
+    @@map("user_teams")
+}
+
+model UserInviteToken {
+    id BigInt @id @default(autoincrement())
+
+    userId BigInt @map("user_id")
+    user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    tokenHash String @unique @map("token_hash") @db.Text
+
+    expiresAt DateTime @map("expires_at")
+    usedAt    DateTime? @map("used_at")
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@index([userId])
+    @@index([expiresAt])
+    @@index([usedAt])
+    @@map("user_invite_tokens")
 }

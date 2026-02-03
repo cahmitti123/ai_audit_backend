@@ -219,6 +219,8 @@ export const listAuditsFiltersSchema = z.object({
   groupeQuery: z.string().optional(),
   agenceQuery: z.string().optional(),
   prospectQuery: z.string().optional(),
+  // Scope enforcement (set internally from auth context; not exposed as query param)
+  attributionUserId: z.string().optional(),
   salesDates: z.array(z.string()).optional(),
   salesDateFrom: z.string().optional(),
   salesDateTo: z.string().optional(),

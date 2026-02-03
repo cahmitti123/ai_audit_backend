@@ -14,7 +14,7 @@
   - `lb` (nginx load balancer, exposes API)
   - `inngest` (self-hosted)
   - `redis`
-- Server container runs `prisma migrate deploy` on startup to apply pending migrations.
+- Server container runs `prisma migrate deploy` + `npm run seed:auth` on startup to apply pending migrations and upsert RBAC roles/permissions (optional admin user via `AUTH_SEED_ADMIN_*`).
 
 ### Important environment variables (no secrets here)
 - **Database**: `DATABASE_URL`

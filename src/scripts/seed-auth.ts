@@ -7,27 +7,20 @@ import { prisma } from "../shared/prisma.js";
 async function main() {
   console.log("🔐 Seeding auth roles/permissions...");
 
+  // Base permissions (read/write + scope are set on role_permissions)
   const permissions: Array<{ key: string; description: string }> = [
-    { key: "audits.read", description: "Read audits" },
-    { key: "audits.run", description: "Run audits" },
-    { key: "audits.rerun", description: "Rerun audit steps/control points" },
-    { key: "audit-configs.read", description: "Read audit configs" },
-    { key: "audit-configs.write", description: "Create/update audit configs" },
-    { key: "automation.read", description: "Read automation schedules/runs" },
-    { key: "automation.run", description: "Trigger automation runs" },
-    { key: "automation.write", description: "Create/update automation schedules" },
-    { key: "fiches.read", description: "Read fiches and fiche cache" },
-    { key: "fiches.fetch", description: "Trigger fiche fetch/refresh jobs" },
-    { key: "recordings.read", description: "Read recordings" },
-    { key: "transcriptions.read", description: "Read transcriptions" },
-    { key: "products.read", description: "Read insurance products" },
-    { key: "products.write", description: "Manage insurance products" },
-    { key: "chat.use", description: "Use chat endpoints" },
-    { key: "realtime.auth", description: "Authorize realtime (Pusher) subscriptions" },
-    { key: "realtime.test", description: "Use realtime test endpoint" },
-    { key: "admin.users", description: "Manage users" },
-    { key: "admin.roles", description: "Manage roles" },
-    { key: "admin.permissions", description: "Manage permissions" },
+    { key: "fiches", description: "Sales / fiches access" },
+    { key: "audits", description: "Audits access" },
+    { key: "audit-configs", description: "Audit configs access" },
+    { key: "automation", description: "Automation schedules/runs access" },
+    { key: "recordings", description: "Recordings access" },
+    { key: "transcriptions", description: "Transcriptions access" },
+    { key: "products", description: "Products access" },
+    { key: "chat", description: "Chat access" },
+    { key: "realtime", description: "Realtime (Pusher) access" },
+    { key: "admin.users", description: "User management" },
+    { key: "admin.roles", description: "Role management" },
+    { key: "admin.permissions", description: "Permission management" },
   ];
 
   for (const p of permissions) {
@@ -38,54 +31,55 @@ async function main() {
     });
   }
 
-  const allPermKeys = permissions.map((p) => p.key);
+  type PermissionGrant = {
+    key: string;
+    read: boolean;
+    write: boolean;
+    scope: "SELF" | "GROUP" | "ALL";
+  };
+
   const roleDefs: Array<{
     key: string;
     name: string;
     description?: string;
-    permissionKeys: string[];
+    grants: PermissionGrant[];
   }> = [
     {
       key: "admin",
       name: "Admin",
       description: "Full access",
-      permissionKeys: allPermKeys,
+      grants: permissions.map((p) => ({ key: p.key, read: true, write: true, scope: "ALL" })),
     },
     {
       key: "operator",
       name: "Operator",
       description: "Day-to-day operations",
-      permissionKeys: [
-        "audits.read",
-        "audits.run",
-        "audits.rerun",
-        "audit-configs.read",
-        "automation.read",
-        "automation.run",
-        "fiches.read",
-        "fiches.fetch",
-        "recordings.read",
-        "transcriptions.read",
-        "products.read",
-        "chat.use",
-        "realtime.auth",
-        "realtime.test",
+      grants: [
+        { key: "fiches", read: true, write: true, scope: "GROUP" },
+        { key: "audits", read: true, write: true, scope: "GROUP" },
+        { key: "audit-configs", read: true, write: false, scope: "ALL" },
+        { key: "automation", read: true, write: true, scope: "GROUP" },
+        { key: "recordings", read: true, write: false, scope: "GROUP" },
+        { key: "transcriptions", read: true, write: true, scope: "GROUP" },
+        { key: "products", read: true, write: false, scope: "ALL" },
+        { key: "chat", read: true, write: true, scope: "GROUP" },
+        { key: "realtime", read: true, write: true, scope: "GROUP" },
       ],
     },
     {
       key: "viewer",
       name: "Viewer",
       description: "Read-only access",
-      permissionKeys: [
-        "audits.read",
-        "audit-configs.read",
-        "automation.read",
-        "fiches.read",
-        "recordings.read",
-        "transcriptions.read",
-        "products.read",
-        "chat.use",
-        "realtime.auth",
+      grants: [
+        { key: "fiches", read: true, write: false, scope: "GROUP" },
+        { key: "audits", read: true, write: false, scope: "GROUP" },
+        { key: "audit-configs", read: true, write: false, scope: "ALL" },
+        { key: "automation", read: true, write: false, scope: "GROUP" },
+        { key: "recordings", read: true, write: false, scope: "GROUP" },
+        { key: "transcriptions", read: true, write: false, scope: "GROUP" },
+        { key: "products", read: true, write: false, scope: "ALL" },
+        { key: "chat", read: true, write: true, scope: "GROUP" },
+        { key: "realtime", read: true, write: false, scope: "GROUP" },
       ],
     },
   ];
@@ -98,28 +92,47 @@ async function main() {
     });
   }
 
-  const dbPerms = await prisma.permission.findMany({
-    where: { key: { in: allPermKeys } },
-    select: { id: true, key: true },
-  });
-  const permIdByKey = new Map(dbPerms.map((p) => [p.key, p.id]));
-
   for (const r of roleDefs) {
     const role = await prisma.role.findUnique({ where: { key: r.key }, select: { id: true } });
-    if (!role) {
+    if (!role) {continue;}
+
+    // Don't override dynamic RBAC if the role already has any active grants.
+    const existingGrants = await prisma.rolePermission.count({
+      where: {
+        roleId: role.id,
+        OR: [{ canRead: true }, { canWrite: true }],
+      },
+    });
+    if (existingGrants > 0) {
+      console.log(`ℹ️ Skipping RBAC grants for role '${r.key}' (already configured)`);
       continue;
     }
 
-    for (const key of r.permissionKeys) {
-      const permissionId = permIdByKey.get(key);
-      if (!permissionId) {
-        continue;
-      }
+    const keys = r.grants.map((g) => g.key);
+    const dbPerms = await prisma.permission.findMany({
+      where: { key: { in: keys } },
+      select: { id: true, key: true },
+    });
+    const permIdByKey = new Map(dbPerms.map((p) => [p.key, p.id]));
+
+    for (const g of r.grants) {
+      const permissionId = permIdByKey.get(g.key);
+      if (!permissionId) {continue;}
 
       await prisma.rolePermission.upsert({
         where: { roleId_permissionId: { roleId: role.id, permissionId } },
-        update: {},
-        create: { roleId: role.id, permissionId },
+        update: {
+          canRead: g.read,
+          canWrite: g.write,
+          scope: g.scope,
+        },
+        create: {
+          roleId: role.id,
+          permissionId,
+          canRead: g.read,
+          canWrite: g.write,
+          scope: g.scope,
+        },
       });
     }
   }
@@ -128,14 +141,17 @@ async function main() {
   const adminPassword = (process.env.AUTH_SEED_ADMIN_PASSWORD || "").trim();
   if (adminEmail && adminPassword) {
     console.log(`👤 Seeding admin user: ${adminEmail}`);
-    const passwordHash = await hashPassword(adminPassword);
-
-    const user = await prisma.user.upsert({
-      where: { email: adminEmail },
-      update: { passwordHash, status: UserStatus.ACTIVE },
-      create: { email: adminEmail, passwordHash, status: UserStatus.ACTIVE },
-      select: { id: true },
-    });
+    const existing = await prisma.user.findUnique({ where: { email: adminEmail }, select: { id: true } });
+    const user = existing
+      ? await prisma.user.findUniqueOrThrow({ where: { id: existing.id }, select: { id: true } })
+      : await prisma.user.create({
+          data: {
+            email: adminEmail,
+            passwordHash: await hashPassword(adminPassword),
+            status: UserStatus.ACTIVE,
+          },
+          select: { id: true },
+        });
 
     const adminRole = await prisma.role.findUnique({ where: { key: "admin" }, select: { id: true } });
     if (adminRole) {

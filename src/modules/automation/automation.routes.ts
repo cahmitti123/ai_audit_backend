@@ -18,6 +18,7 @@ import { Router } from "express";
 
 import { inngest } from "../../inngest/client.js";
 import { asyncHandler } from "../../middleware/async-handler.js";
+import { requirePermission } from "../../middleware/authz.js";
 import { logger } from "../../shared/logger.js";
 import {
   validateCreateAutomationScheduleInput,
@@ -27,6 +28,10 @@ import {
 import * as automationService from "./automation.service.js";
 
 const router = Router();
+
+// Require read access by default for automation routes.
+// (Machine API tokens bypass permission checks in `requirePermission`.)
+router.use(requirePermission("automation.read"));
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SCHEDULE ENDPOINTS
@@ -41,6 +46,7 @@ const router = Router();
  */
 router.post(
   "/schedules",
+  requirePermission("automation.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const input = validateCreateAutomationScheduleInput(req.body);
     const schedule = await automationService.createAutomationSchedule(input);
@@ -112,6 +118,7 @@ router.get(
  */
 router.patch(
   "/schedules/:id",
+  requirePermission("automation.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const input = validateUpdateAutomationScheduleInput(req.body);
     const schedule = await automationService.updateAutomationSchedule(
@@ -135,6 +142,7 @@ router.patch(
  */
 router.delete(
   "/schedules/:id",
+  requirePermission("automation.write"),
   asyncHandler(async (req: Request, res: Response) => {
     await automationService.deleteAutomationSchedule(req.params.id);
 
@@ -158,6 +166,7 @@ router.delete(
  */
 router.post(
   "/trigger",
+  requirePermission("automation.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const input = validateTriggerAutomationInput(req.body);
 

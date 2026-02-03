@@ -1,9 +1,21 @@
+export type PermissionScope = "SELF" | "GROUP" | "ALL";
+
+export type PermissionGrant = {
+  key: string;
+  read: boolean;
+  write: boolean;
+  read_scope: PermissionScope;
+  write_scope: PermissionScope;
+};
+
 export type UserAuthContext = {
   kind: "user";
   userId: string; // stringified BigInt
   email: string;
+  crmUserId: string | null;
+  groupes: string[];
   roles: string[];
-  permissions: string[];
+  permissions: PermissionGrant[];
 };
 
 export type ApiTokenAuthContext = {

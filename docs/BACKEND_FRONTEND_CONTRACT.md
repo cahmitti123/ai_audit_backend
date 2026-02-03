@@ -80,7 +80,7 @@ All `/api/*` routes used by the frontend now require **authentication**.
 - **User sessions (preferred)**:
   - `POST /api/auth/login` → returns an **access token** (JWT)
   - Send it on every API call: `Authorization: Bearer <access_token>`
-  - Use `GET /api/auth/me` to fetch current `roles` + `permissions` for UI gating.
+  - Use `GET /api/auth/me` to fetch current `roles` + `permissions` (**structured grants**) + scope context (`crm_user_id`, `groupes`) for UI gating.
 - **Refresh token (cookie, rotated)**:
   - On login/refresh, the backend sets an HttpOnly cookie (default `refresh_token`, scoped to `Path=/api/auth`)
   - Use it via:
@@ -200,8 +200,28 @@ This backend implements **user authentication** (JWT) and **RBAC** (roles/permis
 - Refresh tokens are **rotated** on every refresh.
 
 #### Roles/permissions (for UI gating)
-- `GET /api/auth/me` returns `roles` + `permissions`.
-- Some backend endpoints enforce permissions (e.g. `realtime.auth`, admin endpoints).
+- `GET /api/auth/me` returns:
+  - `roles: string[]`
+  - `crm_user_id: string | null` (CRM user id)
+  - `groupes: string[]` (team/group names; “team” == “groupe”)
+  - `permissions: PermissionGrant[]` (effective RBAC grants)
+- A **PermissionGrant** is:
+
+```ts
+type PermissionScope = "SELF" | "GROUP" | "ALL";
+
+type PermissionGrant = {
+  key: string;                // e.g. "audits", "fiches", "admin.roles"
+  read: boolean;
+  write: boolean;
+  read_scope: PermissionScope;
+  write_scope: PermissionScope;
+};
+```
+
+- **Permission string suffixes**: backend guards accept strings like `audits.read`, `audits.write`, `audits.run`, `fiches.fetch`, `chat.use`, `realtime.auth`, etc.
+  - Suffixes are mapped to the underlying grant’s `read|write` on the **base key** (example: `audits.run` checks key `audits` with `write=true`).
+  - Scope enforcement uses the user’s `*_scope` for the relevant key (self/group/all).
 - `403` responses use `code: "AUTHORIZATION_ERROR"`.
 
 #### Machine API token (optional)
@@ -272,8 +292,13 @@ Below is the **full list** of routes defined in `src/modules/*/*.routes.ts` plus
     "user": {
       "id": "1",
       "email": "admin@example.com",
+      "crm_user_id": "349",
+      "groupes": ["NCA R1"],
       "roles": ["admin"],
-      "permissions": ["realtime.auth", "audits.read"]
+      "permissions": [
+        { "key": "audits", "read": true, "write": true, "read_scope": "ALL", "write_scope": "ALL" },
+        { "key": "fiches", "read": true, "write": true, "read_scope": "ALL", "write_scope": "ALL" }
+      ]
     }
   }
 }
@@ -306,6 +331,21 @@ Notes:
 { "success": true, "data": { "logged_out": true } }
 ```
 
+### POST `/api/auth/invite/accept`
+
+- **Purpose**: first-time password setup for an **INVITED** user (one-time invite token).
+- **Auth**: none (bootstrap via invite token).
+- **Body**:
+
+```json
+{ "invite_token": "opaque-token-from-admin", "password": "new-password" }
+```
+
+- **Response 200**: same response shape as `POST /api/auth/login` (returns access token + sets refresh cookie).
+- **Errors**:
+  - `401` invalid/expired invite token
+  - `400` validation errors (missing fields / weak password if enforced)
+
 ### GET `/api/auth/me`
 
 - **Purpose**: returns current user identity + roles/permissions (use for UI gating).
@@ -320,8 +360,13 @@ Notes:
     "user": {
       "id": "1",
       "email": "admin@example.com",
+      "crm_user_id": "349",
+      "groupes": ["NCA R1"],
       "roles": ["admin"],
-      "permissions": ["realtime.auth", "audits.read"]
+      "permissions": [
+        { "key": "audits", "read": true, "write": true, "read_scope": "ALL", "write_scope": "ALL" },
+        { "key": "fiches", "read": true, "write": true, "read_scope": "ALL", "write_scope": "ALL" }
+      ]
     }
   }
 }
@@ -332,9 +377,9 @@ Notes:
 ## Admin API (`/api/admin/*`)
 
 These endpoints are intended for an admin UI and require RBAC permissions:
-- `admin.users`
-- `admin.roles`
-- `admin.permissions`
+- `admin.users.read` / `admin.users.write`
+- `admin.roles.read` / `admin.roles.write`
+- `admin.permissions.read`
 
 ### GET `/api/admin/users`
 - **Response 200**: `{ success:true, data:{ users:[...], count } }`
@@ -352,12 +397,51 @@ These endpoints are intended for an admin UI and require RBAC permissions:
 ### GET `/api/admin/roles`
 ### GET `/api/admin/permissions`
 
+### GET `/api/admin/crm/users`
+
+- **Purpose**: list CRM users (from the gateway) and annotate whether each one is already linked to an app user.
+- **Permission**: `admin.users.read`
+- **Response 200**: `{ success:true, data:{ utilisateurs:[...], count } }`
+
+### GET `/api/admin/crm/teams`
+
+- **Purpose**: list CRM groups (“groupes”) from the gateway.
+- **Permission**: `admin.users.read`
+- **Query**:
+  - `include_users=true|false` (default `false`)
+- **Response 200**: `{ success:true, data:{ groupes:[...], count } }`
+
+### POST `/api/admin/users/from-crm`
+
+- **Purpose**: “one-click” create/link an app user from a CRM user id, assign roles, and (if needed) generate an invite token for first-time password setup.
+- **Permission**: `admin.users.write`
+- **Body**:
+
+```json
+{ "crm_user_id": "348", "role_keys": ["viewer"], "crm_group_id": "51" }
+```
+
+- **Response 201**:
+  - Returns `user`, and also both `team` and `groupe` (aliases; same structure) when a CRM group can be inferred.
+  - Returns `invite_token` when the created/linked user has no password yet (status `INVITED`).
+- **Next step**: if `invite_token` is non-null, call `POST /api/auth/invite/accept` to set the password and obtain a session.
+
 Note:
 - If you authenticate with an API token (when `API_AUTH_TOKEN(S)` is configured), permission checks are bypassed (treated as a trusted caller). Browsers should use user JWTs instead.
 
 ---
 
 ## Fiches API (`/api/fiches/*`)
+
+Notes:
+- **Permission**:
+  - All `/api/fiches/*` routes require `fiches.read` (user JWT). (Machine API tokens bypass permission checks.)
+  - Any operation that forces an upstream fetch/refresh requires `fiches.write` (ex: `?refresh=true`).
+- **Scope enforcement** (user JWT only):
+  - Uses the effective grant for key `fiches`.
+  - `read_scope=ALL`: no restriction
+  - `read_scope=GROUP`: only fiches whose `groupe` is included in `user.groupes`
+  - `read_scope=SELF`: only fiches whose `information.attribution_user_id` equals `user.crm_user_id`
 
 ### GET `/api/fiches/search`
 
@@ -368,6 +452,7 @@ Note:
 - **Response 200** (no `success` wrapper; it returns the service result directly):
   - If `includeStatus=false`: `{ fiches: SalesFicheWithRecordings[]; total: number }`
   - Else: `{ fiches: SalesFicheWithStatus[]; total: number }`
+- **Scope**: response is filtered to only include in-scope fiches for the caller (SELF/GROUP/ALL).
 - **Errors**:
   - `400`: validation error (missing/invalid date)
   - `500`: unexpected errors
@@ -378,6 +463,10 @@ Note:
 - **Query**:
   - `refresh=true` (optional) forces refresh from the gateway/CRM (does not require a cached `cle`; gateway refreshes internally)
   - `include_mail_devis=true` (optional) includes the (large) `mail_devis` object in the response; otherwise the field is omitted by default
+- **Permissions**:
+  - Requires `fiches.read`
+  - If `refresh=true`, requires `fiches.write`
+- **Scope**: out-of-scope fiche ids return `403` (forbidden).
 - **Response 200**: returns the cached/full fiche payload (BigInt-safe). Shape matches `FicheDetailsResponse` in `src/modules/fiches/fiches.schemas.ts`.
 - **Errors**:
   - `404`: fiche not found (gateway/CRM)
@@ -683,6 +772,8 @@ Note:
 ### GET `/api/recordings/:fiche_id`
 
 - **Purpose**: list DB recordings for a fiche.
+- **Permission**: requires `recordings.read`.
+- **Scope**: out-of-scope fiche ids return `403` (forbidden), based on the `recordings` grant scope (SELF/GROUP/ALL).
 - **Response 200**:
 
 ```json
@@ -695,6 +786,12 @@ Notes:
 ---
 
 ## Transcriptions API (`/api/transcriptions/*`)
+
+Notes:
+- **Permissions**:
+  - `POST /api/transcriptions/:fiche_id` and `POST /api/transcriptions/batch` require `transcriptions.write`
+  - `GET /api/transcriptions/:fiche_id/status` and `GET /api/transcriptions/:fiche_id/recordings/:call_id` require `transcriptions.read`
+- **Scope**: all endpoints enforce scope for the underlying fiche id (SELF/GROUP/ALL) using the `transcriptions` grant.
 
 ### POST `/api/transcriptions/:fiche_id`
 
@@ -800,6 +897,18 @@ Important: This handler is **DB-only** (no local file cache fallback), which is 
 ---
 
 ## Audits API (`/api/audits/*`)
+
+Notes:
+- **Permissions**:
+  - Read endpoints require `audits.read`
+  - Run/queue endpoints require `audits.run` (maps to the `audits` grant `write=true`)
+  - Re-run endpoints require `audits.rerun` (maps to the `audits` grant `write=true`)
+  - Human review / metadata update / delete endpoints require `audits.write`
+- **Scope enforcement** (user JWT only):
+  - Uses the effective grant for key `audits`.
+  - List/group endpoints are automatically restricted by `read_scope` (SELF/GROUP/ALL).
+  - Single-resource endpoints (`/by-fiche/:fiche_id`, `/:audit_id`, review/patch/delete) check scope against the audit’s linked fiche.
+  - Run endpoints validate the target `fiche_id` is in-scope before queuing work.
 
 ### Audit transcript mode (legacy prompt vs RLM-style tools)
 
@@ -1085,6 +1194,10 @@ Important: Prefer sending `audit_config_id`. `audit_id` is kept only for backwar
 
 ## Audit Configs API (`/api/audit-configs/*`)
 
+Notes:
+- All routes require `audit-configs.read`.
+- Mutating routes (`POST|PUT|DELETE`) require `audit-configs.write`.
+
 ### GET `/api/audit-configs`
 
 - **Query**:
@@ -1123,6 +1236,10 @@ All are implemented in `src/modules/audit-configs/audit-configs.routes.ts` and v
 ---
 
 ## Automation API (`/api/automation/*`)
+
+Notes:
+- All routes require `automation.read`.
+- Mutating routes (`POST|PATCH|DELETE` + trigger) require `automation.write`.
 
 ### POST `/api/automation/schedules`
 
@@ -1181,6 +1298,10 @@ Important: `scheduleId` in the request is currently validated as a **number**, b
 
 ## Products API (`/api/products/*`)
 
+Notes:
+- All routes require `products.read`.
+- Mutating routes (`POST|PUT|DELETE`) require `products.write`.
+
 ### GET `/api/products/stats`
 ### GET `/api/products/search?q=...`
 ### GET `/api/products/link-fiche/:ficheId`
@@ -1196,6 +1317,14 @@ Important: `POST /api/products/gammes` and `POST /api/products/formules` accept 
 ---
 
 ## Chat API (streaming) (`/api/*`)
+
+Notes:
+- **Permissions**:
+  - History endpoints require `chat.read` + the underlying resource read permission:
+    - Audit history: `audits.read`
+    - Fiche history: `fiches.read`
+  - Streaming chat endpoints require `chat.use` (maps to `chat` grant `write=true`) + the underlying resource read permission.
+- **Scope**: chat endpoints enforce scope for the referenced audit/fiche (prevents cross-groupe data access via LLM context).
 
 ### GET `/api/audits/:audit_id/chat/history`
 
@@ -1274,6 +1403,10 @@ This backend can publish realtime events via **Pusher Channels**.
   - `private-job-*` requires one of: `automation.read` / `audits.read` / `fiches.read`
   - `private-global` and `presence-global` are allowed for users with `realtime.auth`
   - `presence-org-*` requires `automation.read`
+- **Scope enforcement (SELF/GROUP/ALL)**:
+  - In non-test environments, the auth endpoint also enforces scope for:
+    - `private-audit-*` (based on the audit’s linked fiche, or by deriving `fiche_id` from tracking ids like `audit-<ficheId>-...`)
+    - `private-fiche-*` (based on `fiche_cache.groupe` and `fiche_cache_information.attribution_user_id`)
 - **Body**:
 
 ```json
@@ -1380,11 +1513,23 @@ export type ApiSuccessResponse<T> = {
 // Authentication (JWT)
 // --------------------------------------------
 
+export type PermissionScope = "SELF" | "GROUP" | "ALL";
+
+export type PermissionGrantDto = {
+  key: string; // e.g. "audits", "fiches", "admin.roles"
+  read: boolean;
+  write: boolean;
+  read_scope: PermissionScope;
+  write_scope: PermissionScope;
+};
+
 export type AuthUserDto = {
   id: string; // BigInt serialized as string
   email: string;
+  crm_user_id: string | null;
+  groupes: string[];
   roles: string[];
-  permissions: string[];
+  permissions: PermissionGrantDto[];
 };
 
 export type AuthTokensDto = {

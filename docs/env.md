@@ -155,7 +155,7 @@ Admin endpoints (require permissions):
   - cross-site frontend/backend: use `"none"` **and** `AUTH_COOKIE_SECURE="1"`
 
 ### `AUTH_SEED_ADMIN_EMAIL` / `AUTH_SEED_ADMIN_PASSWORD`
-- **What it does**: When set, `npm run seed` creates (or updates) an initial admin user and assigns the `admin` role.
+- **What it does**: When set, `npm run seed:auth` creates (or updates) an initial admin user and assigns the `admin` role.
 - **If missing**: user seeding is skipped (roles/permissions are still created).
 - **Where to get it**: you choose values (do not commit real credentials).
 

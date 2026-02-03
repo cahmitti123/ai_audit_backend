@@ -46,3 +46,22 @@ export function validateRefreshInput(data: unknown): RefreshInput {
   }
 }
 
+const inviteTokenSchema = z.string().trim().min(20).max(500);
+
+export const acceptInviteInputSchema = z.object({
+  invite_token: inviteTokenSchema,
+  password: passwordSchema,
+});
+
+export type AcceptInviteInput = z.infer<typeof acceptInviteInputSchema>;
+
+export function validateAcceptInviteInput(data: unknown): AcceptInviteInput {
+  try {
+    return acceptInviteInputSchema.parse(data);
+  } catch (err) {
+    logger.warn("Invalid accept-invite input", { error: err });
+    throw err instanceof Error
+      ? new ValidationError(err.message)
+      : new ValidationError("Invalid accept-invite input");
+  }
+}

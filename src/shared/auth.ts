@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 
-import { jwtVerify,SignJWT } from "jose";
+import { jwtVerify, SignJWT } from "jose";
 
+import type { PermissionGrant, PermissionScope } from "./auth-context.js";
 import { AuthenticationError, ConfigurationError } from "./errors.js";
 
 function envString(key: string): string | undefined {
@@ -21,7 +22,9 @@ export type AccessTokenClaims = {
   sub: string; // user id (stringified BigInt)
   email: string;
   roles: string[];
-  permissions: string[];
+  crmUserId: string | null;
+  groupes: string[];
+  permissions: PermissionGrant[];
 };
 
 export type AuthConfig = {
@@ -72,19 +75,41 @@ export async function signAccessToken(params: {
   userId: string;
   email: string;
   roles: string[];
-  permissions: string[];
+  crmUserId?: string | null;
+  groupes?: string[];
+  permissions: PermissionGrant[];
 }): Promise<string> {
   const cfg = getAuthConfig();
   const key = requireJwtAccessSecret();
 
   // Keep payload small and deterministic.
   const roles = Array.from(new Set((params.roles || []).map(String))).filter(Boolean);
-  const permissions = Array.from(new Set((params.permissions || []).map(String))).filter(Boolean);
+  const groupes = Array.from(new Set((params.groupes || []).map(String))).filter(Boolean);
+  const crmUserId = params.crmUserId ? String(params.crmUserId).trim() : null;
+
+  const permissions = Array.isArray(params.permissions) ? params.permissions : [];
+  const normalizedPerms: PermissionGrant[] = [];
+  const seen = new Set<string>();
+  for (const p of permissions) {
+    if (!p || typeof p !== "object") {continue;}
+    const permKey = typeof p.key === "string" ? p.key.trim() : "";
+    if (!permKey || seen.has(permKey)) {continue;}
+    seen.add(permKey);
+    normalizedPerms.push({
+      key: permKey,
+      read: Boolean(p.read),
+      write: Boolean(p.write),
+      read_scope: (p.read_scope as PermissionScope) ?? "SELF",
+      write_scope: (p.write_scope as PermissionScope) ?? "SELF",
+    });
+  }
 
   return await new SignJWT({
     email: params.email,
     roles,
-    permissions,
+    crm_user_id: crmUserId,
+    groupes,
+    permission_grants: normalizedPerms,
   })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setIssuer(cfg.issuer)
@@ -100,6 +125,31 @@ function readStringArray(payloadValue: unknown): string[] {
   const out: string[] = [];
   for (const v of payloadValue) {
     if (typeof v === "string" && v.trim()) {out.push(v.trim());}
+  }
+  return out;
+}
+
+function readScope(value: unknown): PermissionScope {
+  return value === "ALL" ? "ALL" : value === "GROUP" ? "GROUP" : "SELF";
+}
+
+function readPermissionGrants(payloadValue: unknown): PermissionGrant[] {
+  if (!Array.isArray(payloadValue)) {return [];}
+  const out: PermissionGrant[] = [];
+  const seen = new Set<string>();
+  for (const v of payloadValue) {
+    if (typeof v !== "object" || v === null) {continue;}
+    const rec = v as Record<string, unknown>;
+    const key = typeof rec.key === "string" ? rec.key.trim() : "";
+    if (!key || seen.has(key)) {continue;}
+    seen.add(key);
+    out.push({
+      key,
+      read: Boolean(rec.read),
+      write: Boolean(rec.write),
+      read_scope: readScope(rec.read_scope),
+      write_scope: readScope(rec.write_scope),
+    });
   }
   return out;
 }
@@ -122,9 +172,14 @@ export async function verifyAccessToken(token: string): Promise<AccessTokenClaim
     }
 
     const roles = readStringArray(payload.roles);
-    const permissions = readStringArray(payload.permissions);
+    const groupes = readStringArray(payload.groupes);
+    const crmUserId =
+      typeof payload.crm_user_id === "string" && payload.crm_user_id.trim()
+        ? payload.crm_user_id.trim()
+        : null;
+    const permissions = readPermissionGrants(payload.permission_grants);
 
-    return { sub, email, roles, permissions };
+    return { sub, email, roles, crmUserId, groupes, permissions };
   } catch (err: unknown) {
     if (err instanceof ConfigurationError) {throw err;}
     throw new AuthenticationError("Invalid or expired access token");

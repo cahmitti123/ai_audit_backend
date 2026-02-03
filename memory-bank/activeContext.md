@@ -5,6 +5,21 @@
 - Ensure frontend receives reliable progress via **SSE + webhooks**.
 
 ### Recent changes (high impact)
+- **Authentication + scoped RBAC (JWT)**:
+  - JWT claims now include `crm_user_id`, `groupes`, and `permissions` as **grants** (read/write + scope).
+  - Role permissions are now **dynamic** via `role_permissions.can_read/can_write/scope` with scopes: `SELF | GROUP | ALL`.
+  - Fiche/audit list endpoints enforce visibility scope:
+    - Fiches: `/api/fiches/status/by-date` and `/api/fiches/status/by-date-range` filter by group/self scope.
+    - Audits: `GET /api/audits` filters by group/self scope.
+  - Chat + realtime authorization also enforce scope:
+    - Chat endpoints require `chat.*` plus underlying `audits.read` / `fiches.read` and check scope before building context.
+    - Pusher auth (`/api/realtime/pusher/auth`) performs per-audit/per-fiche scope checks in non-test envs (uses `audits.resultData.audit_id` lookup for tracking IDs).
+  - Fiche-linked sensitive data is permission+scope protected:
+    - `GET /api/recordings/:fiche_id` requires `recordings.read` and enforces scope by fiche.
+    - Transcription routes require `transcriptions.read|write` and enforce scope by fiche.
+  - Remaining app routers now enforce their base read/write permissions:
+    - `audit-configs.read|write`, `automation.read|write`, `products.read|write`.
+  - Admin role APIs support `permission_grants` (and still accept legacy `permission_keys`).
 - **Audit step-level fan-out**:
   - `audit/run` orchestrates prerequisites then dispatches `audit/step.analyze` events.
   - Each step worker stores results in DB; a finalizer completes the audit once all steps exist.
@@ -60,7 +75,7 @@
   - Normalizes `ELEVENLABS_API_KEY` (trims whitespace / strips surrounding quotes).
   - Axios errors are rethrown as **sanitized** messages (avoid leaking headers like `xi-api-key`).
 - **Operational hardening**:
-  - Docker startup now runs `prisma migrate deploy` to prevent schema drift crashes (e.g., missing `audit_step_results.raw_result`).
+  - Docker startup now runs `prisma migrate deploy` **and** `npm run seed:auth` to prevent schema drift and ensure RBAC roles/permissions exist (optional admin user via `AUTH_SEED_ADMIN_*`).
   - Self-hosted Inngest is configured to poll the SDK URL (`--poll-interval`) so new function IDs/events are discovered without requiring a restart.
 - **Batch audits**:
   - `POST /api/audits/batch` now requires Redis for progress/finalization (fails fast if `REDIS_URL` is not configured).

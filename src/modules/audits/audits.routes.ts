@@ -14,10 +14,14 @@ import { type Request, type Response,Router } from "express";
 
 import { inngest } from "../../inngest/client.js";
 import { asyncHandler } from "../../middleware/async-handler.js";
+import { requirePermission } from "../../middleware/authz.js";
+import { getRequestAuth, isUserAuth } from "../../shared/auth-context.js";
 import { jsonResponse } from "../../shared/bigint-serializer.js";
-import { AppError, ValidationError } from "../../shared/errors.js";
+import { AppError, AuthorizationError, ValidationError } from "../../shared/errors.js";
 import { logger } from "../../shared/logger.js";
+import { prisma } from "../../shared/prisma.js";
 import { getRedisClient } from "../../shared/redis.js";
+import { fetchFicheDetails } from "../fiches/fiches.api.js";
 import {
   controlPointStatutEnum,
   type ListAuditsQuery,
@@ -46,6 +50,130 @@ function parsePositiveIntParam(value: string, name = "value"): number {
     throw new ValidationError(`Invalid ${name}`);
   }
   return n;
+}
+
+type Scope = "ALL" | "GROUP" | "SELF";
+type ScopeContext = { scope: Scope; groupes: string[]; crmUserId: string | null };
+
+function getAuditsScope(req: Request, action: "read" | "write"): ScopeContext {
+  const auth = getRequestAuth(req);
+  if (!auth || auth.kind === "apiToken") {
+    return { scope: "ALL", groupes: [], crmUserId: null };
+  }
+  if (!isUserAuth(auth)) {
+    return { scope: "SELF", groupes: [], crmUserId: null };
+  }
+
+  const grant = auth.permissions.find((p) => p.key === "audits");
+  const scope = action === "read" ? (grant?.read_scope ?? "SELF") : (grant?.write_scope ?? "SELF");
+  return {
+    scope,
+    groupes: Array.isArray(auth.groupes) ? auth.groupes : [],
+    crmUserId: auth.crmUserId ?? null,
+  };
+}
+
+function enforceAuditsVisibilityScope(req: Request, filters: Record<string, unknown>): void {
+  const s = getAuditsScope(req, "read");
+  if (s.scope === "GROUP") {
+    const allowed = s.groupes;
+    const requested = Array.isArray(filters.groupes) ? (filters.groupes as unknown[]) : undefined;
+    const requestedGroupes = requested ? requested.map(String) : undefined;
+    const next = requestedGroupes ? requestedGroupes.filter((g) => allowed.includes(g)) : allowed;
+    filters.groupes = next.length > 0 ? next : ["__none__"];
+  } else if (s.scope === "SELF") {
+    filters.attributionUserId = s.crmUserId ? s.crmUserId : "__none__";
+  }
+}
+
+type FicheAccessInfo = { groupe: string | null; attributionUserId: string | null };
+
+async function resolveFicheAccessInfo(ficheId: string): Promise<FicheAccessInfo> {
+  const cached = await prisma.ficheCache.findUnique({
+    where: { ficheId },
+    select: {
+      groupe: true,
+      information: {
+        select: {
+          groupe: true,
+          attributionUserId: true,
+        },
+      },
+    },
+  });
+
+  const cachedInfo: FicheAccessInfo = {
+    groupe: cached?.information?.groupe ?? cached?.groupe ?? null,
+    attributionUserId: cached?.information?.attributionUserId ?? null,
+  };
+
+  // If we can already decide from cache, prefer it.
+  if (cachedInfo.groupe || cachedInfo.attributionUserId) {
+    return cachedInfo;
+  }
+
+  // Fallback: fetch minimal fiche details (no recordings) from gateway to determine scope.
+  try {
+    const details = await fetchFicheDetails(ficheId, undefined, { includeRecordings: false });
+    const info = details.information;
+    return {
+      groupe: info && typeof info.groupe === "string" ? info.groupe : null,
+      attributionUserId: info && typeof info.attribution_user_id === "string" ? info.attribution_user_id : null,
+    };
+  } catch {
+    return cachedInfo;
+  }
+}
+
+function isAllowedByScope(scope: ScopeContext, info: FicheAccessInfo): boolean {
+  if (scope.scope === "ALL") {return true;}
+  if (scope.scope === "GROUP") {
+    return Boolean(info.groupe && scope.groupes.includes(info.groupe));
+  }
+  return Boolean(info.attributionUserId && scope.crmUserId && info.attributionUserId === scope.crmUserId);
+}
+
+async function assertFicheInAuditsScope(req: Request, ficheId: string, action: "read" | "write"): Promise<void> {
+  const scope = getAuditsScope(req, action);
+  if (scope.scope === "ALL") {return;}
+
+  const info = await resolveFicheAccessInfo(ficheId);
+  if (!isAllowedByScope(scope, info)) {
+    throw new AuthorizationError("Forbidden");
+  }
+}
+
+async function assertAuditInScope(req: Request, auditId: bigint, action: "read" | "write"): Promise<void> {
+  const scope = getAuditsScope(req, action);
+  if (scope.scope === "ALL") {return;}
+
+  const audit = await prisma.audit.findUnique({
+    where: { id: auditId },
+    select: {
+      ficheCache: {
+        select: {
+          groupe: true,
+          information: {
+            select: {
+              groupe: true,
+              attributionUserId: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  if (!audit) {return;}
+
+  const info: FicheAccessInfo = {
+    groupe: audit.ficheCache.information?.groupe ?? audit.ficheCache.groupe ?? null,
+    attributionUserId: audit.ficheCache.information?.attributionUserId ?? null,
+  };
+
+  if (!isAllowedByScope(scope, info)) {
+    throw new AuthorizationError("Forbidden");
+  }
 }
 
 /**
@@ -196,9 +324,26 @@ function parsePositiveIntParam(value: string, name = "value"): number {
  */
 auditsRouter.get(
   "/",
+  requirePermission("audits.read"),
   asyncHandler(async (req: Request, res: Response) => {
     // Parse and validate query parameters
     const filters = parseListAuditsQuery(req.query as unknown as ListAuditsQuery);
+
+    // Enforce RBAC scope (self / group / all) for audit visibility.
+    const auth = getRequestAuth(req);
+    if (isUserAuth(auth)) {
+      const grant = auth.permissions.find((p) => p.key === "audits");
+      const scope = grant?.read_scope ?? "SELF";
+
+      if (scope === "GROUP") {
+        const allowed = Array.isArray(auth.groupes) ? auth.groupes : [];
+        const requested = filters.groupes;
+        const next = requested ? requested.filter((g) => allowed.includes(g)) : allowed;
+        filters.groupes = next.length > 0 ? next : ["__none__"];
+      } else if (scope === "SELF") {
+        filters.attributionUserId = auth.crmUserId ? auth.crmUserId : "__none__";
+      }
+    }
 
     // Execute query via service
     const result = await auditsService.listAudits(filters);
@@ -234,6 +379,7 @@ auditsRouter.get(
  */
 auditsRouter.post(
   "/",
+  requirePermission("audits.run"),
   asyncHandler(async (req: Request, res: Response) => {
     const body: unknown = req.body;
     const data =
@@ -279,6 +425,9 @@ auditsRouter.post(
     const automation_schedule_id = parsed.automation_schedule_id;
     const automation_run_id = parsed.automation_run_id;
     const trigger_source = parsed.trigger_source;
+
+    // Enforce RBAC scope (self / group / all) for audit execution.
+    await assertFicheInAuditsScope(req, ficheId, "write");
 
     const now = Date.now();
     const eventId = `audit-${ficheId}-${auditConfigId}-${now}`;
@@ -450,9 +599,13 @@ auditsRouter.post(
  */
 auditsRouter.get(
   "/grouped-by-fiches",
+  requirePermission("audits.read"),
   asyncHandler(async (req: Request, res: Response) => {
     // Parse and validate query parameters
     const filters = parseListAuditsQuery(req.query as unknown as ListAuditsQuery);
+
+    // Enforce RBAC scope (self / group / all) for audit visibility.
+    enforceAuditsVisibilityScope(req, filters as unknown as Record<string, unknown>);
 
     // Execute query via service
     const result = await auditsService.getAuditsGroupedByFiches(filters);
@@ -491,6 +644,7 @@ auditsRouter.get(
  */
 auditsRouter.get(
   "/grouped",
+  requirePermission("audits.read"),
   asyncHandler(async (req: Request, res: Response) => {
     const groupByRaw = typeof req.query.group_by === "string" ? req.query.group_by.trim() : "";
     if (!groupByRaw) {
@@ -521,6 +675,7 @@ auditsRouter.get(
         : undefined;
 
     const filters = parseListAuditsQuery(req.query as unknown as ListAuditsQuery);
+    enforceAuditsVisibilityScope(req, filters as unknown as Record<string, unknown>);
     const result = await auditsService.groupAudits({
       filters,
       groupBy: groupByRaw as (typeof allowed)[number],
@@ -601,6 +756,7 @@ auditsRouter.get(
  */
 auditsRouter.post(
   "/run",
+  requirePermission("audits.run"),
   asyncHandler(async (req: Request, res: Response) => {
     const body: unknown = req.body;
     const data =
@@ -643,6 +799,9 @@ auditsRouter.post(
     const auditConfigId = parsed.audit_config_id;
     const user_id = parsed.user_id;
     const use_rlm = parsed.use_rlm;
+
+    // Enforce RBAC scope (self / group / all) for audit execution.
+    await assertFicheInAuditsScope(req, ficheId, "write");
 
     logger.info("Queuing audit", {
       fiche_id: ficheId,
@@ -716,6 +875,7 @@ auditsRouter.post(
  */
 auditsRouter.post(
   "/run-latest",
+  requirePermission("audits.run"),
   asyncHandler(async (req: Request, res: Response) => {
     const body: unknown = req.body;
     const data =
@@ -739,6 +899,9 @@ auditsRouter.post(
         message: "fiche_id is required",
       });
     }
+
+    // Enforce RBAC scope (self / group / all) for audit execution.
+    await assertFicheInAuditsScope(req, String(fiche_id).trim(), "write");
 
     // Get latest config ID
     const { getLatestActiveConfig } = await import(
@@ -830,6 +993,7 @@ auditsRouter.post(
  */
 auditsRouter.post(
   "/batch",
+  requirePermission("audits.run"),
   asyncHandler(async (req: Request, res: Response) => {
     const body: unknown = req.body;
     const data =
@@ -853,6 +1017,41 @@ auditsRouter.post(
     const audit_config_id = parsed.audit_config_id;
     const user_id = parsed.user_id;
     const use_rlm = parsed.use_rlm;
+
+    // Enforce RBAC scope (self / group / all) for audit execution.
+    const scope = getAuditsScope(req, "write");
+    if (scope.scope !== "ALL") {
+      const uniqueIds = Array.from(new Set(ficheIds.map(String)));
+      if (uniqueIds.length > 0) {
+        const rows =
+          scope.scope === "GROUP"
+            ? await prisma.ficheCache.findMany({
+                where: {
+                  ficheId: { in: uniqueIds },
+                  OR: [
+                    { groupe: { in: scope.groupes } },
+                    { information: { is: { groupe: { in: scope.groupes } } } },
+                  ],
+                },
+                select: { ficheId: true },
+              })
+            : await prisma.ficheCache.findMany({
+                where: {
+                  ficheId: { in: uniqueIds },
+                  information: {
+                    is: { attributionUserId: scope.crmUserId ? scope.crmUserId : "__none__" },
+                  },
+                },
+                select: { ficheId: true },
+              });
+
+        const allowed = new Set(rows.map((r) => r.ficheId));
+        const allAllowed = uniqueIds.every((id) => allowed.has(id));
+        if (!allAllowed) {
+          throw new AuthorizationError("Forbidden");
+        }
+      }
+    }
 
     // Batch progress/completion tracking requires Redis. Fail fast if not configured.
     let redisOk = false;
@@ -914,8 +1113,10 @@ auditsRouter.post(
  */
 auditsRouter.get(
   "/by-fiche/:fiche_id",
+  requirePermission("audits.read"),
   asyncHandler(async (req: Request, res: Response) => {
     const includeDetails = req.query.include_details === "true";
+    await assertFicheInAuditsScope(req, req.params.fiche_id, "read");
     const audits = await auditsService.getAuditsByFiche(
       req.params.fiche_id,
       includeDetails
@@ -938,8 +1139,12 @@ auditsRouter.get(
  */
 auditsRouter.get(
   "/:audit_id",
+  requirePermission("audits.read"),
   asyncHandler(async (req: Request, res: Response) => {
-    const audit = await auditsService.getAuditById(req.params.audit_id);
+    const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
+    await assertAuditInScope(req, auditId, "read");
+
+    const audit = await auditsService.getAuditById(auditId);
 
     if (!audit) {
       return res.status(404).json({
@@ -1032,8 +1237,10 @@ auditsRouter.get(
  */
 auditsRouter.get(
   "/:audit_id/steps/:step_position/control-points/:control_point_index",
+  requirePermission("audits.read"),
   asyncHandler(async (req: Request, res: Response) => {
     const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
+    await assertAuditInScope(req, auditId, "read");
     const stepPosition = parsePositiveIntParam(req.params.step_position, "step_position");
     const controlPointIndex = parsePositiveIntParam(
       req.params.control_point_index,
@@ -1109,8 +1316,10 @@ auditsRouter.get(
  */
 auditsRouter.patch(
   "/:audit_id/steps/:step_position/control-points/:control_point_index/review",
+  requirePermission("audits.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
+    await assertAuditInScope(req, auditId, "write");
     const stepPosition = parsePositiveIntParam(req.params.step_position, "step_position");
     const controlPointIndex = parsePositiveIntParam(
       req.params.control_point_index,
@@ -1185,8 +1394,10 @@ auditsRouter.patch(
  */
 auditsRouter.patch(
   "/:audit_id/steps/:step_position/review",
+  requirePermission("audits.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
+    await assertAuditInScope(req, auditId, "write");
     const stepPosition = parsePositiveIntParam(req.params.step_position, "step_position");
     const input = validateReviewAuditStepResultInput(req.body);
 
@@ -1208,8 +1419,10 @@ auditsRouter.patch(
  */
 auditsRouter.patch(
   "/:audit_id",
+  requirePermission("audits.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
+    await assertAuditInScope(req, auditId, "write");
     const input = validateUpdateAuditInput(req.body);
 
     const updated = await auditsService.updateAuditMetadata(auditId, input);
@@ -1233,8 +1446,10 @@ auditsRouter.patch(
  */
 auditsRouter.delete(
   "/:audit_id",
+  requirePermission("audits.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
+    await assertAuditInScope(req, auditId, "write");
 
     const updated = await auditsService.updateAuditMetadata(auditId, { deleted: true });
     if (!updated) {

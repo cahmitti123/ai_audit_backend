@@ -8,9 +8,12 @@ import type { Request, Response } from "express";
 import { Router } from "express";
 
 import { asyncHandler } from "../../middleware/async-handler.js";
-import { NotFoundError, ValidationError } from "../../shared/errors.js";
+import { requirePermission } from "../../middleware/authz.js";
+import { getRequestAuth, isUserAuth } from "../../shared/auth-context.js";
+import { AuthorizationError, NotFoundError, ValidationError } from "../../shared/errors.js";
 import { ok } from "../../shared/http.js";
 import { logger } from "../../shared/logger.js";
+import { prisma } from "../../shared/prisma.js";
 import {
   addMessage,
   getOrCreateAuditConversation,
@@ -37,6 +40,102 @@ function parseBigIntParam(value: string, name = "id"): bigint {
   }
 }
 
+type Scope = "ALL" | "GROUP" | "SELF";
+type ScopeContext = { scope: Scope; groupes: string[]; crmUserId: string | null };
+
+function getScopeContext(req: Request, permissionKey: string, action: "read" | "write"): ScopeContext {
+  const auth = getRequestAuth(req);
+  if (!auth || auth.kind === "apiToken") {
+    return { scope: "ALL", groupes: [], crmUserId: null };
+  }
+  if (!isUserAuth(auth)) {
+    return { scope: "SELF", groupes: [], crmUserId: null };
+  }
+
+  const grant = auth.permissions.find((p) => p.key === permissionKey);
+  const scope = action === "read" ? (grant?.read_scope ?? "SELF") : (grant?.write_scope ?? "SELF");
+  return {
+    scope,
+    groupes: Array.isArray(auth.groupes) ? auth.groupes : [],
+    crmUserId: auth.crmUserId ?? null,
+  };
+}
+
+function isAllowedByScope(scope: ScopeContext, info: { groupe: string | null; attributionUserId: string | null }): boolean {
+  if (scope.scope === "ALL") {return true;}
+  if (scope.scope === "GROUP") {
+    return Boolean(info.groupe && scope.groupes.includes(info.groupe));
+  }
+  return Boolean(info.attributionUserId && scope.crmUserId && info.attributionUserId === scope.crmUserId);
+}
+
+async function assertAuditVisible(req: Request, auditId: bigint): Promise<{ ficheId: string }> {
+  const scope = getScopeContext(req, "audits", "read");
+  if (scope.scope === "ALL") {
+    const row = await prisma.audit.findUnique({
+      where: { id: auditId },
+      select: { ficheCache: { select: { ficheId: true } } },
+    });
+    if (!row) {throw new NotFoundError("Audit", auditId.toString());}
+    return { ficheId: row.ficheCache.ficheId };
+  }
+
+  const row = await prisma.audit.findUnique({
+    where: { id: auditId },
+    select: {
+      ficheCache: {
+        select: {
+          ficheId: true,
+          groupe: true,
+          information: {
+            select: {
+              groupe: true,
+              attributionUserId: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  if (!row) {throw new NotFoundError("Audit", auditId.toString());}
+
+  const info = {
+    groupe: row.ficheCache.information?.groupe ?? row.ficheCache.groupe ?? null,
+    attributionUserId: row.ficheCache.information?.attributionUserId ?? null,
+  };
+  if (!isAllowedByScope(scope, info)) {
+    throw new AuthorizationError("Forbidden");
+  }
+  return { ficheId: row.ficheCache.ficheId };
+}
+
+async function assertFicheVisible(req: Request, ficheId: string): Promise<void> {
+  const scope = getScopeContext(req, "fiches", "read");
+  if (scope.scope === "ALL") {return;}
+
+  const row = await prisma.ficheCache.findUnique({
+    where: { ficheId },
+    select: {
+      groupe: true,
+      information: {
+        select: {
+          groupe: true,
+          attributionUserId: true,
+        },
+      },
+    },
+  });
+  if (!row) {throw new AuthorizationError("Forbidden");}
+
+  const info = {
+    groupe: row.information?.groupe ?? row.groupe ?? null,
+    attributionUserId: row.information?.attributionUserId ?? null,
+  };
+  if (!isAllowedByScope(scope, info)) {
+    throw new AuthorizationError("Forbidden");
+  }
+}
+
 /**
  * @swagger
  * /api/audits/{audit_id}/chat/history:
@@ -57,17 +156,12 @@ function parseBigIntParam(value: string, name = "id"): bigint {
  */
 chatRouter.get(
   "/audits/:audit_id/chat/history",
+  requirePermission("chat.read"),
+  requirePermission("audits.read"),
   asyncHandler(async (req: Request, res: Response) => {
     const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
 
-    // Get audit to find fiche_id
-    const { getAuditById } = await import("../audits/audits.repository.js");
-    const audit = await getAuditById(auditId);
-    if (!audit) {
-      throw new NotFoundError("Audit", req.params.audit_id);
-    }
-
-    const ficheId = audit.ficheCache.ficheId;
+    const { ficheId } = await assertAuditVisible(req, auditId);
 
     // Get or create conversation
     const conversation = await getOrCreateAuditConversation(auditId, ficheId);
@@ -123,6 +217,8 @@ chatRouter.get(
  */
 chatRouter.post(
   "/audits/:audit_id/chat",
+  requirePermission("chat.use"),
+  requirePermission("audits.read"),
   asyncHandler(async (req: Request, res: Response) => {
     const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
     const body: unknown = req.body;
@@ -133,14 +229,7 @@ chatRouter.post(
       throw new ValidationError("Message required");
     }
 
-    // Get audit to find fiche_id
-    const { getAuditById } = await import("../audits/audits.repository.js");
-    const audit = await getAuditById(auditId);
-    if (!audit) {
-      throw new NotFoundError("Audit", req.params.audit_id);
-    }
-
-    const ficheId = audit.ficheCache.ficheId;
+    const { ficheId } = await assertAuditVisible(req, auditId);
 
     // Get or create conversation
     const conversation = await getOrCreateAuditConversation(auditId, ficheId);
@@ -228,8 +317,12 @@ chatRouter.post(
  */
 chatRouter.get(
   "/fiches/:fiche_id/chat/history",
+  requirePermission("chat.read"),
+  requirePermission("fiches.read"),
   asyncHandler(async (req: Request, res: Response) => {
     const { fiche_id } = req.params;
+
+    await assertFicheVisible(req, fiche_id);
 
     // Get or create conversation
     const conversation = await getOrCreateFicheConversation(fiche_id);
@@ -282,6 +375,8 @@ chatRouter.get(
  */
 chatRouter.post(
   "/fiches/:fiche_id/chat",
+  requirePermission("chat.use"),
+  requirePermission("fiches.read"),
   asyncHandler(async (req: Request, res: Response) => {
     const { fiche_id } = req.params;
     const body: unknown = req.body;
@@ -291,6 +386,8 @@ chatRouter.post(
     if (!message || message.trim().length === 0) {
       throw new ValidationError("Message required");
     }
+
+    await assertFicheVisible(req, fiche_id);
 
     // Get or create conversation
     const conversation = await getOrCreateFicheConversation(fiche_id);

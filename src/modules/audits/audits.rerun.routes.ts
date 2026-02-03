@@ -8,11 +8,64 @@ import { type Request, type Response,Router } from "express";
 
 import { inngest } from "../../inngest/client.js";
 import { asyncHandler } from "../../middleware/async-handler.js";
+import { requirePermission } from "../../middleware/authz.js";
+import { getRequestAuth, isUserAuth } from "../../shared/auth-context.js";
 import { jsonResponse } from "../../shared/bigint-serializer.js";
-import { ValidationError } from "../../shared/errors.js";
+import { AuthorizationError, NotFoundError, ValidationError } from "../../shared/errors.js";
 import { logger } from "../../shared/logger.js";
+import { prisma } from "../../shared/prisma.js";
 
 export const auditRerunRouter = Router();
+
+type Scope = "ALL" | "GROUP" | "SELF";
+type ScopeContext = { scope: Scope; groupes: string[]; crmUserId: string | null };
+
+function getAuditsWriteScope(req: Request): ScopeContext {
+  const auth = getRequestAuth(req);
+  if (!auth || auth.kind === "apiToken") {
+    return { scope: "ALL", groupes: [], crmUserId: null };
+  }
+  if (!isUserAuth(auth)) {
+    return { scope: "SELF", groupes: [], crmUserId: null };
+  }
+  const grant = auth.permissions.find((p) => p.key === "audits");
+  const scope = grant?.write_scope ?? "SELF";
+  return {
+    scope,
+    groupes: Array.isArray(auth.groupes) ? auth.groupes : [],
+    crmUserId: auth.crmUserId ?? null,
+  };
+}
+
+async function assertAuditWritableInScope(req: Request, auditId: bigint): Promise<void> {
+  const scope = getAuditsWriteScope(req);
+  if (scope.scope === "ALL") {return;}
+
+  const row = await prisma.audit.findUnique({
+    where: { id: auditId },
+    select: {
+      ficheCache: {
+        select: {
+          groupe: true,
+          information: { select: { groupe: true, attributionUserId: true } },
+        },
+      },
+    },
+  });
+  if (!row) {throw new NotFoundError("Audit", auditId.toString());}
+
+  const ficheGroupe = row.ficheCache.information?.groupe ?? row.ficheCache.groupe ?? null;
+  const attributionUserId = row.ficheCache.information?.attributionUserId ?? null;
+
+  const allowed =
+    scope.scope === "GROUP"
+      ? Boolean(ficheGroupe && scope.groupes.includes(ficheGroupe))
+      : Boolean(attributionUserId && scope.crmUserId && attributionUserId === scope.crmUserId);
+
+  if (!allowed) {
+    throw new AuthorizationError("Forbidden");
+  }
+}
 
 /**
  * @swagger
@@ -92,6 +145,7 @@ export const auditRerunRouter = Router();
  */
 auditRerunRouter.post(
   "/:audit_id/steps/:step_position/rerun",
+  requirePermission("audits.rerun"),
   asyncHandler(async (req: Request, res: Response) => {
     const auditIdRaw = req.params.audit_id;
     let auditId = "";
@@ -100,6 +154,8 @@ auditRerunRouter.post(
     } catch {
       throw new ValidationError("Invalid audit_id");
     }
+    const auditIdBigInt = BigInt(auditId);
+    await assertAuditWritableInScope(req, auditIdBigInt);
     const stepPosition = Number.parseInt(req.params.step_position, 10);
 
     if (!Number.isFinite(stepPosition) || stepPosition <= 0) {
@@ -220,6 +276,7 @@ auditRerunRouter.post(
  */
 auditRerunRouter.post(
   "/:audit_id/steps/:step_position/control-points/:control_point_index/rerun",
+  requirePermission("audits.rerun"),
   asyncHandler(async (req: Request, res: Response) => {
     const auditIdRaw = req.params.audit_id;
     let auditId = "";
@@ -228,6 +285,8 @@ auditRerunRouter.post(
     } catch {
       throw new ValidationError("Invalid audit_id");
     }
+    const auditIdBigInt = BigInt(auditId);
+    await assertAuditWritableInScope(req, auditIdBigInt);
     const stepPosition = Number.parseInt(req.params.step_position, 10);
     const controlPointIndex = Number.parseInt(req.params.control_point_index, 10);
 

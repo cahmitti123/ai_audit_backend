@@ -760,6 +760,7 @@ function buildAuditWhere(filters: Partial<ListAuditsFilters>): Prisma.AuditWhere
     groupeQuery,
     agenceQuery,
     prospectQuery,
+    attributionUserId,
     salesDates,
     salesDateFrom,
     salesDateTo,
@@ -875,6 +876,17 @@ function buildAuditWhere(filters: Partial<ListAuditsFilters>): Prisma.AuditWhere
   // Filter by trigger source(s)
   if (triggerSources && triggerSources.length > 0) {
     and.push({ triggerSource: { in: triggerSources } });
+  }
+
+  // Scope: filter by CRM attribution user id on the fiche
+  if (typeof attributionUserId === "string" && attributionUserId.trim()) {
+    and.push({
+      ficheCache: {
+        information: {
+          is: { attributionUserId: attributionUserId.trim() },
+        },
+      },
+    });
   }
 
   // Fiche-level filters (groupe/prospect/etc)

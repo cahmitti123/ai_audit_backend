@@ -30,6 +30,8 @@ export const authContextMiddleware: RequestHandler = (req, _res, next) => {
         kind: "user",
         userId: claims.sub,
         email: claims.email,
+        crmUserId: claims.crmUserId,
+        groupes: claims.groupes,
         roles: claims.roles,
         permissions: claims.permissions,
       } satisfies AuthContext);

@@ -13,6 +13,7 @@
 import { type Request, type Response,Router } from "express";
 
 import { asyncHandler } from "../../middleware/async-handler.js";
+import { requirePermission } from "../../middleware/authz.js";
 import { jsonResponse } from "../../shared/bigint-serializer.js";
 import { NotFoundError, ValidationError } from "../../shared/errors.js";
 import {
@@ -24,6 +25,10 @@ import {
 import * as auditConfigsService from "./audit-configs.service.js";
 
 export const auditConfigsRouter = Router();
+
+// Require read access by default for audit-config routes.
+// (Machine API tokens bypass permission checks in `requirePermission`.)
+auditConfigsRouter.use(requirePermission("audit-configs.read"));
 
 /**
  * @swagger
@@ -129,6 +134,7 @@ auditConfigsRouter.get(
  */
 auditConfigsRouter.post(
   "/",
+  requirePermission("audit-configs.write"),
   asyncHandler(async (req: Request, res: Response) => {
     // Validate input structure first
     const input = validateCreateAuditConfigInput(req.body);
@@ -156,6 +162,7 @@ auditConfigsRouter.post(
  */
 auditConfigsRouter.put(
   "/:id",
+  requirePermission("audit-configs.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const input = validateUpdateAuditConfigInput(req.body);
     const config = await auditConfigsService.updateAuditConfig(req.params.id, input);
@@ -175,6 +182,7 @@ auditConfigsRouter.put(
  */
 auditConfigsRouter.delete(
   "/:id",
+  requirePermission("audit-configs.write"),
   asyncHandler(async (req: Request, res: Response) => {
     await auditConfigsService.deleteAuditConfig(req.params.id);
     return jsonResponse(res, { success: true, message: "Audit config deleted" });
@@ -190,6 +198,7 @@ auditConfigsRouter.delete(
  */
 auditConfigsRouter.post(
   "/:config_id/steps",
+  requirePermission("audit-configs.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const input = validateCreateAuditStepInput(req.body);
     const step = await auditConfigsService.addAuditStep(req.params.config_id, input);
@@ -213,6 +222,7 @@ auditConfigsRouter.post(
  */
 auditConfigsRouter.put(
   "/steps/:step_id",
+  requirePermission("audit-configs.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const input = validateUpdateAuditStepInput(req.body);
     const step = await auditConfigsService.updateAuditStep(req.params.step_id, input);
@@ -229,6 +239,7 @@ auditConfigsRouter.put(
  */
 auditConfigsRouter.delete(
   "/steps/:step_id",
+  requirePermission("audit-configs.write"),
   asyncHandler(async (req: Request, res: Response) => {
     await auditConfigsService.deleteAuditStep(req.params.step_id);
     return jsonResponse(res, { success: true, message: "Step deleted" });
@@ -244,6 +255,7 @@ auditConfigsRouter.delete(
  */
 auditConfigsRouter.put(
   "/:config_id/steps/reorder",
+  requirePermission("audit-configs.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const { stepIds } = req.body;
     if (!Array.isArray(stepIds)) {

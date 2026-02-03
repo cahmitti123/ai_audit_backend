@@ -15,8 +15,10 @@ import { Router } from "express";
 
 import { inngest } from "../../inngest/client.js";
 import { asyncHandler } from "../../middleware/async-handler.js";
+import { requirePermission } from "../../middleware/authz.js";
+import { getRequestAuth, isUserAuth } from "../../shared/auth-context.js";
 import { jsonResponse } from "../../shared/bigint-serializer.js";
-import { ValidationError } from "../../shared/errors.js";
+import { AuthorizationError, ValidationError } from "../../shared/errors.js";
 import { ok } from "../../shared/http.js";
 import { logger } from "../../shared/logger.js";
 import { prisma } from "../../shared/prisma.js";
@@ -25,6 +27,75 @@ import * as fichesRepository from "./fiches.repository.js";
 import * as fichesService from "./fiches.service.js";
 
 export const fichesRouter = Router();
+
+// Require fiche read access for all fiche endpoints by default.
+// (Machine API tokens bypass permission checks in `requirePermission`.)
+fichesRouter.use(requirePermission("fiches.read"));
+
+function getFicheReadScope(req: Request): { scope: "ALL" | "GROUP" | "SELF"; groupes: string[]; crmUserId: string | null } {
+  const auth = getRequestAuth(req);
+  if (!auth || auth.kind === "apiToken") {
+    return { scope: "ALL", groupes: [], crmUserId: null };
+  }
+  if (!isUserAuth(auth)) {
+    return { scope: "SELF", groupes: [], crmUserId: null };
+  }
+  const grant = auth.permissions.find((p) => p.key === "fiches");
+  const scope = grant?.read_scope ?? "SELF";
+  return {
+    scope,
+    groupes: Array.isArray(auth.groupes) ? auth.groupes : [],
+    crmUserId: auth.crmUserId ?? null,
+  };
+}
+
+function assertFichesWrite(req: Request): void {
+  const auth = getRequestAuth(req);
+  if (!auth || auth.kind === "apiToken") {return;}
+  if (!isUserAuth(auth)) {throw new AuthorizationError("User authentication required");}
+  const grant = auth.permissions.find((p) => p.key === "fiches");
+  if (!grant?.write) {throw new AuthorizationError("Missing permission");}
+}
+
+async function filterFicheIdsBySelfScope(ficheIds: string[], crmUserId: string | null): Promise<Set<string>> {
+  const ids = ficheIds.filter((id) => typeof id === "string" && id.trim());
+  if (!crmUserId || !ids.length) {return new Set<string>();}
+
+  const rows = await prisma.ficheCache.findMany({
+    where: {
+      ficheId: { in: ids },
+      information: {
+        is: { attributionUserId: crmUserId },
+      },
+    },
+    select: { ficheId: true },
+  });
+
+  return new Set(rows.map((r) => r.ficheId));
+}
+
+async function filterFicheIdsByGroupScope(ficheIds: string[], groupes: string[]): Promise<Set<string>> {
+  const ids = ficheIds.filter((id) => typeof id === "string" && id.trim());
+  const allowedGroupes = (groupes || []).filter((g) => typeof g === "string" && g.trim());
+  if (!ids.length || !allowedGroupes.length) {return new Set<string>();}
+
+  const rows = await prisma.ficheCache.findMany({
+    where: {
+      ficheId: { in: ids },
+      OR: [
+        { groupe: { in: allowedGroupes } },
+        {
+          information: {
+            is: { groupe: { in: allowedGroupes } },
+          },
+        },
+      ],
+    },
+    select: { ficheId: true },
+  });
+
+  return new Set(rows.map((r) => r.ficheId));
+}
 
 /**
  * @swagger
@@ -72,6 +143,25 @@ fichesRouter.get(
       shouldIncludeStatus
     );
 
+    // Enforce RBAC scope (self / group / all) for fiche visibility.
+    const scoped = result as unknown as { fiches: Array<{ id: string }>; total: number };
+    const scope = getFicheReadScope(req);
+    if (scope.scope === "GROUP") {
+      const allowed = await filterFicheIdsByGroupScope(
+        scoped.fiches.map((f) => f.id),
+        scope.groupes
+      );
+      scoped.fiches = scoped.fiches.filter((f) => allowed.has(f.id));
+      scoped.total = scoped.fiches.length;
+    } else if (scope.scope === "SELF") {
+      const allowed = await filterFicheIdsBySelfScope(
+        scoped.fiches.map((f) => f.id),
+        scope.crmUserId
+      );
+      scoped.fiches = scoped.fiches.filter((f) => allowed.has(f.id));
+      scoped.total = scoped.fiches.length;
+    }
+
     return res.json(result);
   })
 );
@@ -106,9 +196,36 @@ fichesRouter.get(
     const shouldRefresh = refresh === "true";
     const includeMailDevis = req.query.include_mail_devis === "true";
 
+    // Refresh triggers an upstream fetch + DB upsert; require write access.
+    if (shouldRefresh) {
+      assertFichesWrite(req);
+    }
+
     const ficheDetails = await fichesService.getFiche(fiche_id, shouldRefresh, {
       includeMailDevis,
     });
+
+    // Enforce RBAC scope (self / group / all) for fiche visibility.
+    const scope = getFicheReadScope(req);
+    if (scope.scope !== "ALL") {
+      const info = (ficheDetails as { information?: unknown }).information as
+        | { groupe?: unknown; attribution_user_id?: unknown }
+        | null
+        | undefined;
+      const ficheGroupe = typeof info?.groupe === "string" ? info.groupe : null;
+      const attributionUserId =
+        typeof info?.attribution_user_id === "string" ? info.attribution_user_id : null;
+
+      const allowed =
+        scope.scope === "GROUP"
+          ? Boolean(ficheGroupe && scope.groupes.includes(ficheGroupe))
+          : Boolean(attributionUserId && scope.crmUserId && attributionUserId === scope.crmUserId);
+
+      if (!allowed) {
+        throw new AuthorizationError("Forbidden");
+      }
+    }
+
     return jsonResponse(res, ficheDetails);
   })
 );
@@ -146,6 +263,24 @@ fichesRouter.get(
       });
     }
 
+    // Enforce RBAC scope (self / group / all) for fiche visibility.
+    const scope = getFicheReadScope(req);
+    if (scope.scope === "GROUP") {
+      const groupe = cached.groupe;
+      const quickAllowed = typeof groupe === "string" && scope.groupes.includes(groupe);
+      if (!quickAllowed) {
+        const allowed = await filterFicheIdsByGroupScope([cached.ficheId], scope.groupes);
+        if (!allowed.has(cached.ficheId)) {
+          throw new AuthorizationError("Forbidden");
+        }
+      }
+    } else if (scope.scope === "SELF") {
+      const allowed = await filterFicheIdsBySelfScope([cached.ficheId], scope.crmUserId);
+      if (!allowed.has(cached.ficheId)) {
+        throw new AuthorizationError("Forbidden");
+      }
+    }
+
     return ok(res, {
       ficheId: cached.ficheId,
       groupe: cached.groupe,
@@ -179,7 +314,29 @@ fichesRouter.get(
 fichesRouter.get(
   "/:fiche_id(\\d+)/status",
   asyncHandler(async (req: Request, res: Response) => {
-    const status = await fichesService.getFicheStatus(req.params.fiche_id);
+    const ficheId = req.params.fiche_id;
+
+    // Enforce RBAC scope (self / group / all) for fiche visibility.
+    const scope = getFicheReadScope(req);
+    if (scope.scope === "GROUP") {
+      const allowed = await filterFicheIdsByGroupScope([ficheId], scope.groupes);
+      if (!allowed.has(ficheId)) {
+        return res.status(404).json({
+          success: false,
+          error: "Fiche not found in database",
+        });
+      }
+    } else if (scope.scope === "SELF") {
+      const allowed = await filterFicheIdsBySelfScope([ficheId], scope.crmUserId);
+      if (!allowed.has(ficheId)) {
+        return res.status(404).json({
+          success: false,
+          error: "Fiche not found in database",
+        });
+      }
+    }
+
+    const status = await fichesService.getFicheStatus(ficheId);
 
     if (!status) {
       return res.status(404).json({
@@ -228,8 +385,51 @@ fichesRouter.post(
       throw new ValidationError("ficheIds must be an array");
     }
 
-    const statusMap = await fichesService.getFichesStatus(ficheIds);
-    return ok(res, statusMap);
+    type StatusMap = Awaited<ReturnType<typeof fichesService.getFichesStatus>>;
+    const emptyStatus: StatusMap[string] = {
+      hasData: false,
+      transcription: {
+        total: 0,
+        transcribed: 0,
+        pending: 0,
+        percentage: 0,
+        isComplete: false,
+        lastTranscribedAt: null,
+      },
+      audit: {
+        total: 0,
+        completed: 0,
+        pending: 0,
+        running: 0,
+        compliant: 0,
+        nonCompliant: 0,
+        averageScore: null,
+        latestAudit: null,
+      },
+    };
+
+    // Enforce RBAC scope (self / group / all) for fiche visibility.
+    const scope = getFicheReadScope(req);
+    if (scope.scope === "ALL") {
+      const statusMap = await fichesService.getFichesStatus(ficheIds);
+      return ok(res, statusMap);
+    }
+
+    const allowed =
+      scope.scope === "GROUP"
+        ? await filterFicheIdsByGroupScope(ficheIds, scope.groupes)
+        : await filterFicheIdsBySelfScope(ficheIds, scope.crmUserId);
+
+    const allowedIds = ficheIds.filter((id) => allowed.has(String(id)));
+    const allowedStatusMap = await fichesService.getFichesStatus(allowedIds);
+
+    const out: StatusMap = {};
+    for (const idRaw of ficheIds) {
+      const id = String(idRaw);
+      out[id] = allowed.has(id) ? (allowedStatusMap[id] ?? emptyStatus) : emptyStatus;
+    }
+
+    return ok(res, out);
   })
 );
 
@@ -270,6 +470,22 @@ fichesRouter.get(
     }
 
     const result = await fichesService.getFichesByDateWithStatus(date);
+
+    // Enforce RBAC scope (self / group / all) for fiche visibility.
+    const scope = getFicheReadScope(req);
+    if (scope.scope === "GROUP") {
+      const allowed = new Set(scope.groupes);
+      result.fiches = result.fiches.filter((f) => typeof f.groupe === "string" && allowed.has(f.groupe));
+      result.total = result.fiches.length;
+    } else if (scope.scope === "SELF") {
+      const allowedIds = await filterFicheIdsBySelfScope(
+        result.fiches.map((f) => f.ficheId),
+        scope.crmUserId,
+      );
+      result.fiches = result.fiches.filter((f) => allowedIds.has(f.ficheId));
+      result.total = result.fiches.length;
+    }
+
     return ok(res, result);
   })
 );
@@ -349,6 +565,11 @@ fichesRouter.get(
       typeof webhookSecret === "string" ? webhookSecret : undefined;
     const shouldRefresh = refresh === "true";
 
+    // Refresh triggers an upstream fetch + cache revalidation; require write access.
+    if (shouldRefresh) {
+      assertFichesWrite(req);
+    }
+
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
     if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
       throw new ValidationError("Invalid date format. Use YYYY-MM-DD");
@@ -414,6 +635,21 @@ fichesRouter.get(
         forceRefresh: shouldRefresh,
       }
     );
+
+    // Enforce RBAC scope (self / group / all) for fiche visibility.
+    const scope = getFicheReadScope(req);
+    if (scope.scope === "GROUP") {
+      const allowed = new Set(scope.groupes);
+      result.fiches = result.fiches.filter((f) => typeof f.groupe === "string" && allowed.has(f.groupe));
+      result.total = result.fiches.length;
+    } else if (scope.scope === "SELF") {
+      const allowedIds = await filterFicheIdsBySelfScope(
+        result.fiches.map((f) => f.ficheId),
+        scope.crmUserId,
+      );
+      result.fiches = result.fiches.filter((f) => allowedIds.has(f.ficheId));
+      result.total = result.fiches.length;
+    }
 
     return res.json({
       success: true,
@@ -505,6 +741,21 @@ fichesRouter.get(
       }));
     }
 
+    // Enforce RBAC scope (self / group / all) for fiche visibility.
+    const scope = getFicheReadScope(req);
+    if (scope.scope === "GROUP") {
+      const allowed = new Set(scope.groupes);
+      partialFiches = partialFiches.filter(
+        (f) => typeof f.groupe === "string" && allowed.has(f.groupe)
+      );
+    } else if (scope.scope === "SELF") {
+      const allowedIds = await filterFicheIdsBySelfScope(
+        partialFiches.map((f) => f.ficheId),
+        scope.crmUserId,
+      );
+      partialFiches = partialFiches.filter((f) => allowedIds.has(f.ficheId));
+    }
+
     return res.json({
       success: true,
       jobId: job.id,
@@ -520,7 +771,7 @@ fichesRouter.get(
         progress: job.progress,
         completedDays: job.completedDays,
         totalDays: job.totalDays,
-        totalFiches: job.totalFiches,
+        totalFiches: partialFiches.length,
         currentFichesCount: partialFiches.length,
         datesCompleted: job.datesAlreadyFetched,
         datesRemaining: job.datesRemaining,

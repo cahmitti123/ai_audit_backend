@@ -16,7 +16,7 @@ import {
 import { AuthenticationError } from "../../shared/errors.js";
 import { ok } from "../../shared/http.js";
 import { getUserAuthSnapshotById } from "./auth.repository.js";
-import { validateLoginInput, validateRefreshInput } from "./auth.schemas.js";
+import { validateAcceptInviteInput, validateLoginInput, validateRefreshInput } from "./auth.schemas.js";
 import * as authService from "./auth.service.js";
 
 export const authRouter = Router();
@@ -117,6 +117,35 @@ authRouter.post(
 );
 
 /**
+ * POST /api/auth/invite/accept
+ *
+ * Consumes a one-time invite token and sets the user's password.
+ * Returns access token + refresh cookie (same response shape as /login).
+ */
+authRouter.post(
+  "/invite/accept",
+  asyncHandler(async (req: Request, res: Response) => {
+    const input = validateAcceptInviteInput(req.body);
+
+    const result = await authService.acceptInvite({
+      inviteToken: input.invite_token,
+      password: input.password,
+      ip: req.ip,
+      userAgent: req.get("user-agent"),
+    });
+
+    setRefreshCookie(res, result.refreshToken);
+
+    return ok(res, {
+      access_token: result.accessToken,
+      token_type: "Bearer",
+      expires_in: result.accessTokenExpiresIn,
+      user: result.user,
+    });
+  })
+);
+
+/**
  * GET /api/auth/me
  */
 authRouter.get(
@@ -137,6 +166,8 @@ authRouter.get(
       user: {
         id: snapshot.user.id.toString(),
         email: snapshot.user.email,
+        crm_user_id: snapshot.user.crmUserId,
+        groupes: snapshot.groupes,
         roles: snapshot.roles,
         permissions: snapshot.permissions,
       },

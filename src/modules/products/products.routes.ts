@@ -7,6 +7,7 @@
 import { type Request, type Response,Router } from "express";
 
 import { asyncHandler } from "../../middleware/async-handler.js";
+import { requirePermission } from "../../middleware/authz.js";
 import { ValidationError } from "../../shared/errors.js";
 import { ok } from "../../shared/http.js";
 import {
@@ -21,6 +22,10 @@ import {
 import * as productsService from "./products.service.js";
 
 export const productsRouter = Router();
+
+// Require read access by default for products routes.
+// (Machine API tokens bypass permission checks in `requirePermission`.)
+productsRouter.use(requirePermission("products.read"));
 
 function parseBigIntParam(value: string, name = "id"): bigint {
   try {
@@ -180,6 +185,7 @@ productsRouter.get(
  */
 productsRouter.post(
   "/groupes",
+  requirePermission("products.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const validated = createGroupeSchema.parse(req.body);
     const groupe = await productsService.createGroupe(validated);
@@ -211,6 +217,7 @@ productsRouter.post(
  */
 productsRouter.put(
   "/groupes/:id",
+  requirePermission("products.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const id = parseBigIntParam(req.params.id, "groupe id");
     const validated = updateGroupeSchema.parse(req.body);
@@ -237,6 +244,7 @@ productsRouter.put(
  */
 productsRouter.delete(
   "/groupes/:id",
+  requirePermission("products.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const id = parseBigIntParam(req.params.id, "groupe id");
     await productsService.deleteGroupe(id);
@@ -332,6 +340,7 @@ productsRouter.get(
  */
 productsRouter.post(
   "/gammes",
+  requirePermission("products.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const validated = createGammeSchema.parse(req.body);
     const gamme = await productsService.createGamme(validated);
@@ -357,6 +366,7 @@ productsRouter.post(
  */
 productsRouter.put(
   "/gammes/:id",
+  requirePermission("products.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const id = parseBigIntParam(req.params.id, "gamme id");
     const validated = updateGammeSchema.parse(req.body);
@@ -383,6 +393,7 @@ productsRouter.put(
  */
 productsRouter.delete(
   "/gammes/:id",
+  requirePermission("products.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const id = parseBigIntParam(req.params.id, "gamme id");
     await productsService.deleteGamme(id);
@@ -478,6 +489,7 @@ productsRouter.get(
  */
 productsRouter.post(
   "/formules",
+  requirePermission("products.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const validated = createFormuleSchema.parse(req.body);
     const formule = await productsService.createFormule(validated);
@@ -503,6 +515,7 @@ productsRouter.post(
  */
 productsRouter.put(
   "/formules/:id",
+  requirePermission("products.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const id = parseBigIntParam(req.params.id, "formule id");
     const validated = updateFormuleSchema.parse(req.body);
@@ -529,6 +542,7 @@ productsRouter.put(
  */
 productsRouter.delete(
   "/formules/:id",
+  requirePermission("products.write"),
   asyncHandler(async (req: Request, res: Response) => {
     const id = parseBigIntParam(req.params.id, "formule id");
     await productsService.deleteFormule(id);

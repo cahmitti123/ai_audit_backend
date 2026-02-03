@@ -16,10 +16,13 @@ import { hashPassword } from "../../shared/password.js";
 import { prisma } from "../../shared/prisma.js";
 import { fetchCrmGroups, fetchCrmUsers } from "../crm/crm.api.js";
 import {
+  validateAddTeamMemberInput,
   validateCreateRoleInput,
+  validateCreateTeamInput,
   validateCreateUserFromCrmInput,
   validateCreateUserInput,
   validateUpdateRoleInput,
+  validateUpdateTeamInput,
   validateUpdateUserInput,
 } from "./admin.schemas.js";
 
@@ -30,6 +33,14 @@ function parseUserIdParam(value: string): bigint {
     return BigInt(value);
   } catch {
     throw new ValidationError("Invalid user id");
+  }
+}
+
+function parseIdParam(value: string, label: string): bigint {
+  try {
+    return BigInt(value);
+  } catch {
+    throw new ValidationError(`Invalid ${label}`);
   }
 }
 
@@ -473,6 +484,287 @@ adminRouter.get(
   }),
 );
 
+// -----------------------------------------------------------------------------
+// Teams (groupes) management (app-side representation used for scope)
+// -----------------------------------------------------------------------------
+
+adminRouter.post(
+  "/teams/sync-from-crm",
+  requirePermission("admin.users.write"),
+  asyncHandler(async (req: Request, res: Response) => {
+    const syncMembers = String(req.query.sync_members || "").toLowerCase() === "true";
+    const crmGroups = await fetchCrmGroups({ includeUsers: syncMembers });
+
+    let teamsUpserted = 0;
+    let membersAdded = 0;
+
+    // Small N (dozens). Keep logic simple and deterministic.
+    for (const g of crmGroups) {
+      const crmGroupId = String(g.id).trim();
+      if (!crmGroupId) {continue;}
+
+      const name = String(g.nom || "").trim() || `CRM Group ${crmGroupId}`;
+
+      const team = await prisma.team.upsert({
+        where: { crmGroupId },
+        update: {
+          name,
+          responsable1: g.responsable_1 ?? null,
+          responsable2: g.responsable_2 ?? null,
+          responsable3: g.responsable_3 ?? null,
+        },
+        create: {
+          crmGroupId,
+          name,
+          responsable1: g.responsable_1 ?? null,
+          responsable2: g.responsable_2 ?? null,
+          responsable3: g.responsable_3 ?? null,
+        },
+        select: { id: true, crmGroupId: true },
+      });
+      teamsUpserted += 1;
+
+      if (syncMembers && Array.isArray(g.user_ids) && g.user_ids.length > 0) {
+        const crmUserIds = g.user_ids.map(String).filter(Boolean);
+        const users = await prisma.user.findMany({
+          where: { crmUserId: { in: crmUserIds } },
+          select: { id: true },
+        });
+
+        if (users.length > 0) {
+          const created = await prisma.userTeam.createMany({
+            data: users.map((u) => ({ userId: u.id, teamId: team.id })),
+            skipDuplicates: true,
+          });
+          membersAdded += created.count ?? 0;
+        }
+      }
+    }
+
+    return ok(res, {
+      synced: true,
+      teams_upserted: teamsUpserted,
+      members_added: membersAdded,
+      note: syncMembers
+        ? "Membership sync only ADDS missing memberships for linked users; it does not remove existing memberships."
+        : "Pass ?sync_members=true to also add missing memberships for linked users.",
+    });
+  }),
+);
+
+adminRouter.get(
+  "/teams",
+  requirePermission("admin.users.read"),
+  asyncHandler(async (req: Request, res: Response) => {
+    const includeUsers = String(req.query.include_users || "").toLowerCase() === "true";
+
+    if (!includeUsers) {
+      const teams = await prisma.team.findMany({
+        orderBy: [{ name: "asc" }, { id: "asc" }],
+        include: { _count: { select: { members: true } } },
+      });
+
+      return ok(res, {
+        teams: teams.map((t) => ({
+          id: t.id.toString(),
+          crm_group_id: t.crmGroupId,
+          name: t.name,
+          responsable_1: t.responsable1,
+          responsable_2: t.responsable2,
+          responsable_3: t.responsable3,
+          membres_count: t._count.members,
+        })),
+        count: teams.length,
+      });
+    }
+
+    const teams = await prisma.team.findMany({
+      orderBy: [{ name: "asc" }, { id: "asc" }],
+      include: {
+        _count: { select: { members: true } },
+        members: {
+          orderBy: { id: "asc" },
+          include: { user: { select: { id: true, email: true, status: true, crmUserId: true } } },
+        },
+      },
+    });
+
+    return ok(res, {
+      teams: teams.map((t) => ({
+        id: t.id.toString(),
+        crm_group_id: t.crmGroupId,
+        name: t.name,
+        responsable_1: t.responsable1,
+        responsable_2: t.responsable2,
+        responsable_3: t.responsable3,
+        membres_count: t._count.members,
+        members: t.members.map((m) => ({
+          user_id: m.user.id.toString(),
+          email: m.user.email,
+          status: m.user.status,
+          crm_user_id: m.user.crmUserId,
+        })),
+        // Convenience: CRM user ids list (mirrors CRM "user_ids" when possible)
+        user_ids: t.members.map((m) => m.user.crmUserId).filter((v): v is string => Boolean(v)),
+      })),
+      count: teams.length,
+    });
+  }),
+);
+
+adminRouter.post(
+  "/teams",
+  requirePermission("admin.users.write"),
+  asyncHandler(async (req: Request, res: Response) => {
+    const input = validateCreateTeamInput(req.body);
+    const crmGroupId = input.crm_group_id.trim();
+    const name = input.name.trim();
+
+    const existing = await prisma.team.findUnique({ where: { crmGroupId }, select: { id: true } });
+    const created = await prisma.team.upsert({
+      where: { crmGroupId },
+      update: {
+        name,
+        responsable1: input.responsable_1 ?? null,
+        responsable2: input.responsable_2 ?? null,
+        responsable3: input.responsable_3 ?? null,
+      },
+      create: {
+        crmGroupId,
+        name,
+        responsable1: input.responsable_1 ?? null,
+        responsable2: input.responsable_2 ?? null,
+        responsable3: input.responsable_3 ?? null,
+      },
+      include: { _count: { select: { members: true } } },
+    });
+
+    return ok(
+      res,
+      {
+        team: {
+          id: created.id.toString(),
+          crm_group_id: created.crmGroupId,
+          name: created.name,
+          responsable_1: created.responsable1,
+          responsable_2: created.responsable2,
+          responsable_3: created.responsable3,
+          membres_count: created._count.members,
+        },
+      },
+      existing ? 200 : 201,
+    );
+  }),
+);
+
+adminRouter.patch(
+  "/teams/:teamId",
+  requirePermission("admin.users.write"),
+  asyncHandler(async (req: Request, res: Response) => {
+    const teamId = parseIdParam(req.params.teamId, "team id");
+    const input = validateUpdateTeamInput(req.body);
+
+    const existing = await prisma.team.findUnique({ where: { id: teamId }, select: { id: true } });
+    if (!existing) {throw new NotFoundError("Team", req.params.teamId);}
+
+    const updated = await prisma.team.update({
+      where: { id: teamId },
+      data: {
+        ...(input.name ? { name: input.name.trim() } : {}),
+        ...(input.responsable_1 !== undefined ? { responsable1: input.responsable_1 } : {}),
+        ...(input.responsable_2 !== undefined ? { responsable2: input.responsable_2 } : {}),
+        ...(input.responsable_3 !== undefined ? { responsable3: input.responsable_3 } : {}),
+      },
+      include: { _count: { select: { members: true } } },
+    });
+
+    return ok(res, {
+      team: {
+        id: updated.id.toString(),
+        crm_group_id: updated.crmGroupId,
+        name: updated.name,
+        responsable_1: updated.responsable1,
+        responsable_2: updated.responsable2,
+        responsable_3: updated.responsable3,
+        membres_count: updated._count.members,
+      },
+    });
+  }),
+);
+
+adminRouter.delete(
+  "/teams/:teamId",
+  requirePermission("admin.users.write"),
+  asyncHandler(async (req: Request, res: Response) => {
+    const teamId = parseIdParam(req.params.teamId, "team id");
+    const force = String(req.query.force || "").toLowerCase() === "true";
+
+    const existing = await prisma.team.findUnique({
+      where: { id: teamId },
+      select: { id: true, crmGroupId: true, name: true, _count: { select: { members: true } } },
+    });
+    if (!existing) {throw new NotFoundError("Team", req.params.teamId);}
+
+    if (!force && existing._count.members > 0) {
+      throw new ValidationError("Team has members; remove members first or pass ?force=true");
+    }
+
+    await prisma.team.delete({ where: { id: teamId } });
+
+    return ok(res, {
+      deleted: true,
+      team: {
+        id: existing.id.toString(),
+        crm_group_id: existing.crmGroupId,
+        name: existing.name,
+      },
+    });
+  }),
+);
+
+adminRouter.post(
+  "/teams/:teamId/members",
+  requirePermission("admin.users.write"),
+  asyncHandler(async (req: Request, res: Response) => {
+    const teamId = parseIdParam(req.params.teamId, "team id");
+    const input = validateAddTeamMemberInput(req.body);
+    const userId = parseIdParam(input.user_id, "user id");
+
+    const [team, user] = await Promise.all([
+      prisma.team.findUnique({ where: { id: teamId }, select: { id: true, crmGroupId: true, name: true } }),
+      prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true, status: true, crmUserId: true } }),
+    ]);
+    if (!team) {throw new NotFoundError("Team", req.params.teamId);}
+    if (!user) {throw new NotFoundError("User", input.user_id);}
+
+    await prisma.userTeam.upsert({
+      where: { userId_teamId: { userId, teamId } },
+      update: {},
+      create: { userId, teamId },
+    });
+
+    return ok(res, {
+      added: true,
+      team: { id: team.id.toString(), crm_group_id: team.crmGroupId, name: team.name },
+      user: { id: user.id.toString(), email: user.email, status: user.status, crm_user_id: user.crmUserId },
+    });
+  }),
+);
+
+adminRouter.delete(
+  "/teams/:teamId/members/:userId",
+  requirePermission("admin.users.write"),
+  asyncHandler(async (req: Request, res: Response) => {
+    const teamId = parseIdParam(req.params.teamId, "team id");
+    const userId = parseIdParam(req.params.userId, "user id");
+
+    // Idempotent removal
+    await prisma.userTeam.deleteMany({ where: { userId, teamId } });
+
+    return ok(res, { removed: true });
+  }),
+);
+
 adminRouter.get(
   "/roles",
   requirePermission("admin.roles.read"),
@@ -503,6 +795,38 @@ adminRouter.get(
       count: roles.length,
     });
   })
+);
+
+adminRouter.get(
+  "/roles/:roleId",
+  requirePermission("admin.roles.read"),
+  asyncHandler(async (req: Request, res: Response) => {
+    const roleId = parseIdParam(req.params.roleId, "role id");
+
+    const role = await prisma.role.findUnique({
+      where: { id: roleId },
+      include: { permissions: { include: { permission: true } } },
+    });
+    if (!role) {throw new NotFoundError("Role", req.params.roleId);}
+
+    return ok(res, {
+      role: {
+        id: role.id.toString(),
+        key: role.key,
+        name: role.name,
+        description: role.description,
+        permissions: role.permissions.filter((rp) => rp.canRead || rp.canWrite).map((rp) => rp.permission.key),
+        permission_grants: role.permissions
+          .filter((rp) => rp.canRead || rp.canWrite)
+          .map((rp) => ({
+            key: rp.permission.key,
+            read: rp.canRead,
+            write: rp.canWrite,
+            scope: rp.scope,
+          })),
+      },
+    });
+  }),
 );
 
 adminRouter.post(
@@ -582,7 +906,7 @@ adminRouter.patch(
   "/roles/:roleId",
   requirePermission("admin.roles.write"),
   asyncHandler(async (req: Request, res: Response) => {
-    const roleId = parseUserIdParam(req.params.roleId);
+    const roleId = parseIdParam(req.params.roleId, "role id");
     const input = validateUpdateRoleInput(req.body);
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -652,6 +976,33 @@ adminRouter.patch(
           })),
       },
     });
+  }),
+);
+
+adminRouter.delete(
+  "/roles/:roleId",
+  requirePermission("admin.roles.write"),
+  asyncHandler(async (req: Request, res: Response) => {
+    const roleId = parseIdParam(req.params.roleId, "role id");
+
+    const role = await prisma.role.findUnique({
+      where: { id: roleId },
+      select: { id: true, key: true },
+    });
+    if (!role) {throw new NotFoundError("Role", req.params.roleId);}
+
+    // Protect baseline roles that are reseeded by `seed:auth` / container startup.
+    if (role.key === "admin" || role.key === "operator" || role.key === "viewer") {
+      throw new ValidationError("Cannot delete protected role");
+    }
+
+    const assigned = await prisma.userRole.count({ where: { roleId } });
+    if (assigned > 0) {
+      throw new ValidationError(`Role is assigned to ${assigned} user(s); remove it from users first`);
+    }
+
+    await prisma.role.delete({ where: { id: roleId } });
+    return ok(res, { deleted: true });
   }),
 );
 

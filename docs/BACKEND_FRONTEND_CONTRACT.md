@@ -394,8 +394,72 @@ These endpoints are intended for an admin UI and require RBAC permissions:
 ### PATCH `/api/admin/users/:userId`
 - **Body**: one of `status`, `password`, `role_keys`.
 
+### Roles (CRUD)
+
+Roles store per-permission grants (`read/write/scope`) via `role_permissions`.
+
 ### GET `/api/admin/roles`
+- **Permission**: `admin.roles.read`
+- **Response 200**: `{ success:true, data:{ roles:[...], count } }`
+
+### GET `/api/admin/roles/:roleId`
+- **Permission**: `admin.roles.read`
+- **Response 200**: `{ success:true, data:{ role } }`
+
+### POST `/api/admin/roles`
+- **Permission**: `admin.roles.write`
+- **Body** (recommended):
+
+```json
+{
+  "key": "manager",
+  "name": "Manager",
+  "description": "Managers (group scope)",
+  "permission_grants": [
+    { "key": "fiches", "read": true, "write": false, "scope": "GROUP" },
+    { "key": "audits", "read": true, "write": true, "scope": "GROUP" }
+  ]
+}
+```
+
+- **Body** (legacy / back-compat):
+  - `permission_keys: string[]` (ex: `["audits.read","audits.run"]`)
+  - Backend infers read/write from suffix and defaults scope to `GROUP`.
+
+### PATCH `/api/admin/roles/:roleId`
+- **Permission**: `admin.roles.write`
+- **Body**: any of `name`, `description`, `permission_grants`, `permission_keys`
+
+### DELETE `/api/admin/roles/:roleId`
+- **Permission**: `admin.roles.write`
+- **Safety rules**:
+  - Protected roles (`admin`, `operator`, `viewer`) cannot be deleted.
+  - A role assigned to users cannot be deleted until unassigned.
+
 ### GET `/api/admin/permissions`
+- **Permission**: `admin.permissions.read`
+- **Response 200**: `{ success:true, data:{ permissions:[{id,key,description}], count } }`
+
+### Teams / groupes (app-side)
+
+These endpoints manage the app’s representation of “groupes” used for **GROUP scope**:
+- user `groupes[]` in JWT is derived from `UserTeam → Team.name`
+- scope checks match fiche cache `groupe` strings against `groupes[]`
+
+Endpoints:
+- `GET /api/admin/teams?include_users=true|false` (permission `admin.users.read`)
+- `POST /api/admin/teams/sync-from-crm?sync_members=true|false` (permission `admin.users.write`)
+  - Upserts teams from CRM.
+  - If `sync_members=true`: only **adds** missing memberships for linked users; does not remove memberships.
+- `POST /api/admin/teams` (permission `admin.users.write`) upserts by `crm_group_id`
+- `PATCH /api/admin/teams/:teamId` (permission `admin.users.write`)
+- `DELETE /api/admin/teams/:teamId?force=true` (permission `admin.users.write`)
+- Membership:
+  - `POST /api/admin/teams/:teamId/members` body `{ "user_id": "123" }`
+  - `DELETE /api/admin/teams/:teamId/members/:userId`
+
+Critical note:
+- Renaming `Team.name` changes the string used for GROUP scope matching and can hide data from users if it no longer matches fiche cache `groupe` strings.
 
 ### GET `/api/admin/crm/users`
 

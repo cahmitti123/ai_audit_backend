@@ -240,6 +240,8 @@ These endpoints power an “Admin → Roles/Permissions” UI.
   - Returns each role with:
     - `permissions: string[]` (legacy-style list of keys)
     - `permission_grants: Array<{ key, read, write, scope }>` (the real source of truth)
+  - Optional: fetch one role by id
+    - `GET /api/admin/roles/:roleId` (requires `admin.roles.read`)
 
 - **Create role**
   - `POST /api/admin/roles` (requires `admin.roles.write`)
@@ -251,6 +253,12 @@ These endpoints power an “Admin → Roles/Permissions” UI.
 - **Update role**
   - `PATCH /api/admin/roles/:roleId` (requires `admin.roles.write`)
   - Same `permission_grants` / `permission_keys` behavior as create.
+
+- **Delete role**
+  - `DELETE /api/admin/roles/:roleId` (requires `admin.roles.write`)
+  - Safety rules:
+    - Protected roles (`admin`, `operator`, `viewer`) cannot be deleted.
+    - A role assigned to users cannot be deleted until it’s unassigned (prevents accidentally locking users out).
 
 Important:
 - In the DB, a role-permission row stores a single `scope`.  
@@ -265,6 +273,32 @@ Important:
 - `PATCH /api/admin/users/:userId` (requires `admin.users.write`)
   - Body can update: `{ status?: "INVITED"|"ACTIVE"|"DISABLED", password?: string, role_keys?: string[] }`
   - `:userId` is the **numeric user id** (BigInt serialized as string).
+
+### 4.6 Admin APIs to manage teams / groupes (app-side)
+
+Why this exists:
+- **GROUP scope** is enforced using the authenticated user’s `groupes[]`, which comes from the user’s `UserTeam` memberships.
+- Teams here are the app-side representation of “groupes” (usually synced from CRM).
+
+Endpoints:
+- `GET /api/admin/teams?include_users=true|false` (requires `admin.users.read`)
+  - Returns app teams with `membres_count`, and optionally `members[]`.
+- `POST /api/admin/teams/sync-from-crm?sync_members=true|false` (requires `admin.users.write`)
+  - Upserts teams from the CRM groupes endpoint.
+  - If `sync_members=true`: **adds missing memberships** for linked users (`User.crm_user_id` present). It does **not** remove memberships.
+- `POST /api/admin/teams` (requires `admin.users.write`)
+  - Upserts a team by `crm_group_id` (useful for manual correction if needed).
+- `PATCH /api/admin/teams/:teamId` (requires `admin.users.write`)
+  - Updates `name` and/or `responsable_*` metadata.
+- `DELETE /api/admin/teams/:teamId?force=true` (requires `admin.users.write`)
+  - If the team has members, you must pass `force=true` (or remove members first).
+- Membership management:
+  - `POST /api/admin/teams/:teamId/members` (requires `admin.users.write`) body `{ user_id }`
+  - `DELETE /api/admin/teams/:teamId/members/:userId` (requires `admin.users.write`)
+
+Critical note (scope correctness):
+- For GROUP scope to work, `Team.name` should match the fiche’s `groupe` string stored in cache (typically the CRM group “nom”).
+- Renaming teams can unintentionally hide data from users (because scope matching is string-based today).
 
 ---
 

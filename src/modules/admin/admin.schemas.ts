@@ -140,3 +140,73 @@ export function validateCreateUserFromCrmInput(data: unknown): CreateUserFromCrm
       : new ValidationError("Invalid create user from CRM input");
   }
 }
+
+// -----------------------------------------------------------------------------
+// Teams (groupes) management (app-side representation)
+// -----------------------------------------------------------------------------
+
+const crmGroupIdSchema = z.string().trim().min(1).max(80);
+const teamNameSchema = z.string().trim().min(1).max(200);
+const responsableSchema = z.string().trim().max(200);
+
+export const createTeamInputSchema = z.object({
+  crm_group_id: crmGroupIdSchema,
+  name: teamNameSchema,
+  responsable_1: responsableSchema.optional(),
+  responsable_2: responsableSchema.optional(),
+  responsable_3: responsableSchema.optional(),
+});
+
+export type CreateTeamInput = z.infer<typeof createTeamInputSchema>;
+
+export function validateCreateTeamInput(data: unknown): CreateTeamInput {
+  try {
+    return createTeamInputSchema.parse(data);
+  } catch (err) {
+    logger.warn("Invalid create team input", { error: err });
+    throw err instanceof Error
+      ? new ValidationError(err.message)
+      : new ValidationError("Invalid create team input");
+  }
+}
+
+export const updateTeamInputSchema = z
+  .object({
+    name: teamNameSchema.optional(),
+    responsable_1: responsableSchema.nullable().optional(),
+    responsable_2: responsableSchema.nullable().optional(),
+    responsable_3: responsableSchema.nullable().optional(),
+  })
+  .refine((v) => v.name || v.responsable_1 !== undefined || v.responsable_2 !== undefined || v.responsable_3 !== undefined, {
+    message: "At least one of name, responsable_1, responsable_2, responsable_3 is required",
+  });
+
+export type UpdateTeamInput = z.infer<typeof updateTeamInputSchema>;
+
+export function validateUpdateTeamInput(data: unknown): UpdateTeamInput {
+  try {
+    return updateTeamInputSchema.parse(data);
+  } catch (err) {
+    logger.warn("Invalid update team input", { error: err });
+    throw err instanceof Error
+      ? new ValidationError(err.message)
+      : new ValidationError("Invalid update team input");
+  }
+}
+
+export const addTeamMemberInputSchema = z.object({
+  user_id: z.string().trim().min(1),
+});
+
+export type AddTeamMemberInput = z.infer<typeof addTeamMemberInputSchema>;
+
+export function validateAddTeamMemberInput(data: unknown): AddTeamMemberInput {
+  try {
+    return addTeamMemberInputSchema.parse(data);
+  } catch (err) {
+    logger.warn("Invalid add team member input", { error: err });
+    throw err instanceof Error
+      ? new ValidationError(err.message)
+      : new ValidationError("Invalid add team member input");
+  }
+}

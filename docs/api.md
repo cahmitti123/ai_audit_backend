@@ -69,9 +69,21 @@ These endpoints require RBAC permissions:
 - `POST /api/admin/users/from-crm`
 - `PATCH /api/admin/users/:userId`
 - `GET /api/admin/roles`
+- `GET /api/admin/roles/:roleId`
+- `POST /api/admin/roles`
+- `PATCH /api/admin/roles/:roleId`
+- `DELETE /api/admin/roles/:roleId`
 - `GET /api/admin/permissions`
 - `GET /api/admin/crm/users`
 - `GET /api/admin/crm/teams`
+- Teams / groupes (app-side, used for GROUP scope):
+  - `GET /api/admin/teams?include_users=true|false`
+  - `POST /api/admin/teams/sync-from-crm?sync_members=true|false`
+  - `POST /api/admin/teams`
+  - `PATCH /api/admin/teams/:teamId`
+  - `DELETE /api/admin/teams/:teamId?force=true`
+  - `POST /api/admin/teams/:teamId/members` (body `{ user_id }`)
+  - `DELETE /api/admin/teams/:teamId/members/:userId`
 
 ### Fiches (`/api/fiches`)
 

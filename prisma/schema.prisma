@@ -1723,3 +1723,35 @@ model UserInviteToken {
     @@index([usedAt])
     @@map("user_invite_tokens")
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WORKFLOW LOGGING (CROSS-WORKFLOW OBSERVABILITY)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model WorkflowLog {
+    id BigInt @id @default(autoincrement())
+
+    workflow String // audit | transcription | automation | fiche
+    level    String // debug | info | warning | error
+
+    entityType String? @map("entity_type")
+    entityId   String? @map("entity_id")
+    traceId    String? @map("trace_id")
+
+    inngestEventId String? @map("inngest_event_id")
+    functionId     String? @map("function_id")
+    stepName       String? @map("step_name")
+
+    message String @db.Text
+    data    Json?  @default("{}")
+
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@index([workflow])
+    @@index([level])
+    @@index([entityType, entityId])
+    @@index([traceId])
+    @@index([inngestEventId])
+    @@index([createdAt])
+    @@map("workflow_logs")
+}

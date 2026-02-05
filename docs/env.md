@@ -441,6 +441,36 @@ These are optional and safe to leave unset unless you’re tuning throughput or 
 - `AUTOMATION_AUDIT_MAX_WAIT_MS`: max time automation waits for audit completion.
 - `AUTOMATION_AUDIT_POLL_INTERVAL_SECONDS`: poll interval for audit completion checks.
 
+---
+
+## Workflow tracer logs (optional)
+
+This repo includes a shared helper (`src/shared/workflow-tracer.ts`) to produce **high-signal, correlated workflow logs** with:
+- stdout logs (normal app logs)
+- optional per-trace **file logs**
+- optional DB persistence to the `workflow_logs` table (queried by `/api/*/logs` endpoints)
+
+### `WORKFLOW_LOG_DB_ENABLED`
+- **What it does**: Enables persisting workflow tracer logs to the DB table `workflow_logs`.
+- **If missing**: defaults to disabled.
+- **Where to get it**: you choose the value (`"1"` to enable).
+
+### `WORKFLOW_DEBUG_LOG_TO_FILE`
+- **What it does**: Global fallback to enable per-trace workflow debug log files.
+- **If missing**: defaults to disabled.
+- **Where to get it**: you choose the value (`"1"` to enable).
+- **Where files are written**: `./workflow-debug-logs/*.txt` (best-effort).
+
+### Per-workflow file flags
+
+These override the global file flag for specific workflows:
+- `AUDIT_DEBUG_LOG_TO_FILE`
+- `TRANSCRIPTION_DEBUG_LOG_TO_FILE`
+- `FICHE_DEBUG_LOG_TO_FILE`
+- `AUTOMATION_DEBUG_LOG_TO_FILE`
+
+---
+
 #### Automation debug log file (optional)
 
 ##### `AUTOMATION_DEBUG_LOG_TO_FILE`

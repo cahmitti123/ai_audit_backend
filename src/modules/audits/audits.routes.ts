@@ -1162,6 +1162,106 @@ auditsRouter.get(
 
 /**
  * @swagger
+ * /api/audits/{audit_id}/logs:
+ *   get:
+ *     tags: [Audits]
+ *     summary: Get workflow logs for an audit
+ *     parameters:
+ *       - in: path
+ *         name: audit_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: level
+ *         schema:
+ *           type: string
+ *           enum: [debug, info, warning, error]
+ *       - in: query
+ *         name: since
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *       - in: query
+ *         name: until
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 200
+ *           maximum: 1000
+ *       - in: query
+ *         name: offset
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *     responses:
+ *       200:
+ *         description: Workflow logs
+ */
+auditsRouter.get(
+  "/:audit_id/logs",
+  requirePermission("audits.read"),
+  asyncHandler(async (req: Request, res: Response) => {
+    const auditId = parseBigIntParam(req.params.audit_id, "audit_id");
+    await assertAuditInScope(req, auditId, "read");
+
+    const levelRaw = typeof req.query.level === "string" ? req.query.level.trim() : "";
+    const level = levelRaw ? levelRaw : undefined;
+
+    const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : NaN;
+    const offsetRaw = typeof req.query.offset === "string" ? Number.parseInt(req.query.offset, 10) : NaN;
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 1000) : 200;
+    const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
+
+    const sinceStr = typeof req.query.since === "string" ? req.query.since.trim() : "";
+    const untilStr = typeof req.query.until === "string" ? req.query.until.trim() : "";
+    const since =
+      sinceStr && Number.isFinite(Date.parse(sinceStr)) ? new Date(sinceStr) : null;
+    const until =
+      untilStr && Number.isFinite(Date.parse(untilStr)) ? new Date(untilStr) : null;
+    if (sinceStr && !since) {
+      throw new ValidationError("Invalid since (expected ISO 8601 date-time)");
+    }
+    if (untilStr && !until) {
+      throw new ValidationError("Invalid until (expected ISO 8601 date-time)");
+    }
+
+    const createdAt =
+      since || until
+        ? {
+            ...(since ? { gte: since } : {}),
+            ...(until ? { lte: until } : {}),
+          }
+        : undefined;
+
+    const logs = await prisma.workflowLog.findMany({
+      where: {
+        workflow: "audit",
+        traceId: auditId.toString(),
+        ...(level ? { level } : {}),
+        ...(createdAt ? { createdAt } : {}),
+      },
+      orderBy: { createdAt: "asc" },
+      skip: offset,
+      take: limit,
+    });
+
+    return jsonResponse(res, {
+      success: true,
+      data: logs,
+      count: logs.length,
+      limit,
+      offset,
+    });
+  })
+);
+
+/**
+ * @swagger
  * /api/audits/control-points/statuses:
  *   get:
  *     tags: [Audits]

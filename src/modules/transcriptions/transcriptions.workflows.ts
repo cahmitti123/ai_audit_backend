@@ -8,28 +8,23 @@ import crypto from "crypto";
 import { NonRetriableError } from "inngest";
 
 import { inngest } from "../../inngest/client.js";
-import {
-  CONCURRENCY,
-  RATE_LIMITS,
-  TIMEOUTS,
-} from "../../shared/constants.js";
+import { CONCURRENCY, RATE_LIMITS, TIMEOUTS } from "../../shared/constants.js";
 import {
   getInngestGlobalConcurrency,
   getInngestParallelismPerServer,
 } from "../../shared/inngest-concurrency.js";
 import { prisma } from "../../shared/prisma.js";
 import { getRedisClient } from "../../shared/redis.js";
-import { releaseRedisLock,tryAcquireRedisLock } from "../../shared/redis-lock.js";
+import { releaseRedisLock, tryAcquireRedisLock } from "../../shared/redis-lock.js";
 import { transcriptionWebhooks } from "../../shared/webhook.js";
+import { fetchFicheFunction } from "../fiches/fiches.workflows.js";
 import {
   ElevenLabsSpeechToTextError,
   normalizeElevenLabsApiKey,
   TranscriptionService,
 } from "./transcriptions.elevenlabs.js";
 import { updateRecordingTranscription } from "./transcriptions.repository.js";
-import {
-  getFicheTranscriptionStatus,
-} from "./transcriptions.service.js";
+import { getFicheTranscriptionStatus } from "./transcriptions.service.js";
 import type {
   BatchTranscriptionResult,
   ExtendedTranscriptionResult,
@@ -40,10 +35,16 @@ function toNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 type TranscriptionPlan = {
   ficheCacheId: string; // BigInt -> string (JSON-safe)
   totalRecordings: number;
   alreadyTranscribed: number;
+  missingRecordingUrlCount: number;
+  missingRecordingUrlToTranscribeCount: number;
   toTranscribe: Array<{ callId: string; recordingUrl: string }>;
 };
 
@@ -121,6 +122,50 @@ export const transcribeFicheFunction = inngest.createFunction(
 
       logger.info("Starting transcription", { fiche_id, priority });
 
+      // Always force-refresh fiche details before building the transcription plan so the
+      // recordings list + recording URLs are always up-to-date.
+      const { startedAt: forceRefreshStartedAt } = await step.run(
+        `log-force-refresh-fiche-start-${fiche_id}`,
+        async () => {
+          const startedAt = Date.now();
+          logger.info("Force-refreshing fiche details before transcription plan", {
+            fiche_id,
+            force_refresh: true,
+          });
+          return { startedAt };
+        }
+      );
+
+      const forceRefreshResult = await step.invoke(`force-refresh-fiche-${fiche_id}`, {
+        function: fetchFicheFunction,
+        data: {
+          fiche_id,
+          force_refresh: true,
+        },
+      });
+
+      await step.run(`log-force-refresh-fiche-done-${fiche_id}`, async () => {
+        const rr = isRecord(forceRefreshResult) ? (forceRefreshResult as Record<string, unknown>) : {};
+        logger.info("Fiche force-refresh completed (transcription)", {
+          fiche_id,
+          force_refresh: true,
+          elapsed_ms:
+            typeof forceRefreshStartedAt === "number"
+              ? Math.max(0, Date.now() - forceRefreshStartedAt)
+              : undefined,
+          fetch_result: {
+            ...(typeof rr.success === "boolean" ? { success: rr.success } : {}),
+            ...(typeof rr.cached === "boolean" ? { cached: rr.cached } : {}),
+            ...(typeof rr.cache_id === "string" ? { cache_id: rr.cache_id } : {}),
+            ...(typeof rr.recordings_count === "number"
+              ? { recordings_count: rr.recordings_count }
+              : {}),
+            ...(typeof rr.cache_check === "string" ? { cache_check: rr.cache_check } : {}),
+          },
+        });
+        return { logged: true };
+      });
+
       // Load a JSON-safe plan from DB (we need recordingUrl to fan-out work per recording).
       const plan = await step.run(
         `load-transcription-plan-${fiche_id}`,
@@ -148,6 +193,15 @@ export const transcribeFicheFunction = inngest.createFunction(
 
         const totalRecordings = fiche.recordings.length;
         const alreadyTranscribed = fiche.recordings.filter((r) => r.hasTranscription).length;
+        const missingRecordingUrlCount = fiche.recordings.filter((r) => {
+          return typeof r.recordingUrl !== "string" || r.recordingUrl.trim().length === 0;
+        }).length;
+        const missingRecordingUrlToTranscribeCount = fiche.recordings.filter((r) => {
+          return (
+            !r.hasTranscription &&
+            (typeof r.recordingUrl !== "string" || r.recordingUrl.trim().length === 0)
+          );
+        }).length;
         const toTranscribe = fiche.recordings
           .filter((r) => !r.hasTranscription)
           .map((r) => ({
@@ -159,10 +213,21 @@ export const transcribeFicheFunction = inngest.createFunction(
           ficheCacheId: fiche.id.toString(), // BigInt -> string (JSON-safe)
           totalRecordings,
           alreadyTranscribed,
+          missingRecordingUrlCount,
+          missingRecordingUrlToTranscribeCount,
           toTranscribe,
         };
         }
       );
+
+      logger.info("Transcription plan built", {
+        fiche_id,
+        total: plan.totalRecordings,
+        already_transcribed: plan.alreadyTranscribed,
+        to_transcribe: plan.toTranscribe.length,
+        missing_url_total: plan.missingRecordingUrlCount,
+        missing_url_to_transcribe: plan.missingRecordingUrlToTranscribeCount,
+      });
 
       // Send status check webhook (mirrors service behavior)
       await step.run(`send-transcription-status-check-${fiche_id}`, async () => {
@@ -340,23 +405,44 @@ export const transcribeFicheFunction = inngest.createFunction(
       }
 
       // Fan-out: dispatch one event per recording so work is distributed across replicas.
-      await step.sendEvent(
+      const recordingEvents = toTranscribe.map((rec, idx) => ({
+        name: "transcription/recording.transcribe" as const,
+        data: {
+          run_id: runId,
+          fiche_id,
+          fiche_cache_id: plan.ficheCacheId,
+          call_id: rec.callId,
+          recording_url: rec.recordingUrl,
+          recording_index: idx + 1,
+          total_to_transcribe: toTranscribeCount,
+          priority,
+        },
+        id: `transcription-recording-${runId}-${rec.callId}`,
+      }));
+
+      const sendResult = await step.sendEvent(
         `fan-out-recordings-${fiche_id}`,
-        toTranscribe.map((rec, idx) => ({
-          name: "transcription/recording.transcribe" as const,
-          data: {
-            run_id: runId,
-            fiche_id,
-            fiche_cache_id: plan.ficheCacheId,
-            call_id: rec.callId,
-            recording_url: rec.recordingUrl,
-            recording_index: idx + 1,
-            total_to_transcribe: toTranscribeCount,
-            priority,
-          },
-          id: `transcription-recording-${runId}-${rec.callId}`,
-        }))
+        recordingEvents
       );
+
+      await step.run(`log-fan-out-recordings-${fiche_id}`, async () => {
+        const idsRaw =
+          isRecord(sendResult) && Array.isArray(sendResult.ids)
+            ? (sendResult.ids as unknown[])
+            : [];
+        const ids = idsRaw
+          .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+          .slice(0, 10);
+        logger.info("Dispatched transcription/recording.transcribe fan-out events", {
+          fiche_id,
+          run_id: runId,
+          total_events: recordingEvents.length,
+          chunks: 1,
+          ids_count: idsRaw.length,
+          ids_sample: ids,
+        });
+        return { logged: true, idsCount: idsRaw.length };
+      });
 
       // If we're in "enqueue" mode, return immediately; finalizer will emit progress/completion.
       if (!waitForCompletion) {
@@ -697,6 +783,19 @@ export const transcribeRecordingFunction = inngest.createFunction(
       total_to_transcribe,
     } = event.data;
 
+    const eventId = typeof event.id === "string" ? event.id : String(event.id ?? "");
+    const workerStartedAt = Date.now();
+    let attempt = 0;
+
+    logger.info("Recording transcription worker started", {
+      event_id: eventId,
+      run_id,
+      fiche_id,
+      call_id,
+      recording_index,
+      total_to_transcribe,
+    });
+
     const emitRecordingDone = async (params: {
       ok: boolean;
       cached: boolean;
@@ -739,11 +838,22 @@ export const transcribeRecordingFunction = inngest.createFunction(
 
     if (!lock.acquired) {
       logger.warn("Recording transcription already in progress, skipping", {
+        event_id: eventId,
+        run_id,
         fiche_id,
         call_id,
         lockKey,
       });
       await emitRecordingDone({ ok: true, cached: true });
+      logger.info("Recording transcription worker finished (skipped)", {
+        event_id: eventId,
+        run_id,
+        fiche_id,
+        call_id,
+        cached: true,
+        attempts: attempt,
+        elapsed_ms: Math.max(0, Date.now() - workerStartedAt),
+      });
       return { success: true, fiche_id, call_id, cached: true };
     }
 
@@ -819,6 +929,8 @@ export const transcribeRecordingFunction = inngest.createFunction(
 
       if (rec.hasTranscription) {
         logger.info("Recording already transcribed; skipping", {
+          event_id: eventId,
+          run_id,
           fiche_id,
           call_id,
         });
@@ -826,6 +938,15 @@ export const transcribeRecordingFunction = inngest.createFunction(
           ok: true,
           cached: true,
           transcription_id: rec.transcriptionId || undefined,
+        });
+        logger.info("Recording transcription worker finished (cached)", {
+          event_id: eventId,
+          run_id,
+          fiche_id,
+          call_id,
+          cached: true,
+          attempts: attempt,
+          elapsed_ms: Math.max(0, Date.now() - workerStartedAt),
         });
         return {
           success: true,
@@ -871,7 +992,6 @@ export const transcribeRecordingFunction = inngest.createFunction(
       let transcription:
         | Awaited<ReturnType<TranscriptionService["transcribe"]>>
         | null = null;
-      let attempt = 0;
       while (!transcription) {
         attempt++;
         try {
@@ -942,6 +1062,16 @@ export const transcribeRecordingFunction = inngest.createFunction(
         cached: false,
         transcription_id: transcriptionId,
       });
+      logger.info("Recording transcription worker finished", {
+        event_id: eventId,
+        run_id,
+        fiche_id,
+        call_id,
+        cached: false,
+        transcription_id: transcriptionId,
+        attempts: attempt,
+        elapsed_ms: Math.max(0, Date.now() - workerStartedAt),
+      });
       return {
         success: true,
         fiche_id,
@@ -952,8 +1082,12 @@ export const transcribeRecordingFunction = inngest.createFunction(
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
       logger.error("Recording transcription failed", {
+        event_id: eventId,
+        run_id,
         fiche_id,
         call_id,
+        attempts: attempt,
+        elapsed_ms: Math.max(0, Date.now() - workerStartedAt),
         error: msg,
       });
 
@@ -1102,6 +1236,19 @@ export const finalizeFicheTranscriptionFunction = inngest.createFunction(
         } catch {
           // ignore
         }
+        logger.info("Transcription run progress", {
+          run_id,
+          fiche_id,
+          processed,
+          remaining: remainingCount,
+          cached: cachedCount,
+          failed: failedCount,
+          target_total: targetTotal,
+          total_recordings: totalRecordings,
+          already_transcribed: alreadyTranscribed,
+          transcribed_overall: transcribedOverall,
+          pending_overall: pendingOverall,
+        });
         return { notified: true };
       });
     }

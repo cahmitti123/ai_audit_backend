@@ -27,7 +27,12 @@ describe("HTTP core", () => {
   it("GET /api-docs.json returns OpenAPI document", async () => {
     const app = makeApp();
 
-    const res = await request(app).get("/api-docs.json");
+    // When optional API auth is enabled (API_AUTH_TOKEN(S)), docs endpoints may require a
+    // credential. Use a test JWT so this test remains deterministic across environments.
+    const token = await getTestAccessToken();
+    const res = await request(app)
+      .get("/api-docs.json")
+      .set("Authorization", `Bearer ${token}`);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual(

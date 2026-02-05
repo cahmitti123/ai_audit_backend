@@ -665,12 +665,19 @@ export const runAuditFunction = inngest.createFunction(
 
     const auditId = auditIdFromEvent ?? `audit-${fiche_id}-${audit_config_id}-${startTime}`;
 
-    logger.info("Starting audit", {
-      audit_id: auditId,
-      fiche_id,
-      audit_config_id,
-      user_id,
-      use_rlm: useRlm,
+    await step.run("log-audit-start", async () => {
+      logger.info("Starting audit", {
+        audit_id: auditId,
+        event_id: auditIdFromEvent ?? undefined,
+        fiche_id,
+        audit_config_id,
+        ...(triggerUserId ? { user_id: triggerUserId } : {}),
+        use_rlm: useRlm,
+        ...(automationScheduleId ? { automation_schedule_id: automationScheduleId.toString() } : {}),
+        ...(automationRunId ? { automation_run_id: automationRunId.toString() } : {}),
+        ...(triggerSource ? { trigger_source: triggerSource } : {}),
+      });
+      return { logged: true };
     });
 
     const approach = {
@@ -679,36 +686,49 @@ export const runAuditFunction = inngest.createFunction(
     } as const;
     const runEventId = auditIdFromEvent ?? "";
 
-    // Step 1: Ensure fiche is fetched
-    const ficheData = await step.run("ensure-fiche", async () => {
-      const cached = await getCachedFiche(fiche_id);
+    // Step 1: Always force-refresh fiche details/recordings (audit must use latest recordings)
+    const ficheCacheBefore = await step.run(
+      "snapshot-fiche-before-force-refresh",
+      async () => {
+        const cached = await getCachedFiche(fiche_id);
+        const recordings =
+          cached && Array.isArray(cached.recordings) ? cached.recordings : [];
+        const blankRecordingUrlCount = recordings.reduce((acc, r) => {
+          const url = typeof r.recordingUrl === "string" ? r.recordingUrl : "";
+          return url.trim().length === 0 ? acc + 1 : acc;
+        }, 0);
 
-      const rawData: unknown = cached?.rawData;
-      const isSalesListOnly =
-        Boolean(cached) && isRecord(rawData) && rawData._salesListOnly === true;
-      const now = new Date();
-      const isExpired = cached ? cached.expiresAt < now : false;
-
-      if (!cached || isExpired || isSalesListOnly) {
-        logger.info("Fiche not cached or incomplete, triggering fetch", {
-          fiche_id,
-          cached: Boolean(cached),
-          expired: isExpired,
+        const rawData: unknown = cached?.rawData;
+        const isSalesListOnly =
+          Boolean(cached) && isRecord(rawData) && rawData._salesListOnly === true;
+        const snapshot = {
+          found: Boolean(cached),
+          cache_id: cached ? String(cached.id) : null,
+          fetched_at: cached ? cached.fetchedAt.toISOString() : null,
+          expires_at: cached ? cached.expiresAt.toISOString() : null,
+          recordings_count:
+            typeof cached?.recordingsCount === "number" ? cached.recordingsCount : null,
+          recording_rows_count: recordings.length,
+          blank_recording_url_count: blankRecordingUrlCount,
           sales_list_only: isSalesListOnly,
+        } as const;
+
+        logger.info("Fiche cache snapshot (before force refresh)", {
+          audit_id: auditId,
+          fiche_id,
+          audit_config_id,
+          ...snapshot,
         });
-        return null;
+
+        return snapshot;
       }
-
-      logger.info("Fiche already cached", { fiche_id });
-      return cached;
-    });
-
-    const ficheFromCache = Boolean(ficheData);
+    );
 
     // Realtime: fiche fetch phase started (best-effort)
     await step.run("send-fiche-fetch-started", async () => {
       try {
-        await auditWebhooks.ficheFetchStarted(auditId, fiche_id, ficheFromCache, {
+        // We are force-refreshing, so we are not using cache for this run.
+        await auditWebhooks.ficheFetchStarted(auditId, fiche_id, false, {
           event_id: runEventId,
           approach,
         });
@@ -718,34 +738,110 @@ export const runAuditFunction = inngest.createFunction(
       return { notified: true };
     });
 
-    // If not cached, invoke fetch function
-    if (!ficheData) {
-      logger.info("Invoking fiche fetch function", { fiche_id });
-
-      await step.invoke("fetch-fiche", {
-        function: fetchFicheFunction,
-        data: {
+    const { startedAt: forceRefreshStartedAt } = await step.run(
+      "log-force-refresh-start",
+      async () => {
+        const startedAt = Date.now();
+        logger.info("Force-refreshing fiche details/recordings", {
+          audit_id: auditId,
+          event_id: runEventId || undefined,
           fiche_id,
-        },
-      });
+          force_refresh: true,
+          had_cache_before_refresh: ficheCacheBefore.found,
+          cache_id_before: ficheCacheBefore.cache_id ?? undefined,
+          recordings_count_before: ficheCacheBefore.recordings_count ?? undefined,
+          recording_rows_count_before: ficheCacheBefore.recording_rows_count,
+          blank_recording_url_count_before: ficheCacheBefore.blank_recording_url_count,
+          sales_list_only_before: ficheCacheBefore.sales_list_only,
+        });
+        return { startedAt };
+      }
+    );
 
-      logger.info("Fiche fetch completed", { fiche_id });
-    }
+    const ficheFetchResult = await step.invoke("fetch-fiche", {
+      function: fetchFicheFunction,
+      data: {
+        fiche_id,
+        force_refresh: true,
+      },
+    });
+
+    await step.run("log-force-refresh-done", async () => {
+      logger.info("Fiche force-refresh completed", {
+        audit_id: auditId,
+        event_id: runEventId || undefined,
+        fiche_id,
+        force_refresh: true,
+        fetch_result: {
+          success: ficheFetchResult.success,
+          cached: ficheFetchResult.cached,
+          cache_id: ficheFetchResult.cache_id,
+          recordings_count: ficheFetchResult.recordings_count,
+          cache_check: ficheFetchResult.cache_check,
+        },
+        elapsed_ms:
+          typeof forceRefreshStartedAt === "number"
+            ? Math.max(0, Date.now() - forceRefreshStartedAt)
+            : undefined,
+      });
+      return { logged: true };
+    });
+
+    const ficheCacheAfter = await step.run(
+      "snapshot-fiche-after-force-refresh",
+      async () => {
+        const cached = await getCachedFiche(fiche_id);
+        const recordings =
+          cached && Array.isArray(cached.recordings) ? cached.recordings : [];
+        const blankRecordingUrlCount = recordings.reduce((acc, r) => {
+          const url = typeof r.recordingUrl === "string" ? r.recordingUrl : "";
+          return url.trim().length === 0 ? acc + 1 : acc;
+        }, 0);
+
+        const rawData: unknown = cached?.rawData;
+        const isSalesListOnly =
+          Boolean(cached) && isRecord(rawData) && rawData._salesListOnly === true;
+        const prospectName = `${cached?.prospectPrenom || ""} ${cached?.prospectNom || ""}`.trim();
+        const snapshot = {
+          found: Boolean(cached),
+          cache_id: cached ? String(cached.id) : null,
+          fetched_at: cached ? cached.fetchedAt.toISOString() : null,
+          expires_at: cached ? cached.expiresAt.toISOString() : null,
+          recordings_count:
+            typeof cached?.recordingsCount === "number" ? cached.recordingsCount : null,
+          recording_rows_count: recordings.length,
+          blank_recording_url_count: blankRecordingUrlCount,
+          sales_list_only: isSalesListOnly,
+          prospect_name: prospectName,
+        } as const;
+
+        logger.info("Fiche cache snapshot (after force refresh)", {
+          audit_id: auditId,
+          fiche_id,
+          audit_config_id,
+          ...snapshot,
+        });
+
+        return snapshot;
+      }
+    );
 
     // Realtime: fiche fetch phase completed (best-effort)
     await step.run("send-fiche-fetch-completed", async () => {
       try {
-        const cached = await getCachedFiche(fiche_id);
         const recordingsCount =
-          typeof cached?.recordingsCount === "number" ? cached.recordingsCount : 0;
-        const prospectName = `${cached?.prospectPrenom || ""} ${cached?.prospectNom || ""}`.trim();
+          typeof ficheCacheAfter.recordings_count === "number"
+            ? ficheCacheAfter.recordings_count
+            : typeof ficheCacheAfter.recording_rows_count === "number"
+              ? ficheCacheAfter.recording_rows_count
+              : 0;
 
         await auditWebhooks.ficheFetchCompleted(
           auditId,
           fiche_id,
           recordingsCount,
-          prospectName,
-          ficheFromCache,
+          ficheCacheAfter.prospect_name,
+          false,
           { event_id: runEventId, approach }
         );
       } catch {
@@ -1107,27 +1203,37 @@ export const runAuditFunction = inngest.createFunction(
     });
 
     // Step 6: Fan-out one event per step so work can be spread across replicas
-    await step.sendEvent(
-      "fan-out-audit-steps",
-      auditConfig.auditSteps.map((s) => ({
-        name: "audit/step.analyze",
-        data: {
-          audit_db_id: String(auditDbId),
-          audit_id: auditId,
-          fiche_id,
-          audit_config_id,
-          step_position: s.position,
-          use_rlm: useRlm,
-        },
-        // Idempotent per audit+step
-        id: `audit-step-${auditDbId}-${s.position}`,
-      }))
-    );
+    const stepEvents = auditConfig.auditSteps.map((s) => ({
+      name: "audit/step.analyze" as const,
+      data: {
+        audit_db_id: String(auditDbId),
+        audit_id: auditId,
+        fiche_id,
+        audit_config_id,
+        step_position: s.position,
+        use_rlm: useRlm,
+      },
+      // Idempotent per audit+step
+      id: `audit-step-${auditDbId}-${s.position}`,
+    }));
 
-    logger.info("Audit step fan-out dispatched", {
-      fiche_id,
-      audit_db_id: auditDbId,
-      steps: auditConfig.auditSteps.length,
+    const fanOutResult = await step.sendEvent("fan-out-audit-steps", stepEvents);
+
+    await step.run("log-audit-step-fan-out", async () => {
+      const ids =
+        isRecord(fanOutResult) && Array.isArray(fanOutResult.ids)
+          ? (fanOutResult.ids as unknown[]).filter((v): v is string => typeof v === "string")
+          : [];
+      logger.info("Audit step fan-out dispatched", {
+        audit_id: auditId,
+        event_id: runEventId || undefined,
+        fiche_id,
+        audit_db_id: auditDbId,
+        steps: auditConfig.auditSteps.length,
+        ids_count: ids.length,
+        ids_sample: ids.slice(0, 5),
+      });
+      return { logged: true, idsCount: ids.length };
     });
 
     // The audit is finalized asynchronously by the `audit/step.analyzed` aggregator.
@@ -1352,6 +1458,17 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
     // Analyze step (LLM) with graceful failure fallback.
     // IMPORTANT: keep the expensive LLM call inside `step.run` so retries don't re-call OpenAI.
     const analysis = await step.run(`analyze-step-${stepPosition}`, async () => {
+      const t0 = Date.now();
+      logger.info("Audit step analysis started", {
+        audit_db_id,
+        event_id: typeof event.id === "string" ? event.id : String(event.id ?? ""),
+        audit_id: audit_id,
+        fiche_id,
+        step_position: stepPosition,
+        step_name: stepDef.name || `Step ${stepPosition}`,
+        transcript_mode: wantsTranscriptTools ? "tools" : "prompt",
+      });
+
       try {
         const { analyzeStep } = await import("./audits.analyzer.js");
         const analyzed = await analyzeStep(
@@ -1369,9 +1486,43 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
               : {}),
           }
         );
+
+        const analyzedUnknown: unknown = analyzed;
+        const totalTokens = isAnalyzeStepResult(analyzedUnknown)
+          ? Number((analyzedUnknown.usage as { total_tokens?: unknown } | undefined)?.total_tokens || 0)
+          : undefined;
+        const controlPoints = isAnalyzeStepResult(analyzedUnknown)
+          ? analyzedUnknown.points_controle.length
+          : undefined;
+        const citations = isAnalyzeStepResult(analyzedUnknown)
+          ? countCitations(analyzedUnknown.points_controle)
+          : undefined;
+
+        logger.info("Audit step analysis finished", {
+          audit_db_id,
+          audit_id: audit_id,
+          fiche_id,
+          step_position: stepPosition,
+          ok: true,
+          elapsed_ms: Math.max(0, Date.now() - t0),
+          control_points: controlPoints,
+          citations,
+          total_tokens: totalTokens,
+        });
+
         return { ok: true, analyzed, errorMessage: undefined as string | undefined };
       } catch (err) {
         const stepErrorMessage = (err as Error).message || String(err);
+
+        logger.warn("Audit step analysis failed; using fallback result", {
+          audit_db_id,
+          audit_id: audit_id,
+          fiche_id,
+          step_position: stepPosition,
+          ok: false,
+          elapsed_ms: Math.max(0, Date.now() - t0),
+          error: stepErrorMessage,
+        });
 
         // Best-effort webhook; never fail the step due to webhook delivery issues.
         try {
@@ -1450,6 +1601,7 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
 
     // Persist step output for finalization
     await step.run("upsert-step-result", async () => {
+      const t0 = Date.now();
       const { prisma } = await import("../../shared/prisma.js");
 
       const points = Array.isArray(analyzedSanitized.points_controle)
@@ -1560,6 +1712,18 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
           : []),
       ]);
 
+      logger.info("Audit step result persisted", {
+        audit_db_id,
+        audit_id,
+        fiche_id,
+        step_position: stepPosition,
+        ok,
+        elapsed_ms: Math.max(0, Date.now() - t0),
+        control_points: points.length,
+        citations: totalCitations,
+        total_tokens: Number(analyzedSanitized.usage?.total_tokens || 0),
+      });
+
       return { saved: true };
     });
 
@@ -1621,12 +1785,60 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
   },
   { event: "audit/step.analyzed" },
   async ({ event, step, logger }) => {
-    const { audit_db_id, audit_id, fiche_id, audit_config_id, use_rlm } = event.data;
+    // NOTE: the Inngest event typing for this event may not include the optional
+    // debugging fields we attach (step_position/ok/error). Cast to a local shape
+    // so we can safely parse them without `never` narrowing issues.
+    const eventData = event.data as unknown as {
+      audit_db_id: string;
+      audit_id: string;
+      fiche_id: string;
+      audit_config_id: string;
+      use_rlm?: unknown;
+      step_position?: unknown;
+      ok?: unknown;
+      error?: unknown;
+    };
+
+    const {
+      audit_db_id,
+      audit_id,
+      fiche_id,
+      audit_config_id,
+      use_rlm,
+      step_position,
+      ok,
+      error,
+    } = eventData;
     const auditDbId = BigInt(audit_db_id);
     const useRlm = typeof use_rlm === "boolean" ? use_rlm : false;
     const transcriptMode = useRlm ? "tools" : "prompt";
     const approach = { use_rlm: useRlm, transcript_mode: transcriptMode } as const;
     const finalizerEventId = typeof event.id === "string" ? event.id : String(event.id ?? "");
+
+    const triggeringStepPosition =
+      typeof step_position === "number" && Number.isFinite(step_position)
+        ? Math.trunc(step_position)
+        : typeof step_position === "string" && step_position.trim()
+          ? Number.parseInt(step_position.trim(), 10)
+          : null;
+    const triggeringOk = typeof ok === "boolean" ? ok : null;
+    const triggeringError =
+      typeof error === "string" && error.trim() ? error.trim().slice(0, 500) : null;
+
+    await step.run("log-finalizer-trigger", async () => {
+      logger.info("Audit finalizer triggered", {
+        audit_db_id,
+        audit_id,
+        fiche_id,
+        audit_config_id,
+        event_id: finalizerEventId,
+        transcript_mode: transcriptMode,
+        ...(triggeringStepPosition !== null ? { step_position: triggeringStepPosition } : {}),
+        ...(triggeringOk !== null ? { ok: triggeringOk } : {}),
+        ...(triggeringError ? { error: triggeringError } : {}),
+      });
+      return { logged: true };
+    });
 
     // Load audit meta (JSON safe)
     const auditMeta = await step.run("load-audit-meta", async () => {
@@ -1701,13 +1913,14 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
     // Count step results stored so far
     const counts = await step.run("count-step-results", async () => {
       const { prisma } = await import("../../shared/prisma.js");
-      const completed = await prisma.auditStepResult.count({
+      const rows = await prisma.auditStepResult.findMany({
         where: { auditId: auditDbId },
+        select: { stepPosition: true, traite: true },
       });
-      const failed = await prisma.auditStepResult.count({
-        where: { auditId: auditDbId, traite: false },
-      });
-      return { completed, failed };
+      const completed = rows.length;
+      const failed = rows.filter((r) => r.traite === false).length;
+      const positions = rows.map((r) => r.stepPosition);
+      return { completed, failed, positions };
     });
 
     // Inngest JSONifies step outputs; be defensive (some runtimes widen to number|null).
@@ -1715,6 +1928,20 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
       isRecord(counts) && typeof counts.completed === "number" ? counts.completed : 0;
     const failedStepsSoFar =
       isRecord(counts) && typeof counts.failed === "number" ? counts.failed : 0;
+    const positionsRaw =
+      isRecord(counts) && Array.isArray((counts as Record<string, unknown>).positions)
+        ? ((counts as Record<string, unknown>).positions as unknown[])
+        : [];
+    const completedPositions = positionsRaw
+      .filter((v): v is number => typeof v === "number" && Number.isFinite(v))
+      .map((n) => Math.trunc(n));
+    const completedSet = new Set(completedPositions);
+    const expectedPositions = auditConfig.auditSteps
+      .map((s) => s.position)
+      .filter((n): n is number => typeof n === "number" && Number.isFinite(n))
+      .map((n) => Math.trunc(n))
+      .sort((a, b) => a - b);
+    const missingPositions = expectedPositions.filter((p) => !completedSet.has(p));
 
     // Progress webhook (best-effort)
     await step.run("send-progress-update", async () => {
@@ -1735,6 +1962,19 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
     });
 
     if (completedSteps < totalSteps) {
+      await step.run("log-finalizer-waiting", async () => {
+        logger.info("Audit finalizer waiting for steps", {
+          audit_db_id,
+          audit_id,
+          fiche_id,
+          completed: completedSteps,
+          total: totalSteps,
+          failed: failedStepsSoFar,
+          missing: Math.max(0, missingPositions.length),
+          missing_sample: missingPositions.slice(0, 10),
+        });
+        return { logged: true };
+      });
       return { waiting: true, completed: completedSteps, totalSteps };
     }
 
@@ -1800,10 +2040,16 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
       const stepPosition = toIntOr(r.stepPosition, 0) > 0 ? toIntOr(r.stepPosition, 0) : 1;
       const weight = toIntOr(r.weight, 5);
 
-      const usage =
+      const usageRaw =
         isRecord(raw) && isRecord(raw.usage)
           ? (raw.usage as Record<string, unknown>)
-          : { total_tokens: Number(r.totalTokens ?? 0) };
+          : ({} as Record<string, unknown>);
+      const totalTokensFallback = Number(r.totalTokens ?? 0);
+      const usage = {
+        prompt_tokens: toIntOr(usageRaw.prompt_tokens, 0),
+        completion_tokens: toIntOr(usageRaw.completion_tokens, 0),
+        total_tokens: toIntOr(usageRaw.total_tokens, totalTokensFallback),
+      };
 
       const points = Array.isArray(r.controlPoints)
         ? r.controlPoints.map((cp) => ({
@@ -1811,15 +2057,27 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
             statut: cp.statut as ControlPoint["statut"],
             commentaire: cp.commentaire,
             citations: cp.citations.map((c) => ({
-              texte: c.texte,
-              speaker: c.speaker,
-              minutage: c.minutage,
-              chunk_index: c.chunkIndex,
-              recording_url: c.recordingUrl,
-              recording_date: c.recordingDate,
-              recording_time: c.recordingTime,
-              recording_index: c.recordingIndex,
-              minutage_secondes: c.minutageSecondes,
+              texte: typeof c.texte === "string" ? c.texte : String(c.texte ?? ""),
+              speaker: typeof c.speaker === "string" ? c.speaker : String(c.speaker ?? ""),
+              minutage: typeof c.minutage === "string" ? c.minutage : String(c.minutage ?? ""),
+              chunk_index:
+                typeof c.chunkIndex === "number" && Number.isFinite(c.chunkIndex)
+                  ? Math.trunc(c.chunkIndex)
+                  : 0,
+              recording_url:
+                typeof c.recordingUrl === "string" ? c.recordingUrl : String(c.recordingUrl ?? "N/A"),
+              recording_date:
+                typeof c.recordingDate === "string" ? c.recordingDate : String(c.recordingDate ?? "N/A"),
+              recording_time:
+                typeof c.recordingTime === "string" ? c.recordingTime : String(c.recordingTime ?? "N/A"),
+              recording_index:
+                typeof c.recordingIndex === "number" && Number.isFinite(c.recordingIndex)
+                  ? Math.trunc(c.recordingIndex)
+                  : 0,
+              minutage_secondes:
+                typeof c.minutageSecondes === "number" && Number.isFinite(c.minutageSecondes)
+                  ? c.minutageSecondes
+                  : 0,
             })),
             minutages: cp.minutages,
             erreur_transcription_notee: cp.erreurTranscriptionNotee,
@@ -2018,7 +2276,19 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
 
     // Persist audit + step summaries (rawResult is overwritten with final gated step)
     const { updateAuditWithResults } = await import("./audits.repository.js");
-    await updateAuditWithResults(auditDbId, auditData);
+    await step.run("persist-audit-results", async () => {
+      const t0 = Date.now();
+      await updateAuditWithResults(auditDbId, auditData);
+      const elapsedMs = Date.now() - t0;
+      logger.info("Persisted audit results", {
+        audit_db_id,
+        fiche_id,
+        steps: totalSteps,
+        total_tokens: totalTokens,
+        persist_elapsed_ms: elapsedMs,
+      });
+      return { ok: true, elapsedMs };
+    });
 
     // Completion webhooks + event (best-effort; do not fail the finalizer)
     await step.run("notify-completion", async () => {
@@ -2060,7 +2330,7 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
         audit_id: audit_db_id,
         audit_db_id,
         audit_tracking_id: audit_id,
-        audit_config_id,
+        audit_config_id: Number.parseInt(String(audit_config_id), 10),
         score: compliance.score || 0,
         niveau: compliance.niveau,
         duration_ms: durationMs,
@@ -2213,23 +2483,32 @@ export const batchAuditFunction = inngest.createFunction(
       });
     }
 
-    await step.sendEvent(
-      "fan-out-audits",
-      fiche_ids.map((fiche_id) => ({
-        name: "audit/run",
-        data: {
-          fiche_id,
-          audit_config_id: defaultAuditConfigId,
-          ...(typeof user_id === "string" && user_id ? { user_id } : {}),
-          trigger_source: "batch",
-          use_rlm: useRlm,
-        },
-        id: `batch-${batchId}-audit-${fiche_id}-${defaultAuditConfigId}`,
-      }))
-    );
+    const batchEvents = fiche_ids.map((fiche_id) => ({
+      name: "audit/run" as const,
+      data: {
+        fiche_id,
+        audit_config_id: defaultAuditConfigId,
+        ...(typeof user_id === "string" && user_id ? { user_id } : {}),
+        trigger_source: "batch",
+        use_rlm: useRlm,
+      },
+      id: `batch-${batchId}-audit-${fiche_id}-${defaultAuditConfigId}`,
+    }));
 
-    logger.info("Dispatched all audit events", {
-      count: fiche_ids.length,
+    const sendResult = await step.sendEvent("fan-out-audits", batchEvents);
+
+    await step.run("log-batch-audit-fan-out", async () => {
+      const ids =
+        isRecord(sendResult) && Array.isArray(sendResult.ids)
+          ? (sendResult.ids as unknown[]).filter((v): v is string => typeof v === "string")
+          : [];
+      logger.info("Dispatched all audit events", {
+        batch_id: batchId,
+        count: fiche_ids.length,
+        ids_count: ids.length,
+        ids_sample: ids.slice(0, 5),
+      });
+      return { logged: true, idsCount: ids.length };
     });
 
     // Wait for all audits to complete

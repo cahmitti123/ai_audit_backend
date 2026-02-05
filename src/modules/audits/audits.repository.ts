@@ -195,6 +195,8 @@ export async function updateAuditWithResults(
 
   const steps: AuditWorkflowStep[] = sanitizedResult.audit.results.steps || [];
   const storedResultData = stripAuditStepsFromResultData(sanitizedResult);
+  const allControlPointsData: Prisma.AuditStepResultControlPointCreateManyInput[] = [];
+  const allCitationsData: Prisma.AuditStepResultCitationCreateManyInput[] = [];
 
   /**
    * IMPORTANT:
@@ -293,6 +295,13 @@ export async function updateAuditWithResults(
         .filter((v): v is NonNullable<typeof v> => v !== null);
     });
 
+    if (controlPointsData.length > 0) {
+      allControlPointsData.push(...controlPointsData);
+    }
+    if (citationsData.length > 0) {
+      allCitationsData.push(...citationsData);
+    }
+
     ops.push(
       prisma.auditStepResult.upsert({
         where: {
@@ -348,30 +357,29 @@ export async function updateAuditWithResults(
         },
       })
     );
+  }
 
+  // Replace all control points (and cascading citations) in bulk to reduce transaction time.
+  ops.push(
+    prisma.auditStepResultControlPoint.deleteMany({
+      where: { auditId: auditDbId },
+    })
+  );
+  if (allControlPointsData.length > 0) {
     ops.push(
-      prisma.auditStepResultControlPoint.deleteMany({
-        where: { auditId: auditDbId, stepPosition },
+      prisma.auditStepResultControlPoint.createMany({
+        data: allControlPointsData,
+        skipDuplicates: true,
       })
     );
-
-    if (controlPointsData.length > 0) {
-      ops.push(
-        prisma.auditStepResultControlPoint.createMany({
-          data: controlPointsData,
-          skipDuplicates: true,
-        })
-      );
-    }
-
-    if (citationsData.length > 0) {
-      ops.push(
-        prisma.auditStepResultCitation.createMany({
-          data: citationsData,
-          skipDuplicates: true,
-        })
-      );
-    }
+  }
+  if (allCitationsData.length > 0) {
+    ops.push(
+      prisma.auditStepResultCitation.createMany({
+        data: allCitationsData,
+        skipDuplicates: true,
+      })
+    );
   }
 
   ops.push(

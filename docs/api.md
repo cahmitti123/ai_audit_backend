@@ -108,6 +108,7 @@ These endpoints require RBAC permissions:
 - `GET` routes require `transcriptions.read`. Queue routes require `transcriptions.write`. All enforce fiche scope.
 - `POST /api/transcriptions/:fiche_id?priority=high|normal|low`
 - `GET /api/transcriptions/:fiche_id/status`
+- `GET /api/transcriptions/:fiche_id/logs` (workflow logs; supports `run_id`/`trace_id`, `level`, `since`, `until`, `limit`, `offset`)
 - `GET /api/transcriptions/:fiche_id/recordings/:call_id`
 - `POST /api/transcriptions/batch`
 
@@ -146,6 +147,7 @@ These endpoints require RBAC permissions:
 - `POST /api/audits/batch`
 - `GET /api/audits/by-fiche/:fiche_id`
 - `GET /api/audits/:audit_id`
+- `GET /api/audits/:audit_id/logs` (workflow logs; supports `level`, `since`, `until`, `limit`, `offset`)
 - `PATCH /api/audits/:audit_id`
 - `DELETE /api/audits/:audit_id`
 - `POST /api/audits/:audit_id/steps/:step_position/rerun`

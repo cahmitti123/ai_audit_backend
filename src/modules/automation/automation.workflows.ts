@@ -10,6 +10,7 @@ import path from "node:path";
 import { NonRetriableError } from "inngest";
 
 import { inngest } from "../../inngest/client.js";
+import { sanitizeForLogging } from "../../shared/log-sanitizer.js";
 import { publishPusherEvent } from "../../shared/pusher.js";
 import type { RecordingLike } from "../../utils/recording-parser.js";
 import * as automationApi from "./automation.api.js";
@@ -163,8 +164,9 @@ function toSalesSummaryCacheInput(value: unknown): {
 
 function toLogContext(metadata: unknown): Record<string, unknown> | undefined {
   if (metadata === undefined) {return undefined;}
-  if (isRecord(metadata)) {return metadata;}
-  return { metadata };
+  const sanitized = sanitizeForLogging(metadata);
+  if (isRecord(sanitized) && !Array.isArray(sanitized)) {return sanitized;}
+  return { metadata: sanitized };
 }
 
 function envFlag(name: string): boolean {
@@ -174,7 +176,8 @@ function envFlag(name: string): boolean {
 
 function safeOneLineJson(value: unknown, maxChars = 15_000): string {
   try {
-    const json = JSON.stringify(value);
+    const sanitized = sanitizeForLogging(value);
+    const json = JSON.stringify(sanitized);
     if (typeof json !== "string") {return "";}
     if (json.length <= maxChars) {return json;}
     return `${json.slice(0, maxChars)}…(truncated ${json.length - maxChars} chars)`;
@@ -420,22 +423,23 @@ export const runAutomationFunction = inngest.createFunction(
       message: string,
       metadata?: unknown
     ) => {
+      const safeMetadata = metadata === undefined ? undefined : sanitizeForLogging(metadata);
       await automationRepository.addAutomationLog(
         runId,
         level,
         message,
-        metadata
+        safeMetadata
       );
 
       // Optional: also persist a human-readable line to a local txt file for debugging.
       // This is best-effort and should never break the automation.
       if (fileLogPath) {
         const ts = new Date().toISOString();
-        const meta = metadata === undefined ? "" : ` ${safeOneLineJson(metadata)}`;
+        const meta = safeMetadata === undefined ? "" : ` ${safeOneLineJson(safeMetadata)}`;
         appendToFile(`${ts} [${level.toUpperCase()}] ${message}${meta}\n`);
       }
 
-      const ctx = toLogContext(metadata);
+      const ctx = toLogContext(safeMetadata);
       if (level === "debug") {
         if (ctx) {logger.debug(message, ctx);}
         else {logger.debug(message);}
@@ -1015,29 +1019,63 @@ export const runAutomationFunction = inngest.createFunction(
       };
 
       // STEP 1: Ensure all fiches have FULL details cached (distributed across replicas)
-      await log(
-        "info",
-        `Ensuring fiche details via distributed 'fiche/fetch' fan-out (${ficheIds.length} fiches)`
-      );
-
       const sendChunkSize = toPositiveInt(process.env.AUTOMATION_SEND_EVENT_CHUNK_SIZE, 200);
       const fetchEvents = ficheIds.map((ficheId) => ({
         name: "fiche/fetch" as const,
         data: {
           fiche_id: ficheId,
-          force_refresh: false,
+          // Always refresh to avoid stale recordings/details during automation fan-out.
+          force_refresh: true,
         },
         // Deterministic id: retries won't dispatch duplicate fetches for the same run+fiche
         id: `automation-${runIdString}-fetch-${ficheId}`,
       }));
 
       const fetchChunks = chunkArray(fetchEvents, sendChunkSize);
+      await log(
+        "info",
+        `Ensuring fiche details via distributed 'fiche/fetch' fan-out (${ficheIds.length} fiches)`,
+        {
+          inngest_event_id: event.id,
+          force_refresh: true,
+          total: ficheIds.length,
+          send_event_chunk_size: sendChunkSize,
+          chunks: fetchChunks.length,
+          deterministic_event_id_prefix: `automation-${runIdString}-fetch-`,
+        }
+      );
+
+      let fetchFanoutEventIdsCount = 0;
+      const fetchFanoutEventIdsSample: string[] = [];
       for (let i = 0; i < fetchChunks.length; i++) {
-        await step.sendEvent(
-          `fan-out-fiche-fetches-${i + 1}-of-${fetchChunks.length}`,
-          fetchChunks[i]!
-        );
+        const stepName = `fan-out-fiche-fetches-${i + 1}-of-${fetchChunks.length}`;
+        const sendResult = await step.sendEvent(stepName, fetchChunks[i]!);
+
+        const eventIdsRaw =
+          isRecord(sendResult) && Array.isArray(sendResult.ids)
+            ? (sendResult.ids as unknown[])
+            : null;
+        if (eventIdsRaw) {
+          for (const v of eventIdsRaw) {
+            if (typeof v !== "string" || !v.trim()) {continue;}
+            fetchFanoutEventIdsCount++;
+            if (fetchFanoutEventIdsSample.length < 10) {
+              fetchFanoutEventIdsSample.push(v);
+            }
+          }
+        }
       }
+
+      await log("info", "Dispatched fiche/fetch fan-out events", {
+        total_events: fetchEvents.length,
+        chunks: fetchChunks.length,
+        ...(fetchFanoutEventIdsCount > 0
+          ? { inngest_event_ids_count: fetchFanoutEventIdsCount }
+          : {}),
+        ...(fetchFanoutEventIdsSample.length > 0
+          ? { inngest_event_ids_sample: fetchFanoutEventIdsSample }
+          : {}),
+      });
 
       // Durable wait (no in-step busy polling): poll DB snapshot with `step.run` + `step.sleep`.
       const ficheDetailsMaxWaitMs = Math.max(
@@ -1051,7 +1089,16 @@ export const runAutomationFunction = inngest.createFunction(
         Number(process.env.AUTOMATION_FICHE_DETAILS_POLL_INTERVAL_SECONDS || 20)
       );
 
-      const ficheDetailsStarted = Date.now();
+      // IMPORTANT (Inngest replay semantics):
+      // Use a memoized step value for "started at" so the max-wait window is durable across replays.
+      const ficheDetailsStartedRaw = await step.run(
+        `started-at-fiche-details-${runIdString}`,
+        async () => Date.now()
+      );
+      const ficheDetailsStarted =
+        typeof ficheDetailsStartedRaw === "number" && Number.isFinite(ficheDetailsStartedRaw)
+          ? ficheDetailsStartedRaw
+          : Date.now();
       let lastReady = 0;
       let stableCount = 0;
       let ficheDetailsStallRetries = 0;
@@ -1135,11 +1182,28 @@ export const runAutomationFunction = inngest.createFunction(
         );
 
         const ready = lastSnapshot.filter((r) => r.exists && r.isFullDetails === true).length;
+        const incompleteIds = lastSnapshot
+          .filter((r) => !r.exists || r.isFullDetails !== true)
+          .map((r) => r.ficheId);
+        const missingCache = lastSnapshot.filter((r) => !r.exists).length;
+        const salesListOnly = lastSnapshot.filter((r) => r.exists && r.isSalesListOnly).length;
+        const nextStableCount = ready === lastReady ? stableCount + 1 : 0;
 
-        await log(
-          "info",
-          `Fiche details progress: ${ready}/${ficheIds.length}`
-        );
+        await log("info", `Fiche details progress: ${ready}/${ficheIds.length}`, {
+          attempt: ficheDetailsPollAttempt,
+          elapsed_ms: Date.now() - ficheDetailsStarted,
+          max_wait_ms: ficheDetailsMaxWaitMs,
+          poll_interval_seconds: ficheDetailsPollIntervalSeconds,
+          ready,
+          total: ficheIds.length,
+          stable_count: nextStableCount,
+          stall_retries: ficheDetailsStallRetries,
+          max_stall_retries: maxFicheDetailsStallRetries,
+          incomplete: incompleteIds.length,
+          incomplete_sample: incompleteIds.slice(0, 10),
+          missing_cache: missingCache,
+          sales_list_only: salesListOnly,
+        });
 
         if (ready === ficheIds.length) {break;}
 
@@ -1162,6 +1226,7 @@ export const runAutomationFunction = inngest.createFunction(
                     total: ficheIds.length,
                     stall_retry: `${retryNo}/${maxFicheDetailsStallRetries}`,
                     incomplete: incomplete.length,
+                    incomplete_sample: incomplete.slice(0, 10),
                   });
 
                   if (incomplete.length > 0) {
@@ -1171,12 +1236,38 @@ export const runAutomationFunction = inngest.createFunction(
                       id: `automation-${runIdString}-fetch-${ficheId}-retry-${retryNo}`,
                     }));
                     const retryChunks = chunkArray(retryEvents, sendChunkSize);
+                    let retryFetchEventIdsCount = 0;
+                    const retryFetchEventIdsSample: string[] = [];
                     for (let i = 0; i < retryChunks.length; i++) {
-                      await step.sendEvent(
-                        `retry-fiche-fetches-${runIdString}-${retryNo}-${i + 1}-of-${retryChunks.length}`,
-                        retryChunks[i]!
-                      );
+                      const stepName = `retry-fiche-fetches-${runIdString}-${retryNo}-${i + 1}-of-${retryChunks.length}`;
+                      const sendResult = await step.sendEvent(stepName, retryChunks[i]!);
+
+                      const eventIdsRaw =
+                        isRecord(sendResult) && Array.isArray(sendResult.ids)
+                          ? (sendResult.ids as unknown[])
+                          : null;
+                      if (eventIdsRaw) {
+                        for (const v of eventIdsRaw) {
+                          if (typeof v !== "string" || !v.trim()) {continue;}
+                          retryFetchEventIdsCount++;
+                          if (retryFetchEventIdsSample.length < 10) {
+                            retryFetchEventIdsSample.push(v);
+                          }
+                        }
+                      }
                     }
+
+                    await log("info", "Dispatched retry fiche/fetch events", {
+                      retry_no: retryNo,
+                      total_events: retryEvents.length,
+                      chunks: retryChunks.length,
+                      ...(retryFetchEventIdsCount > 0
+                        ? { inngest_event_ids_count: retryFetchEventIdsCount }
+                        : {}),
+                      ...(retryFetchEventIdsSample.length > 0
+                        ? { inngest_event_ids_sample: retryFetchEventIdsSample }
+                        : {}),
+                    });
                   }
             } else {
               break; // likely some failed; proceed with what we have
@@ -1458,6 +1549,7 @@ export const runAutomationFunction = inngest.createFunction(
           target: transcriptionTargetsWithCache.length,
           skipIfTranscribed: schedule.skipIfTranscribed,
           alreadyComplete: pre.alreadyCompleteCount,
+          send_event_chunk_size: sendChunkSize,
         });
 
         if (toTranscribe.length > 0) {
@@ -1476,12 +1568,35 @@ export const runAutomationFunction = inngest.createFunction(
           }));
 
           const txChunks = chunkArray(transcriptionEvents, sendChunkSize);
+          let txFanoutEventIdsCount = 0;
+          const txFanoutEventIdsSample: string[] = [];
           for (let i = 0; i < txChunks.length; i++) {
-            await step.sendEvent(
-              `fan-out-transcriptions-${i + 1}-of-${txChunks.length}`,
-              txChunks[i]!
-            );
+            const stepName = `fan-out-transcriptions-${i + 1}-of-${txChunks.length}`;
+            const sendResult = await step.sendEvent(stepName, txChunks[i]!);
+
+            const eventIdsRaw =
+              isRecord(sendResult) && Array.isArray(sendResult.ids)
+                ? (sendResult.ids as unknown[])
+                : null;
+            if (eventIdsRaw) {
+              for (const v of eventIdsRaw) {
+                if (typeof v !== "string" || !v.trim()) {continue;}
+                txFanoutEventIdsCount++;
+                if (txFanoutEventIdsSample.length < 10) {
+                  txFanoutEventIdsSample.push(v);
+                }
+              }
+            }
           }
+
+          await log("info", "Dispatched fiche/transcribe fan-out events", {
+            total_events: transcriptionEvents.length,
+            chunks: txChunks.length,
+            ...(txFanoutEventIdsCount > 0 ? { inngest_event_ids_count: txFanoutEventIdsCount } : {}),
+            ...(txFanoutEventIdsSample.length > 0
+              ? { inngest_event_ids_sample: txFanoutEventIdsSample }
+              : {}),
+          });
         }
 
         // Durable wait (no in-step busy polling): poll recording table snapshot with `step.run` + `step.sleep`.
@@ -1494,7 +1609,16 @@ export const runAutomationFunction = inngest.createFunction(
           Number(process.env.AUTOMATION_TRANSCRIPTION_POLL_INTERVAL_SECONDS || 30)
         );
 
-        const transcriptionStarted = Date.now();
+        // IMPORTANT (Inngest replay semantics):
+        // Use a memoized step value for "started at" so the max-wait window is durable across replays.
+      const transcriptionStartedRaw = await step.run(
+          `started-at-transcriptions-${runIdString}`,
+          async () => Date.now()
+        );
+      const transcriptionStarted =
+        typeof transcriptionStartedRaw === "number" && Number.isFinite(transcriptionStartedRaw)
+          ? transcriptionStartedRaw
+          : Date.now();
         let lastCompleted = 0;
         let transcriptionStableCount = 0;
         let transcriptionPollAttempt = 0;
@@ -1510,7 +1634,7 @@ export const runAutomationFunction = inngest.createFunction(
             : 0;
 
         while (Date.now() - transcriptionStarted < transcriptionMaxWaitMs) {
-          const completedRaw = await step.run(
+          const poll = await step.run(
             `poll-transcriptions-${runIdString}-${transcriptionPollAttempt}`,
             async () => {
               const { prisma } = await import("../../shared/prisma.js");
@@ -1536,26 +1660,53 @@ export const runAutomationFunction = inngest.createFunction(
               }
 
               let completed = 0;
+              let incomplete = 0;
+              const incomplete_sample: string[] = [];
               for (const ficheId of transcriptionTargetsWithCache) {
                 const cacheId = cacheIdByFicheId.get(ficheId);
                 const counts = cacheId ? agg.get(cacheId) : undefined;
                 const total = counts?.total ?? 0;
                 const transcribed = counts?.transcribed ?? 0;
-                if (total > 0 && transcribed === total) {completed++;}
+                const isComplete = total > 0 && transcribed === total;
+                if (isComplete) {completed++;}
+                else {
+                  incomplete++;
+                  if (incomplete_sample.length < 10) {incomplete_sample.push(ficheId);}
+                }
               }
-              return completed;
+              return { completed, incomplete, incomplete_sample };
             }
           );
 
           const completed =
-            typeof completedRaw === "number" && Number.isFinite(completedRaw)
-              ? completedRaw
+            isRecord(poll) && typeof poll.completed === "number" && Number.isFinite(poll.completed)
+              ? poll.completed
               : 0;
+          const incomplete =
+            isRecord(poll) && typeof poll.incomplete === "number" && Number.isFinite(poll.incomplete)
+              ? poll.incomplete
+              : Math.max(0, targetCount - completed);
+          const incompleteSample =
+            isRecord(poll) && Array.isArray(poll.incomplete_sample)
+              ? (poll.incomplete_sample as unknown[]).filter(
+                  (v): v is string => typeof v === "string" && v.trim().length > 0
+                ).slice(0, 10)
+              : [];
+          const nextStableCount = completed === lastCompleted ? transcriptionStableCount + 1 : 0;
 
-          await log(
-            "info",
-            `Transcription progress: ${completed}/${targetCount}`
-          );
+          await log("info", `Transcription progress: ${completed}/${targetCount}`, {
+            attempt: transcriptionPollAttempt,
+            elapsed_ms: Date.now() - transcriptionStarted,
+            max_wait_ms: transcriptionMaxWaitMs,
+            poll_interval_seconds: transcriptionPollIntervalSeconds,
+            completed,
+            total: targetCount,
+            stable_count: nextStableCount,
+            retry_attempt: retryAttempt,
+            max_retries: maxRetries,
+            incomplete,
+            incomplete_sample: incompleteSample,
+          });
 
           if (completed >= targetCount) {
             results.transcriptions = targetCount;
@@ -1578,7 +1729,7 @@ export const runAutomationFunction = inngest.createFunction(
           // If progress stalls, optionally retry by re-dispatching `fiche/transcribe` for incomplete fiches.
           if (transcriptionStableCount >= 3 && maxRetries > 0 && retryAttempt < maxRetries) {
             const retryNo = retryAttempt + 1;
-            const incomplete = await step.run(
+            const incompleteFicheIds = await step.run(
               `find-incomplete-transcriptions-${runIdString}-retry-${retryNo}`,
               async () => {
                 const { prisma } = await import("../../shared/prisma.js");
@@ -1613,7 +1764,7 @@ export const runAutomationFunction = inngest.createFunction(
               }
             );
 
-            if (incomplete.length === 0) {
+            if (incompleteFicheIds.length === 0) {
               // Defensive: if the DB snapshot says no incompletes, exit the loop.
               results.transcriptions = completed;
               break;
@@ -1623,10 +1774,11 @@ export const runAutomationFunction = inngest.createFunction(
             transcriptionStableCount = 0;
 
             await log("warning", `Retrying transcriptions (${retryNo}/${maxRetries})`, {
-              incomplete: incomplete.length,
+              incomplete: incompleteFicheIds.length,
+              incomplete_sample: incompleteFicheIds.slice(0, 10),
             });
 
-            const retryEvents = incomplete.map((ficheId) => ({
+            const retryEvents = incompleteFicheIds.map((ficheId) => ({
               name: "fiche/transcribe" as const,
               data: {
                 fiche_id: ficheId,
@@ -1639,12 +1791,38 @@ export const runAutomationFunction = inngest.createFunction(
             }));
 
             const retryChunks = chunkArray(retryEvents, sendChunkSize);
+            let retryTxEventIdsCount = 0;
+            const retryTxEventIdsSample: string[] = [];
             for (let i = 0; i < retryChunks.length; i++) {
-              await step.sendEvent(
-                `retry-transcriptions-${retryNo}-${i + 1}-of-${retryChunks.length}`,
-                retryChunks[i]!
-              );
+              const stepName = `retry-transcriptions-${retryNo}-${i + 1}-of-${retryChunks.length}`;
+              const sendResult = await step.sendEvent(stepName, retryChunks[i]!);
+
+              const eventIdsRaw =
+                isRecord(sendResult) && Array.isArray(sendResult.ids)
+                  ? (sendResult.ids as unknown[])
+                  : null;
+              if (eventIdsRaw) {
+                for (const v of eventIdsRaw) {
+                  if (typeof v !== "string" || !v.trim()) {continue;}
+                  retryTxEventIdsCount++;
+                  if (retryTxEventIdsSample.length < 10) {
+                    retryTxEventIdsSample.push(v);
+                  }
+                }
+              }
             }
+
+            await log("info", "Dispatched retry fiche/transcribe events", {
+              retry_no: retryNo,
+              total_events: retryEvents.length,
+              chunks: retryChunks.length,
+              ...(retryTxEventIdsCount > 0
+                ? { inngest_event_ids_count: retryTxEventIdsCount }
+                : {}),
+              ...(retryTxEventIdsSample.length > 0
+                ? { inngest_event_ids_sample: retryTxEventIdsSample }
+                : {}),
+            });
           }
 
           transcriptionPollAttempt++;
@@ -1798,6 +1976,40 @@ export const runAutomationFunction = inngest.createFunction(
             `Sending ${auditTasks.length} audit events (FULL FAN-OUT)`
           );
 
+          const auditCacheRows = await step.run(
+            `load-fiche-cache-ids-audits-${runIdString}`,
+            async () => {
+              const { prisma } = await import("../../shared/prisma.js");
+              const rows = await prisma.ficheCache.findMany({
+                where: { ficheId: { in: fichesWithRecordings } },
+                select: { ficheId: true, id: true },
+              });
+              return rows.map((r) => ({ ficheId: r.ficheId, ficheCacheId: r.id.toString() }));
+            }
+          );
+          const auditCacheIdByFicheId = new Map<string, string>();
+          if (Array.isArray(auditCacheRows)) {
+            for (const row of auditCacheRows as unknown[]) {
+              if (!isRecord(row)) {continue;}
+              const ficheId =
+                typeof row.ficheId === "string" ? row.ficheId.trim() : "";
+              const ficheCacheId =
+                typeof row.ficheCacheId === "string" ? row.ficheCacheId.trim() : "";
+              if (!ficheId || !ficheCacheId) {continue;}
+              auditCacheIdByFicheId.set(ficheId, ficheCacheId);
+            }
+          }
+          const missingAuditCacheIds = fichesWithRecordings.filter(
+            (id) => !auditCacheIdByFicheId.has(id)
+          );
+          if (missingAuditCacheIds.length > 0) {
+            await log("warning", "Missing fiche cache rows for audit polling", {
+              missing: missingAuditCacheIds.length,
+              missing_sample: missingAuditCacheIds.slice(0, 10),
+            });
+          }
+          const expectedAuditsPerFiche = auditConfigIdsClean.length;
+
           const auditEvents = auditTasks.map(({ ficheId, configId }) => ({
             name: "audit/run" as const,
             data: {
@@ -1813,12 +2025,37 @@ export const runAutomationFunction = inngest.createFunction(
           }));
 
           const auditChunks = chunkArray(auditEvents, sendChunkSize);
+          let auditFanoutEventIdsCount = 0;
+          const auditFanoutEventIdsSample: string[] = [];
           for (let i = 0; i < auditChunks.length; i++) {
-            await step.sendEvent(
-              `fan-out-all-audits-${i + 1}-of-${auditChunks.length}`,
-              auditChunks[i]!
-            );
+            const stepName = `fan-out-all-audits-${i + 1}-of-${auditChunks.length}`;
+            const sendResult = await step.sendEvent(stepName, auditChunks[i]!);
+
+            const eventIdsRaw =
+              isRecord(sendResult) && Array.isArray(sendResult.ids)
+                ? (sendResult.ids as unknown[])
+                : null;
+            if (eventIdsRaw) {
+              for (const v of eventIdsRaw) {
+                if (typeof v !== "string" || !v.trim()) {continue;}
+                auditFanoutEventIdsCount++;
+                if (auditFanoutEventIdsSample.length < 10) {
+                  auditFanoutEventIdsSample.push(v);
+                }
+              }
+            }
           }
+
+          await log("info", "Dispatched audit/run fan-out events", {
+            total_events: auditEvents.length,
+            chunks: auditChunks.length,
+            ...(auditFanoutEventIdsCount > 0
+              ? { inngest_event_ids_count: auditFanoutEventIdsCount }
+              : {}),
+            ...(auditFanoutEventIdsSample.length > 0
+              ? { inngest_event_ids_sample: auditFanoutEventIdsSample }
+              : {}),
+          });
 
           // Durable wait (no in-step busy polling): poll audit table with `step.run` + `step.sleep`.
           const auditMaxWaitMs = Math.max(
@@ -1830,7 +2067,16 @@ export const runAutomationFunction = inngest.createFunction(
             Number(process.env.AUTOMATION_AUDIT_POLL_INTERVAL_SECONDS || 60)
           );
 
-          const auditWaitStarted = Date.now();
+          // IMPORTANT (Inngest replay semantics):
+          // Use a memoized step value for "started at" so the max-wait window is durable across replays.
+          const auditWaitStartedRaw = await step.run(
+            `started-at-audits-${runIdString}`,
+            async () => Date.now()
+          );
+          const auditWaitStarted =
+            typeof auditWaitStartedRaw === "number" && Number.isFinite(auditWaitStartedRaw)
+              ? auditWaitStartedRaw
+              : Date.now();
           let lastDone = 0;
           let auditStableCount = 0;
           let auditStallRetries = 0;
@@ -1854,21 +2100,55 @@ export const runAutomationFunction = inngest.createFunction(
               async () => {
                 const { prisma } = await import("../../shared/prisma.js");
                 const configIds = auditConfigIdsClean.map((id) => BigInt(Number(id)));
+                const cacheIds = Array.from(auditCacheIdByFicheId.values())
+                  .filter((v) => typeof v === "string" && /^\d+$/.test(v))
+                  .map((idStr) => BigInt(idStr));
 
-                const baseWhere = {
-                  ficheCache: { ficheId: { in: fichesWithRecordings } },
-                  auditConfigId: { in: configIds },
-                  // Link audits to this automation run explicitly (more reliable than createdAt windows)
-                  automationRunId: runId,
-                  isLatest: true,
-                } as const;
+                const rows = await prisma.audit.groupBy({
+                  by: ["ficheCacheId", "status"],
+                  where: {
+                    ficheCacheId: { in: cacheIds },
+                    auditConfigId: { in: configIds },
+                    // Link audits to this automation run explicitly (more reliable than createdAt windows)
+                    automationRunId: runId,
+                    isLatest: true,
+                  },
+                  _count: { _all: true },
+                });
 
-                const [completed, failed] = await Promise.all([
-                  prisma.audit.count({ where: { ...baseWhere, status: "completed" } }),
-                  prisma.audit.count({ where: { ...baseWhere, status: "failed" } }),
-                ]);
+                let completed = 0;
+                let failed = 0;
+                const doneByCacheId = new Map<string, number>();
+                for (const r of rows) {
+                  const n = typeof r._count?._all === "number" ? r._count._all : 0;
+                  const cacheKey = r.ficheCacheId.toString();
+                  if (r.status === "completed") {completed += n;}
+                  if (r.status === "failed") {failed += n;}
+                  if (r.status === "completed" || r.status === "failed") {
+                    doneByCacheId.set(cacheKey, (doneByCacheId.get(cacheKey) || 0) + n);
+                  }
+                }
 
-                return { completed, failed };
+                let incomplete_fiches = 0;
+                const incomplete_fiches_sample: string[] = [];
+                for (const [ficheId, cacheIdStr] of auditCacheIdByFicheId.entries()) {
+                  if (!cacheIdStr || !/^\d+$/.test(cacheIdStr)) {
+                    incomplete_fiches++;
+                    if (incomplete_fiches_sample.length < 10) {
+                      incomplete_fiches_sample.push(ficheId);
+                    }
+                    continue;
+                  }
+                  const done = doneByCacheId.get(cacheIdStr) || 0;
+                  if (done < expectedAuditsPerFiche) {
+                    incomplete_fiches++;
+                    if (incomplete_fiches_sample.length < 10) {
+                      incomplete_fiches_sample.push(ficheId);
+                    }
+                  }
+                }
+
+                return { completed, failed, incomplete_fiches, incomplete_fiches_sample };
               }
             );
 
@@ -1881,10 +2161,39 @@ export const runAutomationFunction = inngest.createFunction(
                 ? counts.failed
                 : 0;
             doneAudits = completedAudits + failedAudits;
+            const incompleteFiches =
+              isRecord(counts) && typeof counts.incomplete_fiches === "number"
+                ? counts.incomplete_fiches
+                : null;
+            const incompleteFichesSample =
+              isRecord(counts) && Array.isArray(counts.incomplete_fiches_sample)
+                ? (counts.incomplete_fiches_sample as unknown[])
+                    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+                    .slice(0, 10)
+                : [];
+            const nextStableCount = doneAudits === lastDone ? auditStableCount + 1 : 0;
 
             await log(
               "info",
-              `Audit progress: ${doneAudits}/${auditTasks.length} (completed=${completedAudits}, failed=${failedAudits})`
+              `Audit progress: ${doneAudits}/${auditTasks.length} (completed=${completedAudits}, failed=${failedAudits})`,
+              {
+                attempt: auditPollAttempt,
+                elapsed_ms: Date.now() - auditWaitStarted,
+                max_wait_ms: auditMaxWaitMs,
+                poll_interval_seconds: auditPollIntervalSeconds,
+                done: doneAudits,
+                total: auditTasks.length,
+                stable_count: nextStableCount,
+                stall_retries: auditStallRetries,
+                max_stall_retries: maxAuditStallRetries,
+                incomplete_audits: Math.max(0, auditTasks.length - doneAudits),
+                ...(typeof incompleteFiches === "number"
+                  ? { incomplete_fiches: incompleteFiches }
+                  : {}),
+                ...(incompleteFichesSample.length > 0
+                  ? { incomplete_fiches_sample: incompleteFichesSample }
+                  : {}),
+              }
             );
 
             if (doneAudits >= auditTasks.length) {

@@ -10,6 +10,7 @@ import { inngest } from "../../inngest/client.js";
 import { asyncHandler } from "../../middleware/async-handler.js";
 import { requirePermission } from "../../middleware/authz.js";
 import { getRequestAuth, isUserAuth } from "../../shared/auth-context.js";
+import { jsonResponse } from "../../shared/bigint-serializer.js";
 import { AuthorizationError } from "../../shared/errors.js";
 import { logger } from "../../shared/logger.js";
 import { prisma } from "../../shared/prisma.js";
@@ -178,6 +179,124 @@ transcriptionsRouter.get(
     await assertFicheVisible(req, req.params.fiche_id, "read");
     const status = await getFicheTranscriptionStatus(req.params.fiche_id);
     return res.json({ success: true, data: status });
+  })
+);
+
+/**
+ * @swagger
+ * /api/transcriptions/{fiche_id}/logs:
+ *   get:
+ *     tags: [Transcriptions]
+ *     summary: Get workflow logs for a fiche transcription run
+ *     parameters:
+ *       - in: path
+ *         name: fiche_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: run_id
+ *         schema:
+ *           type: string
+ *         description: Optional transcription run trace id to filter logs
+ *       - in: query
+ *         name: level
+ *         schema:
+ *           type: string
+ *           enum: [debug, info, warning, error]
+ *       - in: query
+ *         name: since
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *       - in: query
+ *         name: until
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 200
+ *           maximum: 1000
+ *       - in: query
+ *         name: offset
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *     responses:
+ *       200:
+ *         description: Workflow logs
+ */
+transcriptionsRouter.get(
+  "/:fiche_id/logs",
+  requirePermission("transcriptions.read"),
+  asyncHandler(async (req: Request, res: Response) => {
+    const ficheId = req.params.fiche_id;
+    await assertFicheVisible(req, ficheId, "read");
+
+    const runIdRaw = typeof req.query.run_id === "string" ? req.query.run_id.trim() : "";
+    const traceIdRaw = typeof req.query.trace_id === "string" ? req.query.trace_id.trim() : "";
+    const traceId = runIdRaw || traceIdRaw || undefined;
+
+    const levelRaw = typeof req.query.level === "string" ? req.query.level.trim() : "";
+    const level = levelRaw ? levelRaw : undefined;
+
+    const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : NaN;
+    const offsetRaw = typeof req.query.offset === "string" ? Number.parseInt(req.query.offset, 10) : NaN;
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 1000) : 200;
+    const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
+
+    const sinceStr = typeof req.query.since === "string" ? req.query.since.trim() : "";
+    const untilStr = typeof req.query.until === "string" ? req.query.until.trim() : "";
+    const since =
+      sinceStr && Number.isFinite(Date.parse(sinceStr)) ? new Date(sinceStr) : null;
+    const until =
+      untilStr && Number.isFinite(Date.parse(untilStr)) ? new Date(untilStr) : null;
+    if (sinceStr && !since) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid since (expected ISO 8601 date-time)",
+      });
+    }
+    if (untilStr && !until) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid until (expected ISO 8601 date-time)",
+      });
+    }
+
+    const createdAt =
+      since || until
+        ? {
+            ...(since ? { gte: since } : {}),
+            ...(until ? { lte: until } : {}),
+          }
+        : undefined;
+
+    const logs = await prisma.workflowLog.findMany({
+      where: {
+        workflow: "transcription",
+        entityType: "fiche",
+        entityId: ficheId,
+        ...(traceId ? { traceId } : {}),
+        ...(level ? { level } : {}),
+        ...(createdAt ? { createdAt } : {}),
+      },
+      orderBy: { createdAt: "asc" },
+      skip: offset,
+      take: limit,
+    });
+
+    return jsonResponse(res, {
+      success: true,
+      data: logs,
+      count: logs.length,
+      ...(traceId ? { trace_id: traceId } : {}),
+      limit,
+      offset,
+    });
   })
 );
 

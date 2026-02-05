@@ -65,6 +65,33 @@ Important operational notes:
 - Evidence enforcement is still handled by `AUDIT_EVIDENCE_GATING=1` (recommended). Hallucinated citations are dropped and unsupported “PRESENT” claims are conservatively downgraded.
 - For best consistency across replicas, keep `REDIS_URL` configured so workers and the finalizer share the same cached timeline. If Redis is missing, the system rebuilds the timeline from DB.
 
+## Workflow logs (debuggability)
+
+This backend exposes workflow logs in **three places** (depending on what’s enabled):
+
+- **stdout**: normal Docker/VPS logs (always available)
+- **per-run files**: optional plain-text files on disk
+- **DB + API**: optional DB persistence (query via `/api/*/logs`)
+
+### Log retrieval endpoints (API)
+
+- **Automation run logs**: `GET /api/automation/runs/:id/logs` (optional `?level=debug|info|warning|error`)
+- **Audit workflow logs**: `GET /api/audits/:audit_id/logs` (supports `level`, `since`, `until`, `limit`, `offset`)
+- **Transcription workflow logs**: `GET /api/transcriptions/:fiche_id/logs` (supports `run_id`/`trace_id`, `level`, `since`, `until`, `limit`, `offset`)
+
+If no logs were persisted for a run (or DB persistence is disabled), these endpoints return an empty `data: []`.
+
+### File logs
+
+- **Automation**: set `AUTOMATION_DEBUG_LOG_TO_FILE=1` to write `./automation-debug-logs/automation-run-<RUN_ID>.txt`
+- **Workflow tracer** (when enabled): set `WORKFLOW_DEBUG_LOG_TO_FILE=1` (global) or per-workflow flags like `AUDIT_DEBUG_LOG_TO_FILE=1` to write `./workflow-debug-logs/*.txt`
+
+### DB logs
+
+Workflow tracer DB persistence is controlled by `WORKFLOW_LOG_DB_ENABLED=1` (writes to `workflow_logs`).
+Metadata is sanitized/redacted before being persisted (see `src/shared/log-sanitizer.ts`).
+Make sure the DB schema is up to date (apply migrations via `npx prisma migrate dev` or `npx prisma migrate deploy`).
+
 
 
 

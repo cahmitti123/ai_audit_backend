@@ -95,6 +95,13 @@ function isRetryableFicheApiError(error: unknown): {
 
   // HTTP-based retry logic
   if (typeof meta.status === "number") {
+    // The CRM gateway intermittently returns 404 for fiches that definitely exist,
+    // especially under concurrent load (20 server replicas). This is likely the
+    // gateway's internal session/cache miss or an undocumented rate-limit behaviour.
+    // Retrying almost always succeeds on the next attempt.
+    if (meta.status === 404) {
+      return { retry: true, reason: "http_404_transient", meta };
+    }
     if (meta.status === 408) {
       return { retry: true, reason: "http_408_timeout", meta };
     }

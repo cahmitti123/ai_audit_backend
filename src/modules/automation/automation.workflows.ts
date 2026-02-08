@@ -755,101 +755,138 @@ export const runAutomationFunction = inngest.createFunction(
             const startDate = convertDate(sortedDates[0]);
             const endDate = convertDate(sortedDates[sortedDates.length - 1]);
 
-            // Always revalidate cache for the requested dates before running automation.
-            // This prevents automation from relying solely on potentially stale cached sales lists.
+            // Revalidate cache for the requested dates before running automation —
+            // but only if the last revalidation was more than 30 minutes ago.
+            // This prevents hammering the CRM gateway when automations retry or run frequently.
+            const revalidationCooldownMs = Math.max(
+              0,
+              Number(process.env.AUTOMATION_REVALIDATION_COOLDOWN_MS || 30 * 60 * 1000) // 30 min default
+            );
+
+            const { getLastRevalidationForDateRange } = await import(
+              "../fiches/fiches.revalidation.js"
+            );
+            const lastRevalidation = await getLastRevalidationForDateRange(
+              new Date(startDate + "T00:00:00.000Z"),
+              new Date(endDate + "T23:59:59.999Z")
+            );
+            const msSinceLastRevalidation = lastRevalidation
+              ? Date.now() - lastRevalidation.getTime()
+              : Infinity;
+            const skipRevalidation =
+              lastRevalidation !== null && msSinceLastRevalidation < revalidationCooldownMs;
+
             const revalidatedAt = new Date();
             const apiErrors: Array<{ date: string; error: string }> = [];
 
-            await log(
-              "info",
-              `Revalidating fiche cache for ${sortedDates.length} date(s) before automation`,
-              {
-                startDate,
-                endDate,
-                dates: sortedDates.length <= 10 ? sortedDates : undefined,
-              }
-            );
+            if (skipRevalidation) {
+              const minutesAgo = Math.round(msSinceLastRevalidation / 60_000);
+              await log(
+                "info",
+                `Skipping revalidation (last revalidated ${minutesAgo}m ago, cooldown ${Math.round(revalidationCooldownMs / 60_000)}m)`,
+                {
+                  startDate,
+                  endDate,
+                  last_revalidated_at: lastRevalidation!.toISOString(),
+                  cooldown_ms: revalidationCooldownMs,
+                }
+              );
+            } else {
+              await log(
+                "info",
+                `Revalidating fiche cache for ${sortedDates.length} date(s) before automation`,
+                {
+                  startDate,
+                  endDate,
+                  dates: sortedDates.length <= 10 ? sortedDates : undefined,
+                  last_revalidated_at: lastRevalidation?.toISOString() ?? "never",
+                }
+              );
+            }
 
             // Fetch from external API in small batches (max 3 concurrent) to avoid hammering CRM.
-            for (let i = 0; i < sortedDates.length; i += 3) {
-              const batch = sortedDates.slice(i, i + 3);
-              const batchResults = await Promise.allSettled(
-                batch.map(async (date) => {
-                  const fiches = await automationApi.fetchFichesForDate(
-                    date,
-                    // IMPORTANT: never pre-filter by recordings at this stage.
-                    // Sales-list endpoints are often incomplete; we enforce `onlyWithRecordings`
-                    // only AFTER fetching full fiche details.
-                    false,
-                    apiKey
-                  );
+            // Skip entirely if revalidation was done recently (cooldown).
+            if (!skipRevalidation) {
+              for (let i = 0; i < sortedDates.length; i += 3) {
+                const batch = sortedDates.slice(i, i + 3);
+                const batchResults = await Promise.allSettled(
+                  batch.map(async (date) => {
+                    const fiches = await automationApi.fetchFichesForDate(
+                      date,
+                      // IMPORTANT: never pre-filter by recordings at this stage.
+                      // Sales-list endpoints are often incomplete; we enforce `onlyWithRecordings`
+                      // only AFTER fetching full fiche details.
+                      false,
+                      apiKey
+                    );
 
-                  // Cache them (sales-list summary)
-                  const cacheConcurrency = Math.max(
-                    1,
-                    Number(process.env.FICHE_SALES_CACHE_CONCURRENCY || 10)
-                  );
-                  const { mapWithConcurrency } = await import("../../utils/concurrency.js");
+                    // Cache them (sales-list summary)
+                    const cacheConcurrency = Math.max(
+                      1,
+                      Number(process.env.FICHE_SALES_CACHE_CONCURRENCY || 10)
+                    );
+                    const { mapWithConcurrency } = await import("../../utils/concurrency.js");
 
-                  type CacheOneResult =
-                    | { ok: true; ficheId: string; hasCle: boolean }
-                    | { ok: false; error: string };
+                    type CacheOneResult =
+                      | { ok: true; ficheId: string; hasCle: boolean }
+                      | { ok: false; error: string };
 
-                  const perFicheCache = await mapWithConcurrency<unknown, CacheOneResult>(
-                    fiches,
-                    cacheConcurrency,
-                    async (fiche) => {
-                      try {
-                        const cacheInput = toSalesSummaryCacheInput(fiche);
-                        if (!cacheInput) {return { ok: false, error: "missing fiche id" };}
-                        await cacheFicheSalesSummary(cacheInput, {
-                          salesDate: convertDate(date),
-                          lastRevalidatedAt: revalidatedAt,
-                        });
-                        return {
-                          ok: true,
-                          ficheId: cacheInput.id,
-                          hasCle: typeof cacheInput.cle === "string" && cacheInput.cle.length > 0,
-                        };
-                      } catch (err: unknown) {
-                        return {
-                          ok: false,
-                          error: err instanceof Error ? err.message : String(err),
-                        };
+                    const perFicheCache = await mapWithConcurrency<unknown, CacheOneResult>(
+                      fiches,
+                      cacheConcurrency,
+                      async (fiche) => {
+                        try {
+                          const cacheInput = toSalesSummaryCacheInput(fiche);
+                          if (!cacheInput) {return { ok: false, error: "missing fiche id" };}
+                          await cacheFicheSalesSummary(cacheInput, {
+                            salesDate: convertDate(date),
+                            lastRevalidatedAt: revalidatedAt,
+                          });
+                          return {
+                            ok: true,
+                            ficheId: cacheInput.id,
+                            hasCle: typeof cacheInput.cle === "string" && cacheInput.cle.length > 0,
+                          };
+                        } catch (err: unknown) {
+                          return {
+                            ok: false,
+                            error: err instanceof Error ? err.message : String(err),
+                          };
+                        }
                       }
-                    }
-                  );
+                    );
 
-                  const cached = perFicheCache.filter(
-                    (r): r is { ok: true; ficheId: string; hasCle: boolean } => r.ok
-                  );
-                  const missingCleCount = cached.filter((r) => !r.hasCle).length;
+                    const cached = perFicheCache.filter(
+                      (r): r is { ok: true; ficheId: string; hasCle: boolean } => r.ok
+                    );
+                    const missingCleCount = cached.filter((r) => !r.hasCle).length;
 
-                  await log("info", `Revalidated ${date} (${fiches.length} fiches)`, {
-                    cached: cached.length,
-                    cacheConcurrency,
-                    missingCle: missingCleCount,
-                  });
-                  return { date, count: fiches.length };
-                })
-              );
+                    await log("info", `Revalidated ${date} (${fiches.length} fiches)`, {
+                      cached: cached.length,
+                      cacheConcurrency,
+                      missingCle: missingCleCount,
+                    });
+                    return { date, count: fiches.length };
+                  })
+                );
 
-              for (let j = 0; j < batchResults.length; j++) {
-                const r = batchResults[j];
-                const date = batch[j] || "unknown";
-                if (r.status === "rejected") {
-                  const msg = errorMessage(r.reason);
-                  apiErrors.push({ date, error: msg });
-                  await log(
-                    "error",
-                    `Failed to revalidate ${date}: ${msg} (will fall back to existing cache if present)`
-                  );
+                for (let j = 0; j < batchResults.length; j++) {
+                  const r = batchResults[j];
+                  const date = batch[j] || "unknown";
+                  if (r.status === "rejected") {
+                    const msg = errorMessage(r.reason);
+                    apiErrors.push({ date, error: msg });
+                    await log(
+                      "error",
+                      `Failed to revalidate ${date}: ${msg} (will fall back to existing cache if present)`
+                    );
+                  }
                 }
-              }
 
-              // Small delay between API batches
-              if (i + 3 < sortedDates.length) {
-                await new Promise((resolve) => setTimeout(resolve, 1000));
+                // Small delay between API batches
+                if (i + 3 < sortedDates.length) {
+                  await new Promise((resolve) => setTimeout(resolve, 1000));
+                }
               }
             }
 

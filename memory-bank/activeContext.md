@@ -43,6 +43,7 @@
 - **Automation flow hardening**:
   - Automation now enforces `groupes` + `onlyUnaudited` selection filters, and applies `onlyWithRecordings` after fetching full fiche details.
   - Automation emits `automation/completed` and `automation/failed` domain events for event-driven consumers.
+  - Automation fiche sales-list cache revalidation honors a cooldown (`AUTOMATION_REVALIDATION_COOLDOWN_MS`, default 30 minutes) based on the **most recent** `fiche_cache.last_revalidated_at` within the requested `salesDate` range (prevents repeated revalidation on frequent retries/runs).
   - Automation now honors schedule controls: `skipIfTranscribed`, `continueOnError`, and `retryFailed/maxRetries` (stall wait extension + transcription re-dispatch).
   - Automation can enable transcript tools mode for audits via `ficheSelection.useRlm=true` (propagates `use_rlm=true` into `audit/run`).
   - Automation schedule webhook URLs are SSRF-guarded via `validateOutgoingWebhookUrl` (honors `WEBHOOK_ALLOWED_ORIGINS`).
@@ -57,6 +58,7 @@
 - **Fiche details fetch (gateway by-id)**:
   - Fiche detail fetch no longer depends on cached `cle` (gateway refreshes internally using `fiche_id`).
   - Cache-miss and `_salesListOnly` refresh can fetch full details and best-effort persist them to DB cache.
+  - `force_refresh: true` is throttled per fiche via `FICHE_FORCE_REFRESH_COOLDOWN_MS` (default 30 min) so frequent workflows (notably transcriptions) don’t repeatedly hit the CRM gateway.
 - **Fiche cache JSON reduction (normalized)**:
   - Large sections of `fiche_cache.raw_data` are now stored in dedicated tables/columns and reconstructed on read to preserve API shape.
   - Response envelope scalars are stored as columns (`fiche_cache.cle`, `fiche_cache.details_success`, `fiche_cache.details_message`) instead of being duplicated inside `raw_data`.

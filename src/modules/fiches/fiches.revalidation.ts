@@ -179,7 +179,7 @@ export async function getLastRevalidationForDateRange(
   startDate: Date,
   endDate: Date
 ): Promise<Date | null> {
-  const result = await fichesRepository.getOldestRevalidationInRange(
+  const result = await fichesRepository.getLatestRevalidationInRange(
     startDate,
     endDate
   );

@@ -827,10 +827,9 @@ export async function getFichesByDateRangeWithSmartCache(
     shouldRevalidate = true;
     revalidationReason = "date_is_today";
   } else {
-    const start = new Date(startDate);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(endDate);
-    end.setHours(23, 59, 59, 999);
+    // Use UTC boundaries to avoid timezone-related off-by-one issues.
+    const start = new Date(startDate + "T00:00:00.000Z");
+    const end = new Date(endDate + "T23:59:59.999Z");
 
     const oldestRevalidation =
       await fichesRepository.getOldestRevalidationInRange(start, end);

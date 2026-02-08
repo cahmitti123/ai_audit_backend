@@ -1978,15 +1978,50 @@ export async function getOldestRevalidationInRange(
   startDate: Date,
   endDate: Date
 ): Promise<Date | null> {
+  // Convert Date objects to YYYY-MM-DD strings for salesDate comparison
+  const startDateStr = startDate.toISOString().split("T")[0];
+  const endDateStr = endDate.toISOString().split("T")[0];
+
   const result = await prisma.ficheCache.findFirst({
     where: {
-      createdAt: {
-        gte: startDate,
-        lte: endDate,
+      salesDate: {
+        gte: startDateStr,
+        lte: endDateStr,
       },
     },
     orderBy: {
       lastRevalidatedAt: "asc",
+    },
+    select: {
+      lastRevalidatedAt: true,
+    },
+  });
+
+  return result?.lastRevalidatedAt || null;
+}
+
+/**
+ * Get the most recent revalidation timestamp in a date range
+ * Returns null if no fiches found or none have been revalidated
+ */
+export async function getLatestRevalidationInRange(
+  startDate: Date,
+  endDate: Date
+): Promise<Date | null> {
+  // Convert Date objects to YYYY-MM-DD strings for salesDate comparison
+  const startDateStr = startDate.toISOString().split("T")[0];
+  const endDateStr = endDate.toISOString().split("T")[0];
+
+  const result = await prisma.ficheCache.findFirst({
+    where: {
+      salesDate: {
+        gte: startDateStr,
+        lte: endDateStr,
+      },
+      lastRevalidatedAt: { not: null },
+    },
+    orderBy: {
+      lastRevalidatedAt: "desc",
     },
     select: {
       lastRevalidatedAt: true,

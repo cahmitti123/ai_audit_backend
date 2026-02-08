@@ -34,11 +34,17 @@ function ts(): string {
 }
 
 function shortJson(data: LogData, maxLen = 300): string {
-  if (!data) return "";
+  if (!data) {
+    return "";
+  }
   try {
     const json = JSON.stringify(data);
-    if (json === "{}") return "";
-    if (json.length <= maxLen) return ` ${json}`;
+    if (json === "{}") {
+      return "";
+    }
+    if (json.length <= maxLen) {
+      return ` ${json}`;
+    }
     return ` ${json.slice(0, maxLen)}...`;
   } catch {
     return "";
@@ -47,7 +53,9 @@ function shortJson(data: LogData, maxLen = 300): string {
 
 function elapsed(startMs: number): string {
   const ms = Date.now() - startMs;
-  if (ms < 1000) return `${ms}ms`;
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
@@ -59,7 +67,9 @@ function trace(
   data?: LogData,
   stepName?: string,
 ) {
-  if (!tracer) return;
+  if (!tracer) {
+    return;
+  }
   const t = stepName ? tracer.step(stepName) : tracer;
   t.log(level, message, data).catch(() => {/* best-effort */});
 }
@@ -116,13 +126,15 @@ export function createWorkflowLogger(
   const logger: WorkflowLogger = {
     start(functionName, data) {
       const line = `\n[${ts()}] ${"=".repeat(10)} ${tag} | ${ctx} | START: ${functionName} ${"=".repeat(10)}`;
-      console.log(line + shortJson(data));
+      process.stdout.write(line + shortJson(data) + "\n");
       trace(tracer, "info", `START: ${functionName}`, data);
     },
 
     step(stepName, data) {
       stepTimers.set(stepName, Date.now());
-      console.log(`[${ts()}] ${prefix}   >> STEP: ${stepName}${shortJson(data)}`);
+      process.stdout.write(
+        `[${ts()}] ${prefix}   >> STEP: ${stepName}${shortJson(data)}\n`
+      );
       trace(tracer, "debug", `>> STEP: ${stepName}`, data, stepName);
     },
 
@@ -130,7 +142,9 @@ export function createWorkflowLogger(
       const t = stepTimers.get(stepName);
       const dur = t ? ` (${elapsed(t)})` : "";
       stepTimers.delete(stepName);
-      console.log(`[${ts()}] ${prefix}   << DONE: ${stepName}${dur}${shortJson(data)}`);
+      process.stdout.write(
+        `[${ts()}] ${prefix}   << DONE: ${stepName}${dur}${shortJson(data)}\n`
+      );
       trace(tracer, "info", `<< DONE: ${stepName}${dur}`, data, stepName);
     },
 
@@ -138,43 +152,51 @@ export function createWorkflowLogger(
       const t = stepTimers.get(stepName);
       const dur = t ? ` (${elapsed(t)})` : "";
       stepTimers.delete(stepName);
-      console.error(
-        `[${ts()}] ${prefix}   !! FAIL: ${stepName}${dur} | ${error}${shortJson(data)}`
+      process.stderr.write(
+        `[${ts()}] ${prefix}   !! FAIL: ${stepName}${dur} | ${error}${shortJson(data)}\n`
       );
       trace(tracer, "error", `!! FAIL: ${stepName}${dur} | ${error}`, data, stepName);
     },
 
     info(message, data) {
-      console.log(`[${ts()}] ${prefix}   -- ${message}${shortJson(data)}`);
+      process.stdout.write(
+        `[${ts()}] ${prefix}   -- ${message}${shortJson(data)}\n`
+      );
       trace(tracer, "info", message, data);
     },
 
     warn(message, data) {
-      console.warn(`[${ts()}] ${prefix}   !! WARN: ${message}${shortJson(data)}`);
+      process.stderr.write(
+        `[${ts()}] ${prefix}   !! WARN: ${message}${shortJson(data)}\n`
+      );
       trace(tracer, "warning", message, data);
     },
 
     error(message, data) {
-      console.error(`[${ts()}] ${prefix}   !! ERROR: ${message}${shortJson(data)}`);
+      process.stderr.write(
+        `[${ts()}] ${prefix}   !! ERROR: ${message}${shortJson(data)}\n`
+      );
       trace(tracer, "error", message, data);
     },
 
     fanOut(eventName, count, data) {
-      console.log(
-        `[${ts()}] ${prefix}   => FAN-OUT: ${eventName} x${count}${shortJson(data)}`
+      process.stdout.write(
+        `[${ts()}] ${prefix}   => FAN-OUT: ${eventName} x${count}${shortJson(data)}\n`
       );
       trace(tracer, "info", `=> FAN-OUT: ${eventName} x${count}`, data);
     },
 
     waiting(what, data) {
-      console.log(`[${ts()}] ${prefix}   .. WAITING: ${what}${shortJson(data)}`);
+      process.stdout.write(
+        `[${ts()}] ${prefix}   .. WAITING: ${what}${shortJson(data)}\n`
+      );
       trace(tracer, "debug", `.. WAITING: ${what}`, data);
     },
 
     end(status, data) {
       const dur = elapsed(startMs);
       const line = `[${ts()}] ${"=".repeat(10)} ${tag} | ${ctx} | END: ${status} (${dur}) ${"=".repeat(10)}\n`;
-      console.log(line + shortJson(data));
+      process.stdout.write(line + shortJson(data) + "\n");
       trace(tracer, "info", `END: ${status} (${dur})`, data);
     },
 

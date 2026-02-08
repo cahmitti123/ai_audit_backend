@@ -208,10 +208,39 @@ export const fetchFicheFunction = inngest.createFunction(
         }
 
         const isExpired = cachedData.expiresAt <= new Date();
+        const forceRefreshRequested = force_refresh === true;
+
+        // If callers repeatedly request `force_refresh` (e.g. transcriptions/audits fan-out),
+        // avoid hammering the CRM gateway by honoring a per-fiche cooldown window.
+        // NOTE: We still fetch if cache is incomplete (handled below).
+        const forceRefreshCooldownMs = (() => {
+          const fallback = 30 * 60 * 1000; // 30 min
+          const raw = Number(process.env.FICHE_FORCE_REFRESH_COOLDOWN_MS ?? fallback);
+          return Number.isFinite(raw) ? Math.max(0, raw) : fallback;
+        })();
+
+        const msSinceFetched = Math.max(0, Date.now() - cachedData.fetchedAt.getTime());
+        const skipForceRefresh =
+          forceRefreshRequested &&
+          !isExpired &&
+          forceRefreshCooldownMs > 0 &&
+          msSinceFetched < forceRefreshCooldownMs;
+
+        const effectiveForceRefresh = forceRefreshRequested && !skipForceRefresh;
+
+        if (skipForceRefresh) {
+          logger.info("Force refresh requested but within cooldown; using cache", {
+            fiche_id,
+            cache_id: String(cachedData.id),
+            fetched_at: cachedData.fetchedAt.toISOString(),
+            minutes_ago: Math.round(msSinceFetched / 60_000),
+            cooldown_minutes: Math.round(forceRefreshCooldownMs / 60_000),
+          });
+        }
 
         // Terminal marker: upstream CRM returned 404 for this fiche recently.
         // If still within TTL and caller didn't request force refresh, skip CRM calls.
-        if (!force_refresh && !isExpired && isFicheCacheNotFoundMarker(cachedData)) {
+        if (!effectiveForceRefresh && !isExpired && isFicheCacheNotFoundMarker(cachedData)) {
           logger.info("Cache indicates fiche NOT_FOUND; skipping API fetch", {
             fiche_id,
             cache_id: String(cachedData.id),
@@ -229,11 +258,15 @@ export const fetchFicheFunction = inngest.createFunction(
           };
         }
 
-        if (isExpired || force_refresh) {
+        if (isExpired || effectiveForceRefresh) {
           logger.info("Cache expired or refresh forced", {
             fiche_id,
             expired: isExpired,
-            force_refresh,
+            force_refresh_requested: forceRefreshRequested,
+            force_refresh_effective: effectiveForceRefresh,
+            force_refresh_skipped: skipForceRefresh,
+            cooldown_ms: forceRefreshCooldownMs,
+            ms_since_fetched: msSinceFetched,
           });
           return {
             found: false,
@@ -261,7 +294,7 @@ export const fetchFicheFunction = inngest.createFunction(
         const blankUrls =
           wantsRecordings &&
           recordings.some(
-            (r) => typeof r.recordingUrl === "string" && r.recordingUrl.trim().length === 0
+            (r) => typeof r.recordingUrl !== "string" || r.recordingUrl.trim().length === 0
           );
 
         if (isSalesListOnly || !hasFullDetails || missingRecordingRows || blankUrls) {
@@ -486,8 +519,7 @@ export const fetchFicheFunction = inngest.createFunction(
             // reason "force_refresh" means we had a valid, non-expired cache entry
             // reason "cache_expired" means we had data but it expired
             (cacheCheckResult.reason === "force_refresh" ||
-              cacheCheckResult.reason === "cache_expired" ||
-              cacheCheckResult.reason === "cache_valid_full_details") &&
+              cacheCheckResult.reason === "cache_expired") &&
             (cacheCheckResult.recordings_count ?? 0) > 0;
 
           if (hadValidCache) {

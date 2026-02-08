@@ -33,15 +33,13 @@ services:
     networks:
       - ai-audit-network
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "wget -q -O - http://localhost/lb-health >/dev/null 2>&1 || exit 1",
-        ]
+      # Avoid relying on tools like wget/curl inside the image.
+      # `nginx -t` is available in the image and ensures the config is valid.
+      test: ["CMD", "nginx", "-t"]
       interval: 10s
       timeout: 3s
       retries: 30
-      start_period: 10s
+      start_period: 5s
     logging:
       driver: "json-file"
       options:

@@ -844,7 +844,12 @@ export const transcribeRecordingFunction = inngest.createFunction(
   {
     id: "transcribe-recording",
     name: "Transcribe Recording",
-    retries: 0, // Avoid spamming provider + webhooks; re-run via a new transcription request if needed.
+    // Allow 2 Inngest-level retries for infrastructure failures (container restart, timeout, OOM).
+    // ElevenLabs rate-limiting (429) is handled internally with exponential backoff, so these
+    // retries only kick in when the function itself crashes before the catch block can emit the
+    // `transcription/recording.transcribed` event — which would otherwise leave the recording
+    // stuck as "pending" in Redis forever and block the finalizer from completing.
+    retries: 2,
     concurrency: [
       {
         limit: RECORDING_WORKER_CONCURRENCY,

@@ -142,6 +142,7 @@ services:
     volumes:
       - audit-data:/app/data
       - debug-logs:/app/automation-debug-logs
+      - workflow-logs:/app/workflow-debug-logs
     networks:
       - ai-audit-network
     depends_on:
@@ -211,4 +212,6 @@ volumes:
   redis-data:
     driver: local
   debug-logs:
+    driver: local
+  workflow-logs:
     driver: local

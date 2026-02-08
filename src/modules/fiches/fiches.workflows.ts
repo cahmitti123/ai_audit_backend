@@ -475,6 +475,49 @@ export const fetchFicheFunction = inngest.createFunction(
 
         // Non-retriable errors (don't retry)
         if (status === 404) {
+          // ── Guard: if this was a force_refresh AND we already had valid cache data
+          // (recordings, details), the 404 is most likely an intermittent CRM API glitch
+          // (rate-limit disguised as 404, transient flakiness, etc.).
+          // Do NOT overwrite the valid cache with a NOT_FOUND marker — that would
+          // destroy data and cause downstream workflows to skip the fiche entirely.
+          const hadValidCache =
+            force_refresh &&
+            cacheCheckResult.cache_id &&
+            // reason "force_refresh" means we had a valid, non-expired cache entry
+            // reason "cache_expired" means we had data but it expired
+            (cacheCheckResult.reason === "force_refresh" ||
+              cacheCheckResult.reason === "cache_expired" ||
+              cacheCheckResult.reason === "cache_valid_full_details") &&
+            (cacheCheckResult.recordings_count ?? 0) > 0;
+
+          if (hadValidCache) {
+            logger.warn(
+              "CRM API returned 404 during force_refresh but valid cache exists — " +
+              "keeping existing cache instead of marking as NOT_FOUND (likely intermittent API issue)",
+              {
+                fiche_id,
+                cache_id: cacheCheckResult.cache_id,
+                cached_recordings: cacheCheckResult.recordings_count,
+                status,
+              }
+            );
+            // Return a soft-failure that preserves the cache and lets the caller use
+            // the existing cached data.  We return success:false + not_found:false so
+            // callers fall through to the existing "API error" path rather than the
+            // terminal NOT_FOUND path.
+            return {
+              success: false,
+              fiche_id,
+              not_found: false as const,
+              cache_id: cacheCheckResult.cache_id || "",
+              expires_at: cacheCheckResult.expires_at || new Date().toISOString(),
+              status,
+              code,
+              message: `CRM 404 during force_refresh ignored (valid cache preserved, ${cacheCheckResult.recordings_count} recordings)`,
+            };
+          }
+
+          // Genuine NOT_FOUND: no prior valid cache, or first-time fetch returned 404.
           // Persist a stable NOT_FOUND marker in the DB cache so downstream workflows
           // (automation/transcription/audit) can treat this fiche as terminal and avoid
           // waiting forever for cache/transcription/audit completion.
@@ -560,6 +603,54 @@ export const fetchFicheFunction = inngest.createFunction(
               status: (apiResult as { status?: unknown }).status,
               code: (apiResult as { code?: unknown }).code,
             },
+          },
+        };
+      }
+
+      // Soft-failure: CRM returned 404 during force_refresh but valid cache was preserved.
+      // Fall back to existing cached data so downstream workflows can proceed.
+      if (
+        isRecord(apiResult) &&
+        (apiResult as { not_found?: unknown }).not_found === false &&
+        cacheCheckResult.cache_id
+      ) {
+        const cacheId = cacheCheckResult.cache_id;
+        const recordingsCount = cacheCheckResult.recordings_count || 0;
+
+        logger.warn("Fiche API returned 404 during force_refresh; falling back to existing cache", {
+          fiche_id,
+          cache_id: cacheId,
+          recordings_count: recordingsCount,
+        });
+
+        // Emit fiche/fetched so downstream workflows (automation fiche-details gate) see it as ready.
+        await step.sendEvent(`emit-fiche-fetched-fallback-${fiche_id}`, {
+          name: "fiche/fetched",
+          data: {
+            fiche_id,
+            cache_id: cacheId,
+            recordings_count: recordingsCount,
+            cached: true,
+          },
+        });
+
+        return {
+          success: true,
+          cached: true,
+          fiche_id,
+          cache_id: cacheId,
+          recordings_count: recordingsCount,
+          message: `Fallback to cache after CRM 404 during force_refresh (${recordingsCount} recordings preserved)`,
+          cache_check: {
+            found: true as const,
+            reason: cacheCheckResult.reason,
+            expires_at: cacheCheckResult.expires_at,
+          },
+          workflow_summary: {
+            total_steps_executed: 2,
+            used_cache: true,
+            cache_check: cacheCheckResult.reason,
+            api_fetch: { status: 404, code: "NOT_FOUND_FALLBACK_TO_CACHE" },
           },
         };
       }

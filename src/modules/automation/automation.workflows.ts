@@ -1127,6 +1127,30 @@ export const runAutomationFunction = inngest.createFunction(
           : {}),
       });
       wlog.fanOut("fiche/fetch", fetchEvents.length);
+
+      // ── Clear stale NOT_FOUND markers BEFORE polling ──────────────────────────
+      // Previous automation runs (or intermittent CRM 404s) may have left NOT_FOUND
+      // markers in the DB cache. The fiche/fetch events we just dispatched use
+      // `force_refresh: true` and WILL overwrite them — but the polling gate below
+      // checks the DB immediately and would count stale NOT_FOUND markers as "ready",
+      // opening the gate before the fetches finish.
+      // Fix: clear the NOT_FOUND markers now so the gate waits for fresh data.
+      await step.run(`clear-stale-not-found-markers-${runIdString}`, async () => {
+        const { prisma } = await import("../../shared/prisma.js");
+        const result = await prisma.ficheCache.updateMany({
+          where: {
+            ficheId: { in: ficheIds },
+            detailsSuccess: false,
+            detailsMessage: "NOT_FOUND",
+          },
+          data: {
+            detailsSuccess: null,
+            detailsMessage: null,
+          },
+        });
+        return { cleared: result.count };
+      });
+
       wlog.waiting("fiche-details gate (polling DB for full details)");
 
       // Durable wait (no in-step busy polling): poll DB snapshot with `step.run` + `step.sleep`.

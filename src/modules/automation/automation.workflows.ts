@@ -13,6 +13,7 @@ import { inngest } from "../../inngest/client.js";
 import { sanitizeForLogging } from "../../shared/log-sanitizer.js";
 import { publishPusherEvent } from "../../shared/pusher.js";
 import { createWorkflowLogger } from "../../shared/workflow-logger.js";
+import { createWorkflowTracer } from "../../shared/workflow-tracer.js";
 import type { RecordingLike } from "../../utils/recording-parser.js";
 import * as automationApi from "./automation.api.js";
 import * as automationRepository from "./automation.repository.js";
@@ -269,7 +270,12 @@ export const runAutomationFunction = inngest.createFunction(
     };
     const scheduleId = toBigIntId(schedule_id);
 
-    const wlog = createWorkflowLogger("automation", `schedule-${schedule_id}`);
+    const tracer = createWorkflowTracer({
+      workflow: "automation",
+      entity: { type: "schedule", id: String(schedule_id) },
+      inngestEventId: typeof event.id === "string" ? event.id : undefined,
+    });
+    const wlog = createWorkflowLogger("automation", `schedule-${schedule_id}`, { tracer });
     wlog.start("run-automation", { schedule_id, due_at, has_override: Boolean(override_fiche_selection) });
 
     // Capture start time in a step to persist it across Inngest checkpoints

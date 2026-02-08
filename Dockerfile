@@ -27,9 +27,11 @@ WORKDIR /app
 
 # Install OpenSSL 3 for Prisma and create a non-root user.
 # Create the user before COPY so we can use --chown and avoid an expensive chown -R.
-RUN apk add --no-cache openssl && \
+RUN apk add --no-cache openssl curl && \
     addgroup -g 1001 -S nodejs && \
-    adduser -S -u 1001 -G nodejs nodejs
+    adduser -S -u 1001 -G nodejs nodejs && \
+    mkdir -p /app/automation-debug-logs /app/workflow-debug-logs && \
+    chown nodejs:nodejs /app/automation-debug-logs /app/workflow-debug-logs
 
 # Runtime files (deps installed in builder and copied here)
 COPY --chown=nodejs:nodejs package*.json ./

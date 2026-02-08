@@ -5,6 +5,12 @@ services:
     # No host port published by default (internal-only). If you need local access,
     # temporarily add: ports: ["127.0.0.1:${REDIS_PORT:-6379}:6379"]
     command: ["redis-server", "--appendonly", "yes"]
+    # Fix Redis "Memory overcommit must be enabled" warning
+    sysctls:
+      - net.core.somaxconn=512
+    # vm.overcommit_memory=1 cannot be set via sysctls in Docker (kernel param).
+    # Set it on the host: sysctl vm.overcommit_memory=1
+    # or add to /etc/sysctl.conf: vm.overcommit_memory = 1
     volumes:
       - redis-data:/data
     networks:
@@ -135,6 +141,7 @@ services:
       - TRANSCRIPTION_ELEVENLABS_RATE_LIMIT_PER_MINUTE=${TRANSCRIPTION_ELEVENLABS_RATE_LIMIT_PER_MINUTE:-60}
     volumes:
       - audit-data:/app/data
+      - debug-logs:/app/automation-debug-logs
     networks:
       - ai-audit-network
     depends_on:
@@ -172,6 +179,8 @@ services:
       - INNGEST_LOG_LEVEL=info
       - INNGEST_POLL_INTERVAL=${INNGEST_POLL_INTERVAL:-60}
       - INNGEST_SDK_URL=${INNGEST_SDK_URL:-http://lb/api/inngest}
+      # Use Redis as state backend so Inngest survives restarts without losing queue state.
+      - INNGEST_REDIS_URI=redis://redis:6379
     command: inngest start --sdk-url ${INNGEST_SDK_URL:-http://lb/api/inngest} --poll-interval ${INNGEST_POLL_INTERVAL:-60}
     networks:
       - ai-audit-network
@@ -182,6 +191,8 @@ services:
       retries: 3
       start_period: 60s
     depends_on:
+      redis:
+        condition: service_healthy
       lb:
         condition: service_healthy
     logging:
@@ -198,4 +209,6 @@ volumes:
   audit-data:
     driver: local
   redis-data:
+    driver: local
+  debug-logs:
     driver: local

@@ -26,6 +26,7 @@ import { logger as appLogger } from "../../shared/logger.js";
 import { getRedisClient } from "../../shared/redis.js";
 import { auditWebhooks, batchWebhooks } from "../../shared/webhook.js";
 import { createWorkflowLogger } from "../../shared/workflow-logger.js";
+import { createWorkflowTracer } from "../../shared/workflow-tracer.js";
 import {
   formatBytes,
   getPayloadSize,
@@ -678,7 +679,13 @@ export const runAuditFunction = inngest.createFunction(
     const auditId =
       auditIdFromEvent ?? `audit-${fiche_id}-${audit_config_id}-${startedAtMs}`;
 
-    const wlog = createWorkflowLogger("audit", `${fiche_id}/${audit_config_id}`);
+    const tracer = createWorkflowTracer({
+      workflow: "audit",
+      entity: { type: "fiche", id: fiche_id },
+      traceId: auditId,
+      inngestEventId: typeof event.id === "string" ? event.id : undefined,
+    });
+    const wlog = createWorkflowLogger("audit", `${fiche_id}/${audit_config_id}`, { tracer });
     wlog.start("run-audit", {
       audit_id: auditId,
       fiche_id,
@@ -1592,7 +1599,13 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
     const auditDbId = BigInt(audit_db_id);
     const stepPosition = Number(step_position);
 
-    const wlog = createWorkflowLogger("audit-step", `${fiche_id}/step-${stepPosition}`);
+    const tracer = createWorkflowTracer({
+      workflow: "audit",
+      entity: { type: "audit-step", id: `${fiche_id}/step-${stepPosition}` },
+      traceId: typeof audit_id === "string" ? audit_id : String(audit_db_id),
+      inngestEventId: typeof event.id === "string" ? event.id : undefined,
+    });
+    const wlog = createWorkflowLogger("audit-step", `${fiche_id}/step-${stepPosition}`, { tracer });
     wlog.start("analyze-step", { audit_db_id, step_position: stepPosition, use_rlm });
 
     // Idempotency: skip if already analyzed (prevents duplicate webhooks + spend)
@@ -2110,7 +2123,13 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
     const approach = { use_rlm: useRlm, transcript_mode: transcriptMode } as const;
     const finalizerEventId = typeof event.id === "string" ? event.id : String(event.id ?? "");
 
-    const wlog = createWorkflowLogger("audit-finalizer", `${fiche_id}/db-${audit_db_id}`);
+    const tracer = createWorkflowTracer({
+      workflow: "audit",
+      entity: { type: "audit-finalizer", id: `${fiche_id}/db-${audit_db_id}` },
+      traceId: typeof audit_id === "string" ? audit_id : String(audit_db_id),
+      inngestEventId: finalizerEventId || undefined,
+    });
+    const wlog = createWorkflowLogger("audit-finalizer", `${fiche_id}/db-${audit_db_id}`, { tracer });
     wlog.start("finalize-audit", { audit_db_id, step_position, ok, error: error ?? undefined });
 
     const triggeringStepPosition =

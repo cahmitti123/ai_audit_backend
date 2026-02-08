@@ -3,8 +3,14 @@
  * =============================================
  * Makes Inngest workflow execution clearly visible in the terminal.
  *
+ * When a `tracer` (WorkflowTracer) is provided, each log call is also forwarded
+ * to the tracer for DB and file persistence.  The tracer calls are fire-and-forget
+ * so they never block the workflow and terminal output remains the source of truth
+ * for latency-sensitive debugging.
+ *
  * Usage in any workflow:
- *   const wlog = createWorkflowLogger("transcription", "fiche-123");
+ *   const tracer = createWorkflowTracer({ workflow: "transcription", entity: { type: "fiche", id: "123" } });
+ *   const wlog = createWorkflowLogger("transcription", "fiche-123", { tracer });
  *   wlog.start("transcribe-fiche");
  *   wlog.step("force-refresh", { fiche_id: "123" });
  *   wlog.stepDone("force-refresh", { cached: true });
@@ -18,6 +24,8 @@
  *   [14:23:03]   !! WARN: Missing recording URL { call_id: "abc" }
  *   [14:23:10] ========== TRANSCRIPTION | fiche-123 | END: completed (9.0s) ==========
  */
+
+import type { WorkflowTracer } from "./workflow-tracer.js";
 
 type LogData = Record<string, unknown> | undefined;
 
@@ -41,6 +49,19 @@ function elapsed(startMs: number): string {
   const ms = Date.now() - startMs;
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** Fire-and-forget: send to tracer without blocking the caller */
+function trace(
+  tracer: WorkflowTracer | undefined,
+  level: "info" | "warning" | "error" | "debug",
+  message: string,
+  data?: LogData,
+  stepName?: string,
+) {
+  if (!tracer) return;
+  const t = stepName ? tracer.step(stepName) : tracer;
+  t.log(level, message, data).catch(() => {/* best-effort */});
 }
 
 export type WorkflowLogger = {
@@ -74,11 +95,12 @@ export type WorkflowLogger = {
  * @param workflow - e.g., "transcription", "audit", "automation", "fiche"
  * @param entityId - e.g., fiche_id, audit_db_id, run_id
  * @param options  - optional overrides
+ * @param options.tracer - optional WorkflowTracer for DB + file persistence
  */
 export function createWorkflowLogger(
   workflow: string,
   entityId: string,
-  options?: { parentContext?: string }
+  options?: { parentContext?: string; tracer?: WorkflowTracer }
 ): WorkflowLogger {
   const tag = workflow.toUpperCase();
   const ctx = options?.parentContext
@@ -87,6 +109,7 @@ export function createWorkflowLogger(
 
   const startMs = Date.now();
   const stepTimers = new Map<string, number>();
+  const tracer = options?.tracer;
 
   const prefix = `[${tag}|${ctx}]`;
 
@@ -94,11 +117,13 @@ export function createWorkflowLogger(
     start(functionName, data) {
       const line = `\n[${ts()}] ${"=".repeat(10)} ${tag} | ${ctx} | START: ${functionName} ${"=".repeat(10)}`;
       console.log(line + shortJson(data));
+      trace(tracer, "info", `START: ${functionName}`, data);
     },
 
     step(stepName, data) {
       stepTimers.set(stepName, Date.now());
       console.log(`[${ts()}] ${prefix}   >> STEP: ${stepName}${shortJson(data)}`);
+      trace(tracer, "debug", `>> STEP: ${stepName}`, data, stepName);
     },
 
     stepDone(stepName, data) {
@@ -106,6 +131,7 @@ export function createWorkflowLogger(
       const dur = t ? ` (${elapsed(t)})` : "";
       stepTimers.delete(stepName);
       console.log(`[${ts()}] ${prefix}   << DONE: ${stepName}${dur}${shortJson(data)}`);
+      trace(tracer, "info", `<< DONE: ${stepName}${dur}`, data, stepName);
     },
 
     stepFail(stepName, error, data) {
@@ -115,39 +141,49 @@ export function createWorkflowLogger(
       console.error(
         `[${ts()}] ${prefix}   !! FAIL: ${stepName}${dur} | ${error}${shortJson(data)}`
       );
+      trace(tracer, "error", `!! FAIL: ${stepName}${dur} | ${error}`, data, stepName);
     },
 
     info(message, data) {
       console.log(`[${ts()}] ${prefix}   -- ${message}${shortJson(data)}`);
+      trace(tracer, "info", message, data);
     },
 
     warn(message, data) {
       console.warn(`[${ts()}] ${prefix}   !! WARN: ${message}${shortJson(data)}`);
+      trace(tracer, "warning", message, data);
     },
 
     error(message, data) {
       console.error(`[${ts()}] ${prefix}   !! ERROR: ${message}${shortJson(data)}`);
+      trace(tracer, "error", message, data);
     },
 
     fanOut(eventName, count, data) {
       console.log(
         `[${ts()}] ${prefix}   => FAN-OUT: ${eventName} x${count}${shortJson(data)}`
       );
+      trace(tracer, "info", `=> FAN-OUT: ${eventName} x${count}`, data);
     },
 
     waiting(what, data) {
       console.log(`[${ts()}] ${prefix}   .. WAITING: ${what}${shortJson(data)}`);
+      trace(tracer, "debug", `.. WAITING: ${what}`, data);
     },
 
     end(status, data) {
       const dur = elapsed(startMs);
       const line = `[${ts()}] ${"=".repeat(10)} ${tag} | ${ctx} | END: ${status} (${dur}) ${"=".repeat(10)}\n`;
       console.log(line + shortJson(data));
+      trace(tracer, "info", `END: ${status} (${dur})`, data);
     },
 
     child(subContext) {
+      // Child loggers share the parent's tracer but update the entity context
+      const childTracer = tracer?.withFields({ entityId: subContext });
       return createWorkflowLogger(workflow, subContext, {
         parentContext: ctx,
+        tracer: childTracer,
       });
     },
   };

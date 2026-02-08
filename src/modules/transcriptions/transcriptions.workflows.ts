@@ -18,6 +18,7 @@ import { getRedisClient } from "../../shared/redis.js";
 import { releaseRedisLock, tryAcquireRedisLock } from "../../shared/redis-lock.js";
 import { transcriptionWebhooks } from "../../shared/webhook.js";
 import { createWorkflowLogger } from "../../shared/workflow-logger.js";
+import { createWorkflowTracer } from "../../shared/workflow-tracer.js";
 import { fetchFicheFunction } from "../fiches/fiches.workflows.js";
 import {
   ElevenLabsSpeechToTextError,
@@ -104,7 +105,12 @@ export const transcribeFicheFunction = inngest.createFunction(
         (evt.data as unknown as { wait_for_completion?: boolean })
           ?.wait_for_completion !== false;
 
-      const wlog = createWorkflowLogger("transcription", fiche_id);
+      const tracer = createWorkflowTracer({
+        workflow: "transcription",
+        entity: { type: "fiche", id: fiche_id },
+        inngestEventId: typeof evt.id === "string" ? evt.id : undefined,
+      });
+      const wlog = createWorkflowLogger("transcription", fiche_id, { tracer });
       wlog.start("transcribe-fiche", { priority, wait_for_completion: waitForCompletion, event_id: evt.id });
 
       // Capture start time in a step to persist it across Inngest checkpoints
@@ -420,7 +426,12 @@ export const transcribeFicheFunction = inngest.createFunction(
         continue;
       }
 
-      const runId = crypto.randomUUID();
+      // IMPORTANT: Generate runId inside step.run() so it is memoised by Inngest
+      // and stays identical across step replays (each replay calls crypto.randomUUID()
+      // anew; without memoisation the subsequent steps would use a different id).
+      const runId = await step.run(`generate-run-id-${fiche_id}`, () => {
+        return crypto.randomUUID();
+      });
       const toTranscribeCount = toTranscribe.length;
       const targetCallIds = toTranscribe.map((r) => r.callId);
 
@@ -870,7 +881,13 @@ export const transcribeRecordingFunction = inngest.createFunction(
     const workerStartedAt = Date.now();
     let attempt = 0;
 
-    const wlog = createWorkflowLogger("tx-worker", `${fiche_id}/${call_id}`);
+    const tracer = createWorkflowTracer({
+      workflow: "transcription",
+      entity: { type: "recording", id: `${fiche_id}/${call_id}` },
+      traceId: run_id,
+      inngestEventId: eventId || undefined,
+    });
+    const wlog = createWorkflowLogger("tx-worker", `${fiche_id}/${call_id}`, { tracer });
     wlog.start("transcribe-recording", { run_id, recording_index, total_to_transcribe, recording_url: recording_url?.slice(0, 80) });
 
     logger.info("Recording transcription worker started", {
@@ -1238,7 +1255,13 @@ export const finalizeFicheTranscriptionFunction = inngest.createFunction(
   async ({ event, step, logger }) => {
     const { run_id, fiche_id, call_id, ok, cached, error } = event.data;
 
-    const wlog = createWorkflowLogger("tx-finalizer", `${fiche_id}/${call_id}`);
+    const tracer = createWorkflowTracer({
+      workflow: "transcription",
+      entity: { type: "finalizer", id: `${fiche_id}/${call_id}` },
+      traceId: run_id,
+      inngestEventId: typeof event.id === "string" ? event.id : undefined,
+    });
+    const wlog = createWorkflowLogger("tx-finalizer", `${fiche_id}/${call_id}`, { tracer });
     wlog.start("finalize-recording", { run_id, ok, cached, error: error ?? undefined });
 
     const redis = await getRedisClient();

@@ -20,11 +20,17 @@ import {
   validateSalesWithCallsResponse,
 } from "./fiches.schemas.js";
 
-const baseUrl =
+let baseUrl =
   process.env.FICHE_API_BASE_URL ||
   process.env.FICHE_API_URL ||
   "https://api.devis-mutuelle-pas-cher.com";
-const apiBase = `${baseUrl}/api`;
+
+// Ensure "/api" is present only once at the end of baseUrl
+if (!/\/api\/?$/.test(baseUrl)) {
+  baseUrl = baseUrl.replace(/\/+$/, "") + "/api";
+}
+
+const apiBase = baseUrl;
 
 type AxiosErrorMeta = {
   status?: number;

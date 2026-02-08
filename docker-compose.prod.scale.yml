@@ -32,21 +32,16 @@ services:
       - ./deploy/nginx-lb.conf:/etc/nginx/conf.d/default.conf:ro
     networks:
       - ai-audit-network
-    depends_on:
-      - server
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "wget -q -O - http://localhost/health >/dev/null 2>&1 || exit 1",
+          "wget -q -O - http://localhost/lb-health >/dev/null 2>&1 || exit 1",
         ]
       interval: 10s
-      timeout: 5s
+      timeout: 3s
       retries: 30
-      # Must be longer than server start_period (60s) + time for at least
-      # one of N replicas to pass its own health check. With 20 replicas
-      # competing for resources at startup, 90s is a safe minimum.
-      start_period: 90s
+      start_period: 10s
     logging:
       driver: "json-file"
       options:

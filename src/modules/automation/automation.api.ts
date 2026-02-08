@@ -15,6 +15,7 @@ import axios from "axios";
 import type { Transporter } from "nodemailer";
 import nodemailer from "nodemailer";
 
+import { gateway } from "../../shared/gateway-client.js";
 import { logger } from "../../shared/logger.js";
 import { validateOutgoingWebhookUrl } from "../../shared/webhook-security.js";
 
@@ -140,15 +141,6 @@ export async function fetchFichesForDate(
   onlyWithRecordings: boolean,
   apiKey?: string
 ): Promise<unknown[]> {
-  const baseUrl =
-    process.env.FICHE_API_BASE_URL ||
-    process.env.FICHE_API_URL ||
-    "https://api.devis-mutuelle-pas-cher.com";
-  const apiBase = `${baseUrl}/api`;
-
-  // Use the "with calls" endpoint to include recordings metadata in the sales list.
-  const url = `${apiBase}/fiches/search/by-date-with-calls`;
-
   const params = new URLSearchParams({
     date: date,
     criteria_type: "1",
@@ -157,15 +149,17 @@ export async function fetchFichesForDate(
     force_new_session: "false",
   });
 
+  const url = gateway.url("/fiches/search/by-date-with-calls", params);
+
   try {
     logger.debug(`Fetching fiches for ${date}`, {
       url,
       params: params.toString(),
     });
 
-    const response = await axios.get(`${url}?${params}`, {
+    const response = await axios.get(url, {
       timeout: 90000, // 90 seconds - external API can be slow
-      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      headers: gateway.authHeaders(apiKey),
     });
 
     const dateFiches: unknown[] = Array.isArray(response.data?.fiches)
@@ -227,18 +221,13 @@ export async function fetchFicheDetails(
   cle?: string,
   apiKey?: string
 ): Promise<unknown> {
-  const baseUrl =
-    process.env.FICHE_API_BASE_URL ||
-    process.env.FICHE_API_URL ||
-    "https://api.devis-mutuelle-pas-cher.com";
-  const apiBase = `${baseUrl}/api`;
-
-  const url = `${apiBase}/fiches/by-id/${ficheId}`;
   const params = new URLSearchParams();
 
   if (cle) {
     params.append("cle", cle);
   }
+
+  const url = gateway.url(`/fiches/by-id/${ficheId}`, params);
 
   try {
     logger.debug(`Fetching fiche details for ${ficheId}`, {
@@ -246,9 +235,9 @@ export async function fetchFicheDetails(
       hasCle: Boolean(cle),
     });
 
-    const response = await axios.get(`${url}?${params}`, {
+    const response = await axios.get(url, {
       timeout: 90000,
-      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      headers: gateway.authHeaders(apiKey),
     });
 
     logger.debug(`Fetched fiche details for ${ficheId}`, {
@@ -378,15 +367,11 @@ export async function sendEmailNotification(
  * @returns true if API is healthy, false otherwise
  */
 export async function checkApiHealth(apiKey?: string): Promise<boolean> {
-  const baseUrl =
-    process.env.FICHE_API_BASE_URL ||
-    process.env.FICHE_API_URL ||
-    "https://api.devis-mutuelle-pas-cher.com";
-
   try {
-    const response = await axios.get(`${baseUrl}/health`, {
+    // /health lives at the domain root, not under /api
+    const response = await axios.get(gateway.rootUrl("/health"), {
       timeout: 5000,
-      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      headers: gateway.authHeaders(apiKey),
     });
 
     return response.status === 200;

@@ -12,6 +12,7 @@
 import axios from "axios";
 
 import { AppError } from "../../shared/errors.js";
+import { gateway } from "../../shared/gateway-client.js";
 import { logger } from "../../shared/logger.js";
 import {
   type FicheDetailsResponse,
@@ -20,31 +21,11 @@ import {
   validateSalesWithCallsResponse,
 } from "./fiches.schemas.js";
 
-let baseUrl =
-  process.env.FICHE_API_BASE_URL ||
-  process.env.FICHE_API_URL ||
-  "https://api.devis-mutuelle-pas-cher.com";
-
-// Ensure "/api" is present only once at the end of baseUrl
-if (!/\/api\/?$/.test(baseUrl)) {
-  baseUrl = baseUrl.replace(/\/+$/, "") + "/api";
-}
-
-const apiBase = baseUrl;
-
 type AxiosErrorMeta = {
   status?: number;
   code?: string;
   retryAfterMs?: number;
 };
-
-function getAuthHeaders(): Record<string, string> {
-  const token = (process.env.FICHE_API_AUTH_TOKEN || "").trim();
-  if (!token) {return {};}
-  // Accept either raw token or already-prefixed "Bearer ..."
-  const value = token.toLowerCase().startsWith("bearer ") ? token : `Bearer ${token}`;
-  return { Authorization: value };
-}
 
 export class FicheApiError extends AppError {
   status?: number;
@@ -308,9 +289,9 @@ export async function fetchSalesWithCalls(
     const response = await withFicheApiRetry(
       { operation: "fetchSalesWithCalls", path },
       async () => {
-        return await axios.get<SalesWithCallsResponse>(`${apiBase}${path}?${params}`, {
+        return await axios.get<SalesWithCallsResponse>(gateway.url(path, params), {
           timeout: 120000, // 2 minutes - fail faster, workflow will retry
-          headers: getAuthHeaders(),
+          headers: gateway.authHeaders(),
         });
       }
     );
@@ -400,9 +381,9 @@ export async function fetchFicheDetails(
     const response = await withFicheApiRetry(
       { operation: "fetchFicheDetails", path },
       async () => {
-        return await axios.get<FicheDetailsResponse>(`${apiBase}${path}?${params}`, {
+        return await axios.get<FicheDetailsResponse>(gateway.url(path, params), {
           timeout: 120000, // 2 minutes - CRM can be slow with full details
-          headers: getAuthHeaders(),
+          headers: gateway.authHeaders(),
         });
       }
     );

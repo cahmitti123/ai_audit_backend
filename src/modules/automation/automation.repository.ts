@@ -264,6 +264,79 @@ export async function markAutomationScheduleTriggered(
   });
 }
 
+/**
+ * Mark schedule last-run status WITHOUT incrementing counters.
+ * Intended for reconciliation (e.g., stale-running schedules).
+ */
+export async function markAutomationScheduleLastRunStatus(
+  scheduleId: bigint,
+  status: string,
+  lastRunAt?: Date
+) {
+  return await prisma.automationSchedule.update({
+    where: { id: scheduleId },
+    data: {
+      lastRunStatus: status,
+      ...(lastRunAt ? { lastRunAt } : {}),
+    },
+  });
+}
+
+/**
+ * Mark stale automation runs as failed (reconciliation).
+ * This is used when a run was marked "running" but never finalized due to crashes/timeouts.
+ */
+export async function markStaleAutomationRunsForSchedule(
+  scheduleId: bigint,
+  options: { staleBefore: Date; markedAt?: Date; reason: string }
+) {
+  const markedAt = options.markedAt ?? new Date();
+  const staleRuns = await prisma.automationRun.findMany({
+    where: {
+      scheduleId,
+      status: "running",
+      startedAt: { lt: options.staleBefore },
+    },
+    select: { id: true, startedAt: true },
+    orderBy: { startedAt: "asc" },
+  });
+
+  for (const run of staleRuns) {
+    const durationMs = Math.max(0, markedAt.getTime() - run.startedAt.getTime());
+    await prisma.automationRun.update({
+      where: { id: run.id },
+      data: {
+        status: "failed",
+        completedAt: markedAt,
+        durationMs,
+        errorMessage: options.reason,
+        errorDetails: toPrismaJsonValue({
+          marked_stale: true,
+          reason: options.reason,
+          stale_before: options.staleBefore.toISOString(),
+          marked_at: markedAt.toISOString(),
+        }),
+      },
+    });
+
+    await prisma.automationLog.create({
+      data: {
+        runId: run.id,
+        level: "error",
+        message: "Automation run marked stale by scheduler",
+        metadata: toPrismaJsonValue({
+          marked_stale: true,
+          reason: options.reason,
+          stale_before: options.staleBefore.toISOString(),
+          marked_at: markedAt.toISOString(),
+        }),
+      },
+    });
+  }
+
+  return { marked: staleRuns.length };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTOMATION RUN CRUD
 // ═══════════════════════════════════════════════════════════════════════════

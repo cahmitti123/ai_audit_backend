@@ -3,7 +3,12 @@
 This repo uses **one canonical env template**: `.env.example`.
 
 - **Local dev**: `cp .env.example .env`
-- **Docker/VPS**: `cp .env.example .env.production` (or `.env`) then run Compose with `--env-file`
+- **Docker/VPS**: `cp .env.example .env`, then run Compose (optionally with `--env-file .env`)
+
+Notes:
+- The compose files use `env_file` so the `server` container receives **all** variables from the env file (not only the ones listed under `environment:`).
+- Default: all compose files load `.env`.
+- If you use a different filename (ex: `.env.staging`), also set `ENV_FILE=.env.staging` when running Compose.
 
 This document explains **what each variable does**, **what happens if it’s missing**, and **where to get it** (when applicable).
 

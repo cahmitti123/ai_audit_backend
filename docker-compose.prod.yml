@@ -38,6 +38,10 @@ services:
     ports:
       # Bind to localhost; put host Nginx/HTTPS in front of this port.
       - "0.0.0.0:${SERVER_PORT:-3002}:3002"
+    # Inject all variables from the chosen env file into the container.
+    # (Compose still uses `--env-file` for ${VAR} interpolation in this YAML.)
+    env_file:
+      - ${ENV_FILE:-.env}
     environment:
       - NODE_ENV=production
       - PORT=3002

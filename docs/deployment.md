@@ -83,8 +83,8 @@ cd /opt
 git clone <YOUR_REPO_URL> ai-audit
 cd ai-audit
 
-cp .env.example .env.production
-nano .env.production
+cp .env.example .env
+nano .env
 ```
 
 Env variable reference: `docs/env.md`.
@@ -103,14 +103,14 @@ Fill in at least:
 We recommend using the scaled stack even if you start with 1 replica (easy to scale later):
 
 ```bash
-docker compose -f docker-compose.prod.scale.yml --env-file .env.production up -d --build --remove-orphans --scale server=1
+docker compose -f docker-compose.prod.scale.yml --env-file .env up -d --build --remove-orphans --scale server=1
 ```
 
 Notes:
 
 - `docker-compose.prod.scale.yml` publishes the internal LB at **127.0.0.1:${SERVER_PORT:-3002}**
 - Inngest UI ports are bound to **127.0.0.1** for safety.
-- If you scale `server`, also set `SERVER_REPLICAS` in `.env.production` to match the number of replicas.
+- If you scale `server`, also set `SERVER_REPLICAS` in `.env` to match the number of replicas.
 
 ### 4) Host nginx reverse proxy + HTTPS
 
@@ -142,13 +142,13 @@ Then open: `http://localhost:8288`
 ```bash
 cd /opt/ai-audit
 git pull
-docker compose -f docker-compose.prod.scale.yml --env-file .env.production up -d --build --remove-orphans --scale server=1
+docker compose -f docker-compose.prod.scale.yml --env-file .env up -d --build --remove-orphans --scale server=1
 ```
 
 ### Logs
 
 ```bash
-docker compose -f docker-compose.prod.scale.yml --env-file .env.production logs -f --tail=200
+docker compose -f docker-compose.prod.scale.yml --env-file .env logs -f --tail=200
 ```
 
 ### Auto-start on reboot (optional)

@@ -59,10 +59,34 @@ type CacheCheckResultFound = {
   cached_data: unknown;
 };
 
-type CacheCheckResult = CacheCheckResultNotFound | CacheCheckResultFound;
+type CacheCheckResultTerminalNotFound = {
+  found: true;
+  reason: "cache_not_found_marker";
+  fiche_id: string;
+  cache_id: string;
+  recordings_count: number;
+  expires_at: string;
+  cached_data: unknown;
+  not_found: true;
+};
+
+type CacheCheckResult =
+  | CacheCheckResultNotFound
+  | CacheCheckResultFound
+  | CacheCheckResultTerminalNotFound;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const FICHE_DETAILS_NOT_FOUND_MARKER = "NOT_FOUND" as const;
+
+function isFicheCacheNotFoundMarker(row: {
+  detailsSuccess?: boolean | null;
+  detailsMessage?: string | null;
+}): boolean {
+  const msg = typeof row.detailsMessage === "string" ? row.detailsMessage.trim() : "";
+  return row.detailsSuccess === false && msg === FICHE_DETAILS_NOT_FOUND_MARKER;
 }
 
 function isSalesListOnlyRawData(value: unknown): boolean {
@@ -99,6 +123,11 @@ export interface FicheFetchResult {
   fiche_id: string;
   cache_id: string;
   recordings_count: number;
+  /**
+   * Terminal marker: upstream CRM returned 404 for this fiche.
+   * Callers should treat this as "skip" (never block runs).
+   */
+  not_found?: boolean;
   message?: string;
   cache_check?: {
     found: boolean;
@@ -179,6 +208,26 @@ export const fetchFicheFunction = inngest.createFunction(
         }
 
         const isExpired = cachedData.expiresAt <= new Date();
+
+        // Terminal marker: upstream CRM returned 404 for this fiche recently.
+        // If still within TTL and caller didn't request force refresh, skip CRM calls.
+        if (!force_refresh && !isExpired && isFicheCacheNotFoundMarker(cachedData)) {
+          logger.info("Cache indicates fiche NOT_FOUND; skipping API fetch", {
+            fiche_id,
+            cache_id: String(cachedData.id),
+            expires_at: cachedData.expiresAt.toISOString(),
+          });
+          return {
+            found: true,
+            reason: "cache_not_found_marker",
+            fiche_id,
+            cache_id: String(cachedData.id),
+            recordings_count: cachedData.recordingsCount || 0,
+            expires_at: cachedData.expiresAt.toISOString(),
+            cached_data: cachedData.rawData,
+            not_found: true,
+          };
+        }
 
         if (isExpired || force_refresh) {
           logger.info("Cache expired or refresh forced", {
@@ -275,6 +324,35 @@ export const fetchFicheFunction = inngest.createFunction(
       const cacheId: string = cacheCheckResult.cache_id;
       const recordingsCount: number = cacheCheckResult.recordings_count || 0;
 
+      // Terminal cached result: NOT_FOUND marker (do NOT emit `fiche/fetched`).
+      if (cacheCheckResult.reason === "cache_not_found_marker") {
+        logger.info("Returning terminal NOT_FOUND marker from cache", {
+          fiche_id,
+          cache_id: cacheId,
+          expires_at: cacheCheckResult.expires_at,
+        });
+
+        return {
+          success: false,
+          cached: true,
+          fiche_id,
+          cache_id: cacheId,
+          recordings_count: 0,
+          not_found: true,
+          message: "Fiche not found (404)",
+          cache_check: {
+            found: true as const,
+            reason: cacheCheckResult.reason,
+            expires_at: cacheCheckResult.expires_at,
+          },
+          workflow_summary: {
+            total_steps_executed: 1,
+            used_cache: true,
+            cache_check: cacheCheckResult.reason,
+          },
+        };
+      }
+
       await step.sendEvent("emit-cached-result", {
         name: "fiche/fetched",
         data: {
@@ -311,7 +389,34 @@ export const fetchFicheFunction = inngest.createFunction(
     }
 
     // Step 2: Fetch from API with retry
-    const apiResult = await step.run("fetch-from-api", async () => {
+    type ApiFetchSummary = {
+      has_prospect: boolean;
+      has_information: boolean;
+      groupe: string | null;
+      prospect_name: string | null;
+      recordings_count: number;
+      commentaires_count: number;
+      alertes_count: number;
+      mails_count: number;
+    };
+    type ApiFetchSuccess = {
+      success: true;
+      fiche_id: string;
+      data: FicheDetailsResponse;
+      summary: ApiFetchSummary;
+    };
+    type ApiFetchNotFound = {
+      success: false;
+      fiche_id: string;
+      not_found: true;
+      cache_id: string;
+      expires_at: string;
+      status?: number;
+      code?: string;
+      message: string;
+    };
+
+    const apiResult = (await step.run("fetch-from-api", async () => {
       logger.info("Fetching from external API", {
         fiche_id,
       });
@@ -370,7 +475,45 @@ export const fetchFicheFunction = inngest.createFunction(
 
         // Non-retriable errors (don't retry)
         if (status === 404) {
-          throw new NonRetriableError(`Fiche ${fiche_id} not found`);
+          // Persist a stable NOT_FOUND marker in the DB cache so downstream workflows
+          // (automation/transcription/audit) can treat this fiche as terminal and avoid
+          // waiting forever for cache/transcription/audit completion.
+          const ttlMs = Math.max(
+            60_000,
+            Number(process.env.FICHE_NOT_FOUND_TTL_MS || 5 * 60 * 1000)
+          );
+          const expiresAt = new Date(Date.now() + ttlMs);
+
+          const row = await prisma.ficheCache.upsert({
+            where: { ficheId: fiche_id },
+            create: {
+              ficheId: fiche_id,
+              detailsSuccess: false,
+              detailsMessage: FICHE_DETAILS_NOT_FOUND_MARKER,
+              rawData: {},
+              hasRecordings: false,
+              recordingsCount: 0,
+              expiresAt,
+            },
+            update: {
+              detailsSuccess: false,
+              detailsMessage: FICHE_DETAILS_NOT_FOUND_MARKER,
+              expiresAt,
+              fetchedAt: new Date(),
+            },
+            select: { id: true, expiresAt: true },
+          });
+
+          return {
+            success: false,
+            fiche_id,
+            not_found: true as const,
+            cache_id: row.id.toString(),
+            expires_at: row.expiresAt.toISOString(),
+            status,
+            code,
+            message,
+          };
         }
         if (status === 401 || status === 403) {
           throw new NonRetriableError(
@@ -381,7 +524,55 @@ export const fetchFicheFunction = inngest.createFunction(
         // Retriable errors (will auto-retry up to 3 times)
         throw error instanceof Error ? error : new Error(message);
       }
-    });
+    })) as unknown as ApiFetchSuccess | ApiFetchNotFound;
+
+    // Terminal: upstream CRM says fiche does not exist (404).
+    if (apiResult.success !== true) {
+      if (isRecord(apiResult) && (apiResult as { not_found?: unknown }).not_found === true) {
+        const cacheId =
+          typeof (apiResult as { cache_id?: unknown }).cache_id === "string"
+            ? ((apiResult as { cache_id: string }).cache_id as string)
+            : "";
+
+        logger.warn("Fiche fetch terminated: NOT_FOUND", {
+          fiche_id,
+          cache_id: cacheId || undefined,
+        });
+
+        return {
+          success: false,
+          cached: false,
+          fiche_id,
+          cache_id: cacheId,
+          recordings_count: 0,
+          not_found: true,
+          message: "Fiche not found (404)",
+          cache_check: {
+            found: false as const,
+            reason: cacheCheckResult.reason,
+            expires_at: cacheCheckResult.expires_at,
+          },
+          workflow_summary: {
+            total_steps_executed: 2,
+            used_cache: false,
+            cache_check: cacheCheckResult.reason,
+            api_fetch: {
+              status: (apiResult as { status?: unknown }).status,
+              code: (apiResult as { code?: unknown }).code,
+            },
+          },
+        };
+      }
+
+      // Defensive: unexpected "success=false" payload; treat as retriable error.
+      throw new Error(
+        `Unexpected fiche API result for ${fiche_id}: ${
+          typeof (apiResult as { message?: unknown }).message === "string"
+            ? (apiResult as { message: string }).message
+            : "unknown error"
+        }`
+      );
+    }
 
     // Step 3: Enrich recordings metadata
     const enrichResult = await step.run("enrich-recordings", async () => {

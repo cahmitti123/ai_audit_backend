@@ -26,6 +26,12 @@ const baseUrl =
   "https://api.devis-mutuelle-pas-cher.com";
 const apiBase = `${baseUrl}/api`;
 
+type AxiosErrorMeta = {
+  status?: number;
+  code?: string;
+  retryAfterMs?: number;
+};
+
 function getAuthHeaders(): Record<string, string> {
   const token = (process.env.FICHE_API_AUTH_TOKEN || "").trim();
   if (!token) {return {};}
@@ -51,6 +57,178 @@ export class FicheApiError extends AppError {
     this.upstreamCode = options?.code;
     this.path = options?.path;
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(value: unknown): number | undefined {
+  // Retry-After can be seconds (preferred) or an HTTP date.
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Math.floor(value * 1000));
+  }
+  if (typeof value !== "string") {return undefined;}
+
+  const trimmed = value.trim();
+  if (!trimmed) {return undefined;}
+
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds)) {
+    return Math.max(0, Math.floor(seconds * 1000));
+  }
+
+  const date = Date.parse(trimmed);
+  if (!Number.isFinite(date)) {return undefined;}
+
+  return Math.max(0, date - Date.now());
+}
+
+function getAxiosErrorMeta(error: unknown): AxiosErrorMeta {
+  if (!axios.isAxiosError(error)) {return {};}
+
+  const status =
+    typeof error.response?.status === "number" ? error.response.status : undefined;
+  const code = typeof error.code === "string" ? error.code : undefined;
+
+  // Axios normalizes header names to lowercase keys.
+  const retryAfterMs = parseRetryAfterMs(
+    (error.response?.headers as Record<string, unknown> | undefined)?.["retry-after"]
+  );
+
+  return { status, code, retryAfterMs };
+}
+
+function isRetryableFicheApiError(error: unknown): {
+  retry: boolean;
+  reason?: string;
+  meta: AxiosErrorMeta;
+} {
+  const meta = getAxiosErrorMeta(error);
+
+  // HTTP-based retry logic
+  if (typeof meta.status === "number") {
+    if (meta.status === 408) {
+      return { retry: true, reason: "http_408_timeout", meta };
+    }
+    if (meta.status === 429) {
+      return { retry: true, reason: "http_429_rate_limited", meta };
+    }
+    if (meta.status >= 500 && meta.status <= 599) {
+      return { retry: true, reason: "http_5xx", meta };
+    }
+    return { retry: false, meta };
+  }
+
+  // Network/timeout errors
+  const code = meta.code;
+  if (!code) {return { retry: false, meta };}
+
+  const retryableCodes = new Set([
+    "ECONNABORTED", // axios timeout
+    "ETIMEDOUT",
+    "ECONNRESET",
+    "EAI_AGAIN",
+    "ENOTFOUND",
+    "ENETUNREACH",
+    "EPIPE",
+    "ECONNREFUSED",
+  ]);
+
+  if (retryableCodes.has(code)) {
+    return { retry: true, reason: `net_${code.toLowerCase()}`, meta };
+  }
+
+  return { retry: false, meta };
+}
+
+function computeRetryDelayMs(params: {
+  retryNumber: number; // 1-based
+  baseDelayMs: number;
+  maxDelayMs: number;
+  jitterRatio: number;
+  serverSuggestedDelayMs?: number;
+}): number {
+  const base =
+    typeof params.serverSuggestedDelayMs === "number" &&
+    Number.isFinite(params.serverSuggestedDelayMs) &&
+    params.serverSuggestedDelayMs > 0
+      ? params.serverSuggestedDelayMs
+      : params.baseDelayMs * 2 ** Math.max(0, params.retryNumber - 1);
+
+  const capped = Math.min(params.maxDelayMs, Math.max(0, base));
+  const jitter = Math.max(0, capped * params.jitterRatio);
+  const min = Math.max(0, capped - jitter);
+  const max = capped + jitter;
+  return Math.floor(min + Math.random() * (max - min));
+}
+
+async function withFicheApiRetry<T>(
+  context: { operation: string; path: string },
+  fn: () => Promise<T>,
+  options?: { maxAttempts?: number; baseDelayMs?: number; maxDelayMs?: number; jitterRatio?: number }
+): Promise<T> {
+  const maxAttempts = Math.max(1, options?.maxAttempts ?? 3);
+  const baseDelayMs = Math.max(0, options?.baseDelayMs ?? 1000);
+  const maxDelayMs = Math.max(baseDelayMs, options?.maxDelayMs ?? 15000);
+  const jitterRatio = Math.min(1, Math.max(0, options?.jitterRatio ?? 0.2));
+
+  let retryNumber = 0;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      const decision = isRetryableFicheApiError(error);
+      if (!decision.retry || attempt >= maxAttempts) {
+        throw error;
+      }
+
+      retryNumber++;
+      const delayMs = computeRetryDelayMs({
+        retryNumber,
+        baseDelayMs,
+        maxDelayMs,
+        jitterRatio,
+        serverSuggestedDelayMs: decision.meta.retryAfterMs,
+      });
+
+      logger.warn("Retrying fiche API request after upstream failure", {
+        operation: context.operation,
+        path: context.path,
+        attempt,
+        max_attempts: maxAttempts,
+        delay_ms: delayMs,
+        status: decision.meta.status,
+        upstream_code: decision.meta.code,
+        reason: decision.reason,
+      });
+
+      await sleep(delayMs);
+    }
+  }
+
+  // Should be unreachable, but TS doesn't always narrow correctly in loops.
+  throw new Error("Fiche API retry loop exhausted");
+}
+
+function toFicheApiError(
+  error: unknown,
+  context: { path: string; message: string }
+): FicheApiError {
+  if (error instanceof FicheApiError) {return error;}
+
+  const meta = getAxiosErrorMeta(error);
+  const safeMsg = error instanceof Error ? error.message : String(error);
+
+  if (axios.isAxiosError(error)) {
+    return new FicheApiError(`${context.message}: ${safeMsg}`, {
+      status: meta.status,
+      code: meta.code,
+      path: context.path,
+    });
+  }
+
+  return new FicheApiError(`${context.message}: ${safeMsg}`, { path: context.path });
 }
 
 /**
@@ -120,11 +298,14 @@ export async function fetchSalesWithCalls(
       force_new_session: "false",
     });
 
-    const response = await axios.get<SalesWithCallsResponse>(
-      `${apiBase}/fiches/search/by-date-with-calls?${params}`,
-      {
-        timeout: 120000, // 2 minutes - fail faster, workflow will retry
-        headers: getAuthHeaders(),
+    const path = "/api/fiches/search/by-date-with-calls";
+    const response = await withFicheApiRetry(
+      { operation: "fetchSalesWithCalls", path },
+      async () => {
+        return await axios.get<SalesWithCallsResponse>(`${apiBase}${path}?${params}`, {
+          timeout: 120000, // 2 minutes - fail faster, workflow will retry
+          headers: getAuthHeaders(),
+        });
       }
     );
 
@@ -146,14 +327,23 @@ export async function fetchSalesWithCalls(
 
     return validatedData;
   } catch (error) {
-    const err = error as { response?: { status?: number }; message: string };
+    const path = "/api/fiches/search/by-date-with-calls";
+    const meta = getAxiosErrorMeta(error);
+    const message = error instanceof Error ? error.message : String(error);
+
     logger.error("Failed to fetch sales", {
       start_date: startDate,
       end_date: endDate,
-      status: err.response?.status,
-      message: err.message,
+      path,
+      status: meta.status,
+      upstream_code: meta.code,
+      message,
     });
-    throw error;
+
+    throw toFicheApiError(error, {
+      path,
+      message: `Failed to fetch sales with calls for ${startDate}${startDate === endDate ? "" : `..${endDate}`}`,
+    });
   }
 }
 
@@ -188,6 +378,8 @@ export async function fetchFicheDetails(
     include_mail_devis: includeMailDevis,
   });
 
+  const path = `/api/fiches/by-id/${ficheId}`;
+
   try {
     // Gateway endpoint: /api/fiches/by-id/:ficheId
     // NOTE: The gateway is responsible for handling/refreshing `cle` internally.
@@ -199,16 +391,20 @@ export async function fetchFicheDetails(
       include_mail_devis: String(includeMailDevis),
     });
 
-    const response = await axios.get<FicheDetailsResponse>(
-      `${apiBase}/fiches/by-id/${ficheId}?${params}`,
-      {
-        timeout: 120000, // 2 minutes - CRM can be slow with full details
-        headers: getAuthHeaders(),
+    const response = await withFicheApiRetry(
+      { operation: "fetchFicheDetails", path },
+      async () => {
+        return await axios.get<FicheDetailsResponse>(`${apiBase}${path}?${params}`, {
+          timeout: 120000, // 2 minutes - CRM can be slow with full details
+          headers: getAuthHeaders(),
+        });
       }
     );
 
     if (!response.data || !response.data.success) {
-      throw new Error(`Fiche ${ficheId} not found`);
+      // Some gateway errors come back as 200 with `success=false`. Treat as NOT_FOUND
+      // so downstream workflows can decide terminal handling without retry loops.
+      throw new FicheApiError(`Fiche ${ficheId} not found`, { status: 404, path });
     }
 
     // Validate response structure at runtime
@@ -226,11 +422,14 @@ export async function fetchFicheDetails(
 
     return validatedData;
   } catch (error: unknown) {
+    if (error instanceof FicheApiError) {
+      // Already sanitized/typed.
+      throw error;
+    }
+
     // IMPORTANT: Never rethrow raw Axios errors here.
     // Inngest (and other runtimes) may log the full AxiosError object, which includes
     // request URL + query params. We only surface safe metadata.
-    const path = `/api/fiches/by-id/${ficheId}`;
-
     if (axios.isAxiosError(error)) {
       const status =
         typeof error.response?.status === "number" ? error.response.status : undefined;
@@ -240,7 +439,7 @@ export async function fetchFicheDetails(
         fiche_id: ficheId,
         path,
         status,
-        code,
+        upstream_code: code,
         message: error.message,
       });
 

@@ -12,6 +12,7 @@ import { NonRetriableError } from "inngest";
 import { inngest } from "../../inngest/client.js";
 import { sanitizeForLogging } from "../../shared/log-sanitizer.js";
 import { publishPusherEvent } from "../../shared/pusher.js";
+import { createWorkflowLogger } from "../../shared/workflow-logger.js";
 import type { RecordingLike } from "../../utils/recording-parser.js";
 import * as automationApi from "./automation.api.js";
 import * as automationRepository from "./automation.repository.js";
@@ -204,6 +205,43 @@ function chunkArray<T>(items: T[], chunkSize: number): T[][] {
   return chunks;
 }
 
+function isNotFoundMarker(detailsSuccess: unknown, detailsMessage: unknown): boolean {
+  if (detailsSuccess !== false) {return false;}
+  if (typeof detailsMessage !== "string") {return false;}
+  const msg = detailsMessage.trim();
+  if (!msg) {return false;}
+  const upper = msg.toUpperCase();
+  return (
+    upper === "NOT_FOUND" ||
+    upper.includes("NOT_FOUND") ||
+    msg.toLowerCase().includes("not found")
+  );
+}
+
+function getAutomationDerivedStaleThresholdMs(): number {
+  // Derived from per-stage max waits so scheduler can self-heal faster than the
+  // Inngest finish timeout when waits are configured smaller.
+  const msEnv = (name: string, fallback: number, min = 60_000) => {
+    const raw = process.env[name];
+    const n = raw === undefined || raw === "" ? fallback : Number(raw);
+    const safe = Number.isFinite(n) ? n : fallback;
+    return Math.max(min, safe);
+  };
+
+  const ficheDetailsMaxWaitMs = msEnv(
+    "AUTOMATION_FICHE_DETAILS_MAX_WAIT_MS",
+    10 * 60 * 1000
+  );
+  const transcriptionMaxWaitMs = msEnv(
+    "AUTOMATION_TRANSCRIPTION_MAX_WAIT_MS",
+    15 * 60 * 1000
+  );
+  const auditMaxWaitMs = msEnv("AUTOMATION_AUDIT_MAX_WAIT_MS", 30 * 60 * 1000);
+  const graceMs = msEnv("AUTOMATION_SCHEDULER_STALE_GRACE_MS", 15 * 60 * 1000);
+
+  return ficheDetailsMaxWaitMs + transcriptionMaxWaitMs + auditMaxWaitMs + graceMs;
+}
+
 /**
  * Run Automation Function
  * =======================
@@ -230,6 +268,9 @@ export const runAutomationFunction = inngest.createFunction(
       due_at?: string;
     };
     const scheduleId = toBigIntId(schedule_id);
+
+    const wlog = createWorkflowLogger("automation", `schedule-${schedule_id}`);
+    wlog.start("run-automation", { schedule_id, due_at, has_override: Boolean(override_fiche_selection) });
 
     // Capture start time in a step to persist it across Inngest checkpoints
     const startTime = await step.run(
@@ -1017,6 +1058,9 @@ export const runAutomationFunction = inngest.createFunction(
         transcriptions: 0,
         audits: 0,
       };
+      // Track fiches that become terminal NOT_FOUND at any stage so later gates
+      // (transcription/audit) can exclude them from waiting/fan-out.
+      const terminalNotFoundFicheIds = new Set<string>();
 
       // STEP 1: Ensure all fiches have FULL details cached (distributed across replicas)
       const sendChunkSize = toPositiveInt(process.env.AUTOMATION_SEND_EVENT_CHUNK_SIZE, 200);
@@ -1076,6 +1120,8 @@ export const runAutomationFunction = inngest.createFunction(
           ? { inngest_event_ids_sample: fetchFanoutEventIdsSample }
           : {}),
       });
+      wlog.fanOut("fiche/fetch", fetchEvents.length);
+      wlog.waiting("fiche-details gate (polling DB for full details)");
 
       // Durable wait (no in-step busy polling): poll DB snapshot with `step.run` + `step.sleep`.
       const ficheDetailsMaxWaitMs = Math.max(
@@ -1118,6 +1164,9 @@ export const runAutomationFunction = inngest.createFunction(
         hasRecordings: boolean;
         isSalesListOnly: boolean;
         isFullDetails: boolean;
+        detailsSuccess: boolean | null;
+        detailsMessage: string | null;
+        isNotFound: boolean;
       }> = [];
 
       let ficheDetailsPollAttempt = 0;
@@ -1134,6 +1183,8 @@ export const runAutomationFunction = inngest.createFunction(
                 groupe: true,
                 recordingsCount: true,
                 hasRecordings: true,
+                detailsSuccess: true,
+                detailsMessage: true,
                 rawData: true,
                 information: { select: { id: true } },
               },
@@ -1152,10 +1203,20 @@ export const runAutomationFunction = inngest.createFunction(
                   hasRecordings: false,
                   isSalesListOnly: true,
                   isFullDetails: false,
+                  detailsSuccess: null,
+                  detailsMessage: null,
+                  isNotFound: false,
                 };
               }
               const raw = r.rawData ?? null;
               const isSalesListOnly = isRecord(raw) && raw._salesListOnly === true;
+              const detailsSuccess =
+                typeof r.detailsSuccess === "boolean" ? r.detailsSuccess : null;
+              const detailsMessage =
+                typeof r.detailsMessage === "string" && r.detailsMessage.trim().length > 0
+                  ? r.detailsMessage.trim()
+                  : null;
+              const isNotFound = isNotFoundMarker(detailsSuccess, detailsMessage);
               const isFullDetails =
                 Boolean(r.information) ||
                 (isFullFicheDetailsRawData(raw) && !isSalesListOnly);
@@ -1176,14 +1237,20 @@ export const runAutomationFunction = inngest.createFunction(
                 hasRecordings: Boolean(r.hasRecordings),
                 isSalesListOnly,
                 isFullDetails,
+                detailsSuccess,
+                detailsMessage,
+                isNotFound,
               };
             });
           }
         );
 
-        const ready = lastSnapshot.filter((r) => r.exists && r.isFullDetails === true).length;
+        const notFound = lastSnapshot.filter((r) => r.exists && r.isNotFound === true).length;
+        const ready = lastSnapshot.filter(
+          (r) => r.exists && (r.isFullDetails === true || r.isNotFound === true)
+        ).length;
         const incompleteIds = lastSnapshot
-          .filter((r) => !r.exists || r.isFullDetails !== true)
+          .filter((r) => (!r.exists || r.isFullDetails !== true) && r.isNotFound !== true)
           .map((r) => r.ficheId);
         const missingCache = lastSnapshot.filter((r) => !r.exists).length;
         const salesListOnly = lastSnapshot.filter((r) => r.exists && r.isSalesListOnly).length;
@@ -1199,6 +1266,7 @@ export const runAutomationFunction = inngest.createFunction(
           stable_count: nextStableCount,
           stall_retries: ficheDetailsStallRetries,
           max_stall_retries: maxFicheDetailsStallRetries,
+          not_found: notFound,
           incomplete: incompleteIds.length,
           incomplete_sample: incompleteIds.slice(0, 10),
           missing_cache: missingCache,
@@ -1218,7 +1286,7 @@ export const runAutomationFunction = inngest.createFunction(
               stableCount = 0;
                   const retryNo = ficheDetailsStallRetries;
                   const incomplete = lastSnapshot
-                    .filter((r) => !r.exists || r.isFullDetails !== true)
+                    .filter((r) => (!r.exists || r.isFullDetails !== true) && r.isNotFound !== true)
                     .map((r) => r.ficheId);
 
                   await log("warning", "Fiche details stalled; retrying incomplete fetches", {
@@ -1288,6 +1356,7 @@ export const runAutomationFunction = inngest.createFunction(
       const ficheFetchFailures: Array<{ ficheId: string; error: string }> = [];
       const fichesWithRecordings: string[] = [];
       const fichesWithoutRecordings: string[] = [];
+      const ignoredNotFound: string[] = [];
       const ignoredTooManyRecordings: Array<{ ficheId: string; recordingsCount: number }> =
         [];
       const ignoredWrongGroup: Array<{ ficheId: string; groupe: string | null }> = [];
@@ -1312,6 +1381,15 @@ export const runAutomationFunction = inngest.createFunction(
           : 0;
 
       for (const snap of lastSnapshot) {
+        if (snap.isNotFound === true) {
+          terminalNotFoundFicheIds.add(snap.ficheId);
+          ignoredNotFound.push(snap.ficheId);
+          results.ignored.push({
+            ficheId: snap.ficheId,
+            reason: "Fiche not found (404)",
+          });
+          continue;
+        }
         if (!snap.exists || !snap.isFullDetails) {
           ficheFetchFailures.push({
             ficheId: snap.ficheId,
@@ -1358,6 +1436,26 @@ export const runAutomationFunction = inngest.createFunction(
         } else {
           fichesWithoutRecordings.push(snap.ficheId);
         }
+      }
+
+      if (ignoredNotFound.length > 0) {
+        const ignoredSet = new Set(ignoredNotFound);
+        const before = ficheIds.length;
+        ficheIds = ficheIds.filter((id) => !ignoredSet.has(id));
+
+        await log("warning", "Ignoring NOT_FOUND fiches (404)", {
+          before,
+          after: ficheIds.length,
+          ignored: ignoredNotFound.length,
+          ignored_sample: ignoredNotFound.slice(0, 10),
+        });
+
+        // Keep run totals accurate after removing ignored fiches.
+        await step.run("update-run-total-after-not-found", async () => {
+          await automationRepository.updateAutomationRun(runId, {
+            totalFiches: ficheIds.length,
+          });
+        });
       }
 
       if (ignoredWrongGroup.length > 0) {
@@ -1441,6 +1539,7 @@ export const runAutomationFunction = inngest.createFunction(
       // Merge failures into run results
       results.failed.push(...ficheFetchFailures);
 
+      wlog.stepDone("fiche-details-gate");
       await log("info", "Fiche detail fetch complete (distributed)", {
         total: ficheIds.length,
         withRecordings: fichesWithRecordings.length,
@@ -1463,7 +1562,9 @@ export const runAutomationFunction = inngest.createFunction(
 
       // STEP 2: Fan out transcriptions (optionally skip already-transcribed fiches)
       if (schedule.runTranscription && fichesWithRecordings.length > 0 && canContinueAfterFicheFetch) {
-        const transcriptionTargets = [...fichesWithRecordings];
+        const transcriptionTargets = fichesWithRecordings.filter(
+          (id) => !terminalNotFoundFicheIds.has(id)
+        );
 
         // Load fiche cache IDs once (JSON-safe) so we can poll recordings efficiently without per-fiche DB queries.
         const cacheRows = await step.run(
@@ -1494,10 +1595,62 @@ export const runAutomationFunction = inngest.createFunction(
           }
         }
 
-        const transcriptionTargetsWithCache = transcriptionTargets.filter((id) =>
+        let transcriptionTargetsWithCache = transcriptionTargets.filter((id) =>
           cacheIdByFicheId.has(id)
         );
-        const targetCount = transcriptionTargetsWithCache.length;
+        let targetCount = transcriptionTargetsWithCache.length;
+
+        // Terminal classification: if a fiche is flagged NOT_FOUND, it should not block transcription waiting.
+        if (targetCount > 0) {
+          const notFoundInitial = await step.run(
+            `detect-notfound-transcriptions-${runIdString}`,
+            async () => {
+              const { prisma } = await import("../../shared/prisma.js");
+              const rows = await prisma.ficheCache.findMany({
+                where: { ficheId: { in: transcriptionTargetsWithCache } },
+                select: { ficheId: true, detailsSuccess: true, detailsMessage: true },
+              });
+
+              return rows
+                .filter((r) => isNotFoundMarker(r.detailsSuccess, r.detailsMessage))
+                .map((r) => r.ficheId);
+            }
+          );
+
+          const newNotFound = notFoundInitial.filter(
+            (id) => !terminalNotFoundFicheIds.has(id)
+          );
+          if (newNotFound.length > 0) {
+            await log(
+              "warning",
+              "Detected NOT_FOUND fiches before transcription fan-out; skipping",
+              {
+                not_found: newNotFound.length,
+                not_found_sample: newNotFound.slice(0, 10),
+              }
+            );
+            for (const ficheId of newNotFound) {
+              terminalNotFoundFicheIds.add(ficheId);
+              results.ignored.push({ ficheId, reason: "Fiche not found (404)" });
+            }
+
+            const notFoundSet = new Set(newNotFound);
+            const beforeTotal = ficheIds.length;
+            ficheIds = ficheIds.filter((id) => !notFoundSet.has(id));
+            transcriptionTargetsWithCache = transcriptionTargetsWithCache.filter(
+              (id) => !notFoundSet.has(id)
+            );
+            targetCount = transcriptionTargetsWithCache.length;
+
+            if (ficheIds.length !== beforeTotal) {
+              await step.run("update-run-total-after-not-found-before-transcriptions", async () => {
+                await automationRepository.updateAutomationRun(runId, {
+                  totalFiches: ficheIds.length,
+                });
+              });
+            }
+          }
+        }
 
         // Pre-check current completion so we can skip already-complete fiches when configured.
         const pre = await step.run(`prefilter-transcriptions-${runIdString}`, async () => {
@@ -1589,6 +1742,8 @@ export const runAutomationFunction = inngest.createFunction(
             }
           }
 
+          wlog.fanOut("fiche/transcribe", transcriptionEvents.length);
+          wlog.waiting("transcription gate (polling DB for has_transcription)");
           await log("info", "Dispatched fiche/transcribe fan-out events", {
             total_events: transcriptionEvents.length,
             chunks: txChunks.length,
@@ -1638,7 +1793,19 @@ export const runAutomationFunction = inngest.createFunction(
             `poll-transcriptions-${runIdString}-${transcriptionPollAttempt}`,
             async () => {
               const { prisma } = await import("../../shared/prisma.js");
-              const cacheIds = transcriptionTargetsWithCache
+              const ficheRows = await prisma.ficheCache.findMany({
+                where: { ficheId: { in: transcriptionTargetsWithCache } },
+                select: { ficheId: true, detailsSuccess: true, detailsMessage: true },
+              });
+              const notFoundFicheIds = ficheRows
+                .filter((r) => isNotFoundMarker(r.detailsSuccess, r.detailsMessage))
+                .map((r) => r.ficheId);
+              const notFoundSet = new Set(notFoundFicheIds);
+              const activeTargets = transcriptionTargetsWithCache.filter(
+                (ficheId) => !notFoundSet.has(ficheId)
+              );
+
+              const cacheIds = activeTargets
                 .map((ficheId) => cacheIdByFicheId.get(ficheId))
                 .filter((v): v is string => typeof v === "string" && v.length > 0)
                 .map((idStr) => BigInt(idStr));
@@ -1662,7 +1829,7 @@ export const runAutomationFunction = inngest.createFunction(
               let completed = 0;
               let incomplete = 0;
               const incomplete_sample: string[] = [];
-              for (const ficheId of transcriptionTargetsWithCache) {
+              for (const ficheId of activeTargets) {
                 const cacheId = cacheIdByFicheId.get(ficheId);
                 const counts = cacheId ? agg.get(cacheId) : undefined;
                 const total = counts?.total ?? 0;
@@ -1674,7 +1841,12 @@ export const runAutomationFunction = inngest.createFunction(
                   if (incomplete_sample.length < 10) {incomplete_sample.push(ficheId);}
                 }
               }
-              return { completed, incomplete, incomplete_sample };
+              return {
+                completed,
+                incomplete,
+                incomplete_sample,
+                not_found_fiche_ids: notFoundFicheIds,
+              };
             }
           );
 
@@ -1682,6 +1854,58 @@ export const runAutomationFunction = inngest.createFunction(
             isRecord(poll) && typeof poll.completed === "number" && Number.isFinite(poll.completed)
               ? poll.completed
               : 0;
+
+          // Terminal classification: if a fiche becomes NOT_FOUND mid-run (e.g., force-refresh 404),
+          // exclude it from the waiting target set so the automation run can finish deterministically.
+          const notFoundFicheIds =
+            isRecord(poll) && Array.isArray(poll.not_found_fiche_ids)
+              ? (poll.not_found_fiche_ids as unknown[])
+                  .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+                  .map((v) => v.trim())
+              : [];
+          const newlyNotFound = notFoundFicheIds.filter(
+            (id) => !terminalNotFoundFicheIds.has(id)
+          );
+          if (newlyNotFound.length > 0) {
+            await log(
+              "warning",
+              "Detected NOT_FOUND fiches during transcription wait; skipping",
+              {
+                not_found: newlyNotFound.length,
+                not_found_sample: newlyNotFound.slice(0, 10),
+              }
+            );
+            for (const ficheId of newlyNotFound) {
+              terminalNotFoundFicheIds.add(ficheId);
+              results.ignored.push({ ficheId, reason: "Fiche not found (404)" });
+            }
+
+            const newlyNotFoundSet = new Set(newlyNotFound);
+            const notFoundSet = new Set(notFoundFicheIds);
+            const beforeTotal = ficheIds.length;
+            ficheIds = ficheIds.filter((id) => !newlyNotFoundSet.has(id));
+            transcriptionTargetsWithCache = transcriptionTargetsWithCache.filter(
+              (id) => !notFoundSet.has(id)
+            );
+            targetCount = transcriptionTargetsWithCache.length;
+
+            if (ficheIds.length !== beforeTotal) {
+              await step.run(
+                `update-run-total-after-not-found-during-transcriptions-${runIdString}-${transcriptionPollAttempt}`,
+                async () => {
+                  await automationRepository.updateAutomationRun(runId, {
+                    totalFiches: ficheIds.length,
+                  });
+                }
+              );
+            }
+
+            // If all remaining targets became terminal, there's nothing left to wait for.
+            if (targetCount === 0) {
+              results.transcriptions = 0;
+              break;
+            }
+          }
           const incomplete =
             isRecord(poll) && typeof poll.incomplete === "number" && Number.isFinite(poll.incomplete)
               ? poll.incomplete
@@ -1890,6 +2114,9 @@ export const runAutomationFunction = inngest.createFunction(
       // STEP 3: Fan out ALL audits at once
       const canContinueToAudits =
         schedule.continueOnError || results.failed.length === 0;
+      const auditFicheTargets = fichesWithRecordings.filter(
+        (id) => !terminalNotFoundFicheIds.has(id)
+      );
 
       if (schedule.runAudits && !canContinueToAudits) {
         await log(
@@ -1899,7 +2126,7 @@ export const runAutomationFunction = inngest.createFunction(
         );
       }
 
-      if (schedule.runAudits && fichesWithRecordings.length > 0 && canContinueToAudits) {
+      if (schedule.runAudits && auditFicheTargets.length > 0 && canContinueToAudits) {
         const auditConfigIds = await step.run(
           "resolve-all-audit-configs",
           async (): Promise<number[]> => {
@@ -1930,9 +2157,9 @@ export const runAutomationFunction = inngest.createFunction(
             await log(
               "info",
               `Running ${configIds.length} configs × ${
-                fichesWithRecordings.length
+                auditFicheTargets.length
               } fiches = ${
-                configIds.length * fichesWithRecordings.length
+                configIds.length * auditFicheTargets.length
               } total audits`
             );
             return configIds;
@@ -1954,7 +2181,7 @@ export const runAutomationFunction = inngest.createFunction(
             useAutomaticAudits: schedule.useAutomaticAudits,
             specificAuditConfigs: schedule.specificAuditConfigs.length,
           });
-          for (const ficheId of fichesWithRecordings) {
+          for (const ficheId of auditFicheTargets) {
             results.failed.push({
               ficheId,
               error: "No audit configs resolved",
@@ -1963,7 +2190,7 @@ export const runAutomationFunction = inngest.createFunction(
           // Nothing else to do in audit stage; finalization will mark the run as failed/partial.
         }
 
-        const auditTasks = fichesWithRecordings.flatMap((ficheId) =>
+        const auditTasks = auditFicheTargets.flatMap((ficheId) =>
           auditConfigIdsClean.map((configId) => ({
             ficheId,
             configId: Number(configId),
@@ -1981,7 +2208,7 @@ export const runAutomationFunction = inngest.createFunction(
             async () => {
               const { prisma } = await import("../../shared/prisma.js");
               const rows = await prisma.ficheCache.findMany({
-                where: { ficheId: { in: fichesWithRecordings } },
+                where: { ficheId: { in: auditFicheTargets } },
                 select: { ficheId: true, id: true },
               });
               return rows.map((r) => ({ ficheId: r.ficheId, ficheCacheId: r.id.toString() }));
@@ -1999,7 +2226,7 @@ export const runAutomationFunction = inngest.createFunction(
               auditCacheIdByFicheId.set(ficheId, ficheCacheId);
             }
           }
-          const missingAuditCacheIds = fichesWithRecordings.filter(
+          const missingAuditCacheIds = auditFicheTargets.filter(
             (id) => !auditCacheIdByFicheId.has(id)
           );
           if (missingAuditCacheIds.length > 0) {
@@ -2046,6 +2273,8 @@ export const runAutomationFunction = inngest.createFunction(
             }
           }
 
+          wlog.fanOut("audit/run", auditEvents.length);
+          wlog.waiting("audit gate (polling DB for audit completion)");
           await log("info", "Dispatched audit/run fan-out events", {
             total_events: auditEvents.length,
             chunks: auditChunks.length,
@@ -2259,7 +2488,7 @@ export const runAutomationFunction = inngest.createFunction(
 
               const rows = await prisma.audit.findMany({
                 where: {
-                  ficheCache: { ficheId: { in: fichesWithRecordings } },
+                  ficheCache: { ficheId: { in: auditFicheTargets } },
                   auditConfigId: { in: configIds },
                   automationRunId: runId,
                   isLatest: true,
@@ -2308,7 +2537,56 @@ export const runAutomationFunction = inngest.createFunction(
             }
           }
 
-          for (const ficheId of fichesWithRecordings) {
+          // Terminal classification: a fiche can become NOT_FOUND after initial selection
+          // (e.g., CRM deletion between stages). Treat it as "ignored/skip" rather than a run failure.
+          const notFoundDuringAudits = await step.run(
+            `detect-notfound-audits-${runIdString}`,
+            async () => {
+              const { prisma } = await import("../../shared/prisma.js");
+              const rows = await prisma.ficheCache.findMany({
+                where: { ficheId: { in: auditFicheTargets } },
+                select: { ficheId: true, detailsSuccess: true, detailsMessage: true },
+              });
+              return rows
+                .filter((r) => isNotFoundMarker(r.detailsSuccess, r.detailsMessage))
+                .map((r) => r.ficheId);
+            }
+          );
+          const newlyNotFoundDuringAudits = notFoundDuringAudits.filter(
+            (id) => !terminalNotFoundFicheIds.has(id)
+          );
+          if (newlyNotFoundDuringAudits.length > 0) {
+            await log("warning", "Detected NOT_FOUND fiches during audits; skipping", {
+              not_found: newlyNotFoundDuringAudits.length,
+              not_found_sample: newlyNotFoundDuringAudits.slice(0, 10),
+            });
+
+            const notFoundSet = new Set(newlyNotFoundDuringAudits);
+            for (const ficheId of newlyNotFoundDuringAudits) {
+              terminalNotFoundFicheIds.add(ficheId);
+              results.ignored.push({ ficheId, reason: "Fiche not found (404)" });
+            }
+
+            const beforeTotal = ficheIds.length;
+            ficheIds = ficheIds.filter((id) => !notFoundSet.has(id));
+            if (ficheIds.length !== beforeTotal) {
+              await step.run(
+                `update-run-total-after-not-found-during-audits-${runIdString}`,
+                async () => {
+                  await automationRepository.updateAutomationRun(runId, {
+                    totalFiches: ficheIds.length,
+                  });
+                }
+              );
+            }
+          }
+          const notFoundAuditSet = new Set(notFoundDuringAudits);
+
+          for (const ficheId of auditFicheTargets) {
+            if (notFoundAuditSet.has(ficheId)) {
+              // Skip terminal NOT_FOUND fiches (do not treat as audit failure/incomplete).
+              continue;
+            }
             const agg = perFiche.get(ficheId) || {
               completed: new Set<string>(),
               failed: new Set<string>(),
@@ -2447,6 +2725,7 @@ ${
         });
       }
 
+      wlog.end(finalStatus, { successful_fiches: results.successful.length, failed_fiches: results.failed.length, ignored_fiches: results.ignored.length });
       await log("info", "Automation run completed", {
         status: finalStatus,
         duration_ms: durationMs,
@@ -2648,18 +2927,13 @@ export const scheduledAutomationCheck = inngest.createFunction(
       const toRun: DueSchedule[] = [];
 
       for (const schedule of schedules) {
-        // Skip MANUAL schedules
-        if (schedule.scheduleType === "MANUAL") {
-          continue;
-        }
-
         // Prevent overlapping runs: if the schedule is currently marked "running", skip it,
-        // unless it looks stale (e.g., worker crashed). Stale threshold is based on the
-        // automation finish timeout (2h) with a small grace period.
+        // unless it looks stale (e.g., worker crashed). Staleness is derived from the sum of
+        // per-stage max waits (fiche details + transcription + audit) plus a grace buffer.
         if (schedule.lastRunStatus === "running") {
           const lastRunAt = schedule.lastRunAt ? new Date(schedule.lastRunAt) : null;
           const ageMs = lastRunAt ? now.getTime() - lastRunAt.getTime() : Number.POSITIVE_INFINITY;
-          const staleMs = 2 * 60 * 60 * 1000 + 15 * 60 * 1000; // 2h + 15m grace
+          const staleMs = getAutomationDerivedStaleThresholdMs();
 
           if (Number.isFinite(ageMs) && ageMs >= staleMs) {
             logger.warn("Schedule appears stuck (running too long); allowing retrigger", {
@@ -2667,7 +2941,33 @@ export const scheduledAutomationCheck = inngest.createFunction(
               name: schedule.name,
               lastRunAt: schedule.lastRunAt,
               age_minutes: Math.round(ageMs / 60000),
+              stale_minutes: Math.round(staleMs / 60000),
             });
+
+            // Best-effort reconciliation: mark stale runs/schedules as terminal so the UI and
+            // scheduler don't remain blocked by a dead run.
+            try {
+              const idStr = String(schedule.id).trim();
+              if (/^\d+$/.test(idStr)) {
+                const scheduleId = BigInt(idStr);
+                const staleBefore = new Date(now.getTime() - staleMs);
+                const reason = `Marked stale by scheduler after ${Math.round(
+                  ageMs / 60000
+                )}m (threshold ${Math.round(staleMs / 60000)}m)`;
+
+                await automationRepository.markStaleAutomationRunsForSchedule(scheduleId, {
+                  staleBefore,
+                  markedAt: now,
+                  reason,
+                });
+                await automationRepository.markAutomationScheduleLastRunStatus(scheduleId, "failed");
+              }
+            } catch (err: unknown) {
+              logger.warn("Failed to reconcile stale schedule/run (non-fatal)", {
+                schedule_id: schedule.id,
+                error: errorMessage(err),
+              });
+            }
           } else {
             logger.info("Skipping schedule: already running", {
               schedule_id: schedule.id,
@@ -2676,6 +2976,11 @@ export const scheduledAutomationCheck = inngest.createFunction(
             });
             continue;
           }
+        }
+
+        // Skip MANUAL schedules for automatic triggering (but still reconcile staleness above).
+        if (schedule.scheduleType === "MANUAL") {
+          continue;
         }
 
         // Check if schedule needs required fields

@@ -25,6 +25,7 @@ import {
 import { logger as appLogger } from "../../shared/logger.js";
 import { getRedisClient } from "../../shared/redis.js";
 import { auditWebhooks, batchWebhooks } from "../../shared/webhook.js";
+import { createWorkflowLogger } from "../../shared/workflow-logger.js";
 import {
   formatBytes,
   getPayloadSize,
@@ -58,6 +59,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isNotFoundLikeError(error: unknown): boolean {
+  const msg = errorMessage(error).toLowerCase();
+  // Common forms:
+  // - "Fiche <id> not found" (NonRetriableError from fetchFicheFunction)
+  // - "NOT_FOUND" codes wrapped upstream
+  return msg.includes("not found") || msg.includes("not_found");
 }
 
 function getAuditRunFailureMeta(event: unknown): {
@@ -663,7 +672,21 @@ export const runAuditFunction = inngest.createFunction(
       }
     );
 
-    const auditId = auditIdFromEvent ?? `audit-${fiche_id}-${audit_config_id}-${startTime}`;
+    const startedAtMs =
+      typeof startTime === "number" && Number.isFinite(startTime) ? startTime : Date.now();
+
+    const auditId =
+      auditIdFromEvent ?? `audit-${fiche_id}-${audit_config_id}-${startedAtMs}`;
+
+    const wlog = createWorkflowLogger("audit", `${fiche_id}/${audit_config_id}`);
+    wlog.start("run-audit", {
+      audit_id: auditId,
+      fiche_id,
+      audit_config_id,
+      use_rlm: useRlm,
+      trigger_source: triggerSource,
+      automation_run_id: automationRunId?.toString(),
+    });
 
     await step.run("log-audit-start", async () => {
       logger.info("Starting audit", {
@@ -686,7 +709,52 @@ export const runAuditFunction = inngest.createFunction(
     } as const;
     const runEventId = auditIdFromEvent ?? "";
 
+    const emitTerminalAuditFailure = async (params: {
+      error: string;
+      auditDbId?: string | null;
+      stage: string;
+    }) => {
+      const auditDbId = params.auditDbId ?? null;
+
+      // Best-effort webhook; never fail the workflow due to webhook delivery.
+      await step.run(`send-terminal-failed-webhook-${params.stage}`, async () => {
+        try {
+          await auditWebhooks.failed(
+            auditId,
+            fiche_id,
+            params.error,
+            undefined,
+            undefined,
+            {
+              ...(auditDbId ? { audit_db_id: auditDbId } : {}),
+              ...(runEventId ? { event_id: runEventId } : {}),
+              approach,
+            }
+          );
+        } catch {
+          // ignore (best-effort)
+        }
+        return { notified: true };
+      });
+
+      // Internal domain event (used by batch progress + automation consumers)
+      await step.sendEvent(`emit-audit-failed-terminal-${params.stage}`, {
+        name: "audit/failed",
+        data: {
+          fiche_id,
+          audit_config_id,
+          error: params.error,
+          retry_count: 0,
+          ...(auditDbId ? { audit_db_id: auditDbId } : {}),
+          audit_tracking_id: auditId,
+          stage: params.stage,
+        },
+        id: `audit-failed-${params.stage}-${auditId}`,
+      });
+    };
+
     // Step 1: Always force-refresh fiche details/recordings (audit must use latest recordings)
+    wlog.step("force-refresh-fiche");
     const ficheCacheBefore = await step.run(
       "snapshot-fiche-before-force-refresh",
       async () => {
@@ -758,13 +826,133 @@ export const runAuditFunction = inngest.createFunction(
       }
     );
 
-    const ficheFetchResult = await step.invoke("fetch-fiche", {
-      function: fetchFicheFunction,
-      data: {
+    let ficheFetchResult: unknown;
+    try {
+      ficheFetchResult = await step.invoke("fetch-fiche", {
+        function: fetchFicheFunction,
+        data: {
+          fiche_id,
+          force_refresh: true,
+        },
+      });
+    } catch (err) {
+      // Terminal prereq: upstream fiche 404 / NOT_FOUND.
+      // We want this to be deterministic: mark audit failed (if we can create one) and exit.
+      if (isNotFoundLikeError(err)) {
+        const terminalError = `Fiche ${fiche_id} not found (404)`;
+
+        const auditDbId = await step.run("create-and-fail-audit-on-fiche-not-found", async () => {
+          try {
+            const cacheIdRaw =
+              typeof ficheCacheBefore.cache_id === "string" && ficheCacheBefore.cache_id.trim()
+                ? ficheCacheBefore.cache_id.trim()
+                : null;
+            if (!cacheIdRaw) {return null;}
+
+            const ficheCacheId = BigInt(cacheIdRaw);
+            const { createPendingAudit, markAuditAsFailed } = await import("./audits.repository.js");
+
+            const created = await createPendingAudit(
+              ficheCacheId,
+              BigInt(audit_config_id),
+              auditId,
+              {
+                automationScheduleId,
+                automationRunId,
+                triggerSource: triggerSource ?? "api",
+                triggerUserId,
+                useRlm,
+              }
+            );
+            await markAuditAsFailed(created.id, terminalError);
+            return created.id.toString();
+          } catch {
+            return null;
+          }
+        });
+
+        await emitTerminalAuditFailure({
+          error: terminalError,
+          auditDbId,
+          stage: "fiche_not_found",
+        });
+
+        return {
+          success: false,
+          fiche_id,
+          audit_id: auditDbId ?? "unknown",
+          audit_config_id,
+          score: 0,
+          niveau: "FAILED",
+          duration_ms: Math.max(0, Date.now() - startedAtMs),
+        };
+      }
+
+      throw err;
+    }
+
+    // Terminal prereq: upstream fiche 404 / NOT_FOUND (returned as a result, not thrown).
+    // Mark audit as failed (create row if possible) and exit deterministically.
+    if (isRecord(ficheFetchResult) && (ficheFetchResult as { not_found?: unknown }).not_found === true) {
+      const terminalError = `Fiche ${fiche_id} not found (404)`;
+
+      const auditDbId = await step.run(
+        "create-and-fail-audit-on-fiche-not-found-result",
+        async () => {
+          try {
+            const cacheIdRaw =
+              isRecord(ficheFetchResult) &&
+              typeof (ficheFetchResult as { cache_id?: unknown }).cache_id === "string" &&
+              (ficheFetchResult as { cache_id: string }).cache_id.trim()
+                ? (ficheFetchResult as { cache_id: string }).cache_id.trim()
+                : typeof ficheCacheBefore.cache_id === "string" &&
+                    ficheCacheBefore.cache_id.trim()
+                  ? ficheCacheBefore.cache_id.trim()
+                  : null;
+            if (!cacheIdRaw) {return null;}
+            if (!/^\d+$/.test(cacheIdRaw)) {return null;}
+
+            const ficheCacheId = BigInt(cacheIdRaw);
+            const { createPendingAudit, markAuditAsFailed } = await import(
+              "./audits.repository.js"
+            );
+
+            const created = await createPendingAudit(
+              ficheCacheId,
+              BigInt(audit_config_id),
+              auditId,
+              {
+                automationScheduleId,
+                automationRunId,
+                triggerSource: triggerSource ?? "api",
+                triggerUserId,
+                useRlm,
+              }
+            );
+            await markAuditAsFailed(created.id, terminalError);
+            return created.id.toString();
+          } catch {
+            return null;
+          }
+        }
+      );
+
+      await emitTerminalAuditFailure({
+        error: terminalError,
+        auditDbId,
+        stage: "fiche_not_found",
+      });
+
+      return {
+        success: false,
         fiche_id,
-        force_refresh: true,
-      },
-    });
+        audit_id: auditDbId ?? "unknown",
+        audit_config_id,
+        score: 0,
+        niveau: "FAILED",
+        duration_ms: Math.max(0, Date.now() - startedAtMs),
+      };
+    }
 
     await step.run("log-force-refresh-done", async () => {
       logger.info("Fiche force-refresh completed", {
@@ -773,11 +961,26 @@ export const runAuditFunction = inngest.createFunction(
         fiche_id,
         force_refresh: true,
         fetch_result: {
-          success: ficheFetchResult.success,
-          cached: ficheFetchResult.cached,
-          cache_id: ficheFetchResult.cache_id,
-          recordings_count: ficheFetchResult.recordings_count,
-          cache_check: ficheFetchResult.cache_check,
+          success:
+            isRecord(ficheFetchResult) && typeof ficheFetchResult.success === "boolean"
+              ? ficheFetchResult.success
+              : undefined,
+          cached:
+            isRecord(ficheFetchResult) && typeof ficheFetchResult.cached === "boolean"
+              ? ficheFetchResult.cached
+              : undefined,
+          cache_id:
+            isRecord(ficheFetchResult) && typeof ficheFetchResult.cache_id === "string"
+              ? ficheFetchResult.cache_id
+              : undefined,
+          recordings_count:
+            isRecord(ficheFetchResult) && typeof ficheFetchResult.recordings_count === "number"
+              ? ficheFetchResult.recordings_count
+              : undefined,
+          cache_check:
+            isRecord(ficheFetchResult) && (ficheFetchResult as { cache_check?: unknown }).cache_check !== undefined
+              ? (ficheFetchResult as { cache_check?: unknown }).cache_check
+              : undefined,
         },
         elapsed_ms:
           typeof forceRefreshStartedAt === "number"
@@ -850,7 +1053,10 @@ export const runAuditFunction = inngest.createFunction(
       return { notified: true };
     });
 
+    wlog.stepDone("force-refresh-fiche");
+
     // Step 2: Ensure transcriptions
+    wlog.step("check-transcription-status");
     const transcriptionStatus = await step.run(
       "check-transcription-status",
       async () => {
@@ -889,6 +1095,7 @@ export const runAuditFunction = inngest.createFunction(
       (totalRecordings === 0 || transcribedCount === totalRecordings);
 
     if (!isComplete) {
+      wlog.step("invoke-transcription", { total: transcriptionStatus.total, transcribed: transcriptionStatus.transcribed, pending: (transcriptionStatus.total || 0) - transcribedCount });
       logger.info("Transcriptions incomplete, triggering transcription", {
         fiche_id,
         total: transcriptionStatus.total,
@@ -903,15 +1110,32 @@ export const runAuditFunction = inngest.createFunction(
         },
       });
 
+      wlog.stepDone("invoke-transcription");
       logger.info("Transcription completed", { fiche_id });
     } else {
+      wlog.info("All recordings already transcribed", { count: transcriptionStatus.total });
       logger.info("All recordings already transcribed", {
         fiche_id,
         count: transcriptionStatus.total,
       });
     }
 
+    // Re-check after transcription invocation/wait to avoid proceeding with missing transcripts.
+    // (transcribeFicheFunction waits by default, but we validate the DB state here.)
+    const transcriptionCounts = await step.run("check-transcription-status-after", async () => {
+      const status = await getFicheTranscriptionStatus(fiche_id);
+      return {
+        total: typeof status.total === "number" ? status.total : 0,
+        transcribed: typeof status.transcribed === "number" ? status.transcribed : 0,
+        pending: typeof status.pending === "number" ? status.pending : 0,
+        percentage: typeof status.percentage === "number" ? status.percentage : 0,
+      };
+    });
+
+    wlog.stepDone("check-transcription-status", { total: transcriptionCounts.total, transcribed: transcriptionCounts.transcribed, pending: transcriptionCounts.pending });
+
     // Step 3: Load audit configuration
+    wlog.step("load-audit-config", { audit_config_id });
     const auditConfigRaw = await step.run(
       "load-audit-config",
       async (): Promise<AuditConfigForAnalysis> => {
@@ -942,6 +1166,7 @@ export const runAuditFunction = inngest.createFunction(
     }
     const auditConfig = auditConfigValue;
 
+    wlog.stepDone("load-audit-config", { config_name: auditConfig.name, total_steps: auditConfig.auditSteps.length });
     logger.info("Audit config loaded", {
       config_name: auditConfig.name,
       total_steps: auditConfig.auditSteps.length,
@@ -1067,6 +1292,7 @@ export const runAuditFunction = inngest.createFunction(
     });
 
     const productInfo = await productInfoPromise;
+    wlog.step("generate-timeline");
     const timelineMeta = await step.run("generate-timeline-and-cache-context", async () => {
       logger.info("Building timeline from database", { fiche_id });
       const timeline = normalizeTimelineRecordings(await rebuildTimelineFromDatabase(fiche_id));
@@ -1150,11 +1376,73 @@ export const runAuditFunction = inngest.createFunction(
         ? timelineMeta.cached
         : false;
 
+    wlog.stepDone("generate-timeline", { recordings: recordingsCount, chunks: totalChunks, cached: timelineCached });
     logger.info("Timeline generated", {
       recordings: recordingsCount,
       chunks: totalChunks,
       cached: timelineCached,
     });
+
+    // Terminal prereq: no usable transcribed recordings in DB timeline.
+    // This avoids fan-out + "running" audits that never produce meaningful results.
+    if (recordingsCount === 0) {
+      const total = isRecord(transcriptionCounts) ? Number(transcriptionCounts.total || 0) : 0;
+      const transcribed = isRecord(transcriptionCounts) ? Number(transcriptionCounts.transcribed || 0) : 0;
+      const reason =
+        total <= 0
+          ? `No recordings found for fiche ${fiche_id} (cannot run audit)`
+          : transcribed <= 0
+            ? `No transcriptions available for fiche ${fiche_id} (${transcribed}/${total})`
+            : `No usable transcribed recordings available for fiche ${fiche_id} (timeline empty)`;
+
+      await step.run("mark-audit-failed-terminal-prereq", async () => {
+        try {
+          const { markAuditAsFailed } = await import("./audits.repository.js");
+          await markAuditAsFailed(BigInt(auditDbId), reason);
+        } catch {
+          // ignore (best-effort)
+        }
+        return { marked: true };
+      });
+
+      // Best-effort: cleanup Redis context early (otherwise TTL will eventually expire it).
+      await step.run("cleanup-audit-redis-context-terminal-prereq", async () => {
+        try {
+          const redis = await getRedisClient();
+          if (!redis) {return { cleaned: false as const };}
+          const base = `audit:${auditDbId}`;
+          const keys: string[] = [
+            `${base}:config`,
+            `${base}:timeline`,
+            `${base}:timelineText`,
+            `${base}:productInfo`,
+          ];
+          for (const s of auditConfig.auditSteps || []) {
+            keys.push(`${base}:step:${s.position}:timelineText`);
+          }
+          await redis.del(keys);
+          return { cleaned: true as const, keys: keys.length };
+        } catch {
+          return { cleaned: false as const };
+        }
+      });
+
+      await emitTerminalAuditFailure({
+        error: reason,
+        auditDbId,
+        stage: "missing_transcription",
+      });
+
+      return {
+        success: false,
+        fiche_id,
+        audit_id: String(auditDbId),
+        audit_config_id,
+        score: 0,
+        niveau: "FAILED",
+        duration_ms: Math.max(0, Date.now() - startedAtMs),
+      };
+    }
 
     // Realtime: timeline generated (best-effort)
     await step.run("send-timeline-generated", async () => {
@@ -1203,6 +1491,10 @@ export const runAuditFunction = inngest.createFunction(
     });
 
     // Step 6: Fan-out one event per step so work can be spread across replicas
+    wlog.fanOut("audit/step.analyze", auditConfig.auditSteps.length, {
+      audit_db_id: auditDbId,
+      step_positions: auditConfig.auditSteps.map((s) => s.position),
+    });
     const stepEvents = auditConfig.auditSteps.map((s) => ({
       name: "audit/step.analyze" as const,
       data: {
@@ -1299,6 +1591,9 @@ export const auditStepAnalyzeFunction = inngest.createFunction(
 
     const auditDbId = BigInt(audit_db_id);
     const stepPosition = Number(step_position);
+
+    const wlog = createWorkflowLogger("audit-step", `${fiche_id}/step-${stepPosition}`);
+    wlog.start("analyze-step", { audit_db_id, step_position: stepPosition, use_rlm });
 
     // Idempotency: skip if already analyzed (prevents duplicate webhooks + spend)
     const { prisma: db } = await import("../../shared/prisma.js");
@@ -1814,6 +2109,9 @@ export const finalizeAuditFromStepsFunction = inngest.createFunction(
     const transcriptMode = useRlm ? "tools" : "prompt";
     const approach = { use_rlm: useRlm, transcript_mode: transcriptMode } as const;
     const finalizerEventId = typeof event.id === "string" ? event.id : String(event.id ?? "");
+
+    const wlog = createWorkflowLogger("audit-finalizer", `${fiche_id}/db-${audit_db_id}`);
+    wlog.start("finalize-audit", { audit_db_id, step_position, ok, error: error ?? undefined });
 
     const triggeringStepPosition =
       typeof step_position === "number" && Number.isFinite(step_position)

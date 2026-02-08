@@ -17,6 +17,7 @@ import { prisma } from "../../shared/prisma.js";
 import { getRedisClient } from "../../shared/redis.js";
 import { releaseRedisLock, tryAcquireRedisLock } from "../../shared/redis-lock.js";
 import { transcriptionWebhooks } from "../../shared/webhook.js";
+import { createWorkflowLogger } from "../../shared/workflow-logger.js";
 import { fetchFicheFunction } from "../fiches/fiches.workflows.js";
 import {
   ElevenLabsSpeechToTextError,
@@ -103,6 +104,9 @@ export const transcribeFicheFunction = inngest.createFunction(
         (evt.data as unknown as { wait_for_completion?: boolean })
           ?.wait_for_completion !== false;
 
+      const wlog = createWorkflowLogger("transcription", fiche_id);
+      wlog.start("transcribe-fiche", { priority, wait_for_completion: waitForCompletion, event_id: evt.id });
+
       // Capture start time in a step to persist it across Inngest checkpoints
       const startTimeRaw = await step.run(
         `capture-start-time-${fiche_id}`,
@@ -115,15 +119,17 @@ export const transcribeFicheFunction = inngest.createFunction(
       // Validate API key at function level (non-retriable error)
       const apiKey = normalizeElevenLabsApiKey(process.env.ELEVENLABS_API_KEY);
       if (!apiKey) {
+        wlog.error("ElevenLabs API key not configured!");
         throw new NonRetriableError(
           "ElevenLabs API key not configured (set ELEVENLABS_API_KEY)"
         );
       }
 
-      logger.info("Starting transcription", { fiche_id, priority });
+      wlog.info("API key validated, starting transcription");
 
       // Always force-refresh fiche details before building the transcription plan so the
       // recordings list + recording URLs are always up-to-date.
+      wlog.step("force-refresh-fiche", { fiche_id, force_refresh: true });
       const { startedAt: forceRefreshStartedAt } = await step.run(
         `log-force-refresh-fiche-start-${fiche_id}`,
         async () => {
@@ -146,6 +152,17 @@ export const transcribeFicheFunction = inngest.createFunction(
 
       await step.run(`log-force-refresh-fiche-done-${fiche_id}`, async () => {
         const rr = isRecord(forceRefreshResult) ? (forceRefreshResult as Record<string, unknown>) : {};
+        const result = {
+          ...(typeof rr.success === "boolean" ? { success: rr.success } : {}),
+          ...(typeof rr.cached === "boolean" ? { cached: rr.cached } : {}),
+          ...(typeof rr.cache_id === "string" ? { cache_id: rr.cache_id } : {}),
+          ...(typeof rr.recordings_count === "number"
+            ? { recordings_count: rr.recordings_count }
+            : {}),
+          ...(typeof rr.cache_check === "string" ? { cache_check: rr.cache_check } : {}),
+          ...(typeof rr.not_found === "boolean" ? { not_found: rr.not_found } : {}),
+        };
+        wlog.stepDone("force-refresh-fiche", result);
         logger.info("Fiche force-refresh completed (transcription)", {
           fiche_id,
           force_refresh: true,
@@ -153,18 +170,57 @@ export const transcribeFicheFunction = inngest.createFunction(
             typeof forceRefreshStartedAt === "number"
               ? Math.max(0, Date.now() - forceRefreshStartedAt)
               : undefined,
-          fetch_result: {
-            ...(typeof rr.success === "boolean" ? { success: rr.success } : {}),
-            ...(typeof rr.cached === "boolean" ? { cached: rr.cached } : {}),
-            ...(typeof rr.cache_id === "string" ? { cache_id: rr.cache_id } : {}),
-            ...(typeof rr.recordings_count === "number"
-              ? { recordings_count: rr.recordings_count }
-              : {}),
-            ...(typeof rr.cache_check === "string" ? { cache_check: rr.cache_check } : {}),
-          },
+          fetch_result: result,
         });
         return { logged: true };
       });
+
+      // Terminal: fiche is missing upstream (404). Treat as "skip" and never block downstream.
+      if (forceRefreshResult?.not_found === true) {
+        const durationMs = Math.max(0, Date.now() - startTime);
+        const durationSeconds = Math.max(0, Math.round(durationMs / 1000));
+        const err = "Fiche not found (404)";
+
+        await step.run(`send-transcription-failed-not-found-${fiche_id}`, async () => {
+          await transcriptionWebhooks.failed(fiche_id, err, {
+            total: 0,
+            transcribed: 0,
+            failed: 0,
+          });
+          return { notified: true };
+        });
+
+        await step.sendEvent(`emit-completion-${fiche_id}`, {
+          name: "fiche/transcribed",
+          data: {
+            fiche_id,
+            transcribed_count: 0,
+            cached_count: 0,
+            failed_count: 0,
+            duration_ms: durationMs,
+          },
+        });
+
+        await step.run(`log-transcription-skipped-not-found-${fiche_id}`, async () => {
+          logger.warn("Skipping transcription: fiche marked NOT_FOUND", {
+            fiche_id,
+            duration_seconds: durationSeconds,
+          });
+          return { logged: true };
+        });
+
+        results.push({
+          success: false,
+          fiche_id,
+          cached: true,
+          total: 0,
+          transcribed: 0,
+          newTranscriptions: 0,
+          failed: 0,
+          error: err,
+        });
+        continue;
+      }
 
       // Load a JSON-safe plan from DB (we need recordingUrl to fan-out work per recording).
       const plan = await step.run(
@@ -220,6 +276,13 @@ export const transcribeFicheFunction = inngest.createFunction(
         }
       );
 
+      wlog.stepDone("load-plan", {
+        total: plan.totalRecordings,
+        already_transcribed: plan.alreadyTranscribed,
+        to_transcribe: plan.toTranscribe.length,
+        missing_url: plan.missingRecordingUrlCount,
+        missing_url_to_transcribe: plan.missingRecordingUrlToTranscribeCount,
+      });
       logger.info("Transcription plan built", {
         fiche_id,
         total: plan.totalRecordings,
@@ -289,11 +352,18 @@ export const transcribeFicheFunction = inngest.createFunction(
       );
 
       // Prefer Redis-backed aggregation when available (avoids DB polling + is multi-replica safe).
+      wlog.step("check-redis");
       let redis = null as Awaited<ReturnType<typeof getRedisClient>>;
       try {
         redis = await getRedisClient();
       } catch {
         redis = null;
+      }
+      if (redis) {
+        wlog.stepDone("check-redis", { available: true });
+      } else {
+        wlog.warn("Redis NOT available! Finalizer will be SKIPPED. Completion signals will NOT fire.");
+        wlog.stepDone("check-redis", { available: false });
       }
 
       // Acquire a cross-replica lock to prevent duplicate transcription work for the same fiche.
@@ -317,6 +387,7 @@ export const transcribeFicheFunction = inngest.createFunction(
       // If another replica already owns the lock, optionally wait for completion so downstream
       // workflows (eg. audits) never proceed with missing transcriptions.
       if (!lock.acquired) {
+        wlog.warn("Lock NOT acquired - another transcription is already running", { lockKey, lock_enabled: lock.enabled });
         logger.warn("Transcription already in progress for fiche", {
           fiche_id,
           lockKey,
@@ -353,6 +424,8 @@ export const transcribeFicheFunction = inngest.createFunction(
       const toTranscribeCount = toTranscribe.length;
       const targetCallIds = toTranscribe.map((r) => r.callId);
 
+      wlog.info("Lock acquired, starting run", { run_id: runId, lock_enabled: lock.enabled, to_transcribe: toTranscribeCount, call_ids: targetCallIds.slice(0, 5) });
+
       // Send workflow started webhook now that we own the lock
       await step.run(`send-transcription-started-${fiche_id}`, async () => {
         await transcriptionWebhooks.started(fiche_id, totalRecordings, priority);
@@ -361,6 +434,7 @@ export const transcribeFicheFunction = inngest.createFunction(
 
       // If Redis is available, persist a run state so a finalizer can aggregate without polling.
       if (redis) {
+        wlog.step("store-redis-run-state", { run_id: runId, pending_count: targetCallIds.length });
         const redisClient = redis;
         const ttlSeconds = Math.max(
           60,
@@ -402,6 +476,9 @@ export const transcribeFicheFunction = inngest.createFunction(
 
           return { stored: true, run_id: runId };
         });
+        wlog.stepDone("store-redis-run-state");
+      } else {
+        wlog.warn("No Redis -- run state NOT stored. Finalizer will skip. No completion event will fire!");
       }
 
       // Fan-out: dispatch one event per recording so work is distributed across replicas.
@@ -433,6 +510,10 @@ export const transcribeFicheFunction = inngest.createFunction(
         const ids = idsRaw
           .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
           .slice(0, 10);
+        wlog.fanOut("transcription/recording.transcribe", recordingEvents.length, {
+          run_id: runId,
+          call_ids: targetCallIds.slice(0, 10),
+        });
         logger.info("Dispatched transcription/recording.transcribe fan-out events", {
           fiche_id,
           run_id: runId,
@@ -446,6 +527,8 @@ export const transcribeFicheFunction = inngest.createFunction(
 
       // If we're in "enqueue" mode, return immediately; finalizer will emit progress/completion.
       if (!waitForCompletion) {
+        wlog.info("Enqueue mode (wait_for_completion=false) - returning immediately. Finalizer handles completion.");
+        wlog.end("enqueued", { run_id: runId, recordings_dispatched: toTranscribeCount });
         results.push({
           success: true,
           fiche_id,
@@ -786,6 +869,9 @@ export const transcribeRecordingFunction = inngest.createFunction(
     const eventId = typeof event.id === "string" ? event.id : String(event.id ?? "");
     const workerStartedAt = Date.now();
     let attempt = 0;
+
+    const wlog = createWorkflowLogger("tx-worker", `${fiche_id}/${call_id}`);
+    wlog.start("transcribe-recording", { run_id, recording_index, total_to_transcribe, recording_url: recording_url?.slice(0, 80) });
 
     logger.info("Recording transcription worker started", {
       event_id: eventId,
@@ -1152,8 +1238,13 @@ export const finalizeFicheTranscriptionFunction = inngest.createFunction(
   async ({ event, step, logger }) => {
     const { run_id, fiche_id, call_id, ok, cached, error } = event.data;
 
+    const wlog = createWorkflowLogger("tx-finalizer", `${fiche_id}/${call_id}`);
+    wlog.start("finalize-recording", { run_id, ok, cached, error: error ?? undefined });
+
     const redis = await getRedisClient();
     if (!redis) {
+      wlog.error("Redis NOT available! Finalizer SKIPPED. No completion/progress events will fire.");
+      wlog.end("skipped", { reason: "redis_not_configured" });
       return { skipped: true, reason: "redis_not_configured" };
     }
 
@@ -1255,15 +1346,13 @@ export const finalizeFicheTranscriptionFunction = inngest.createFunction(
 
     if (remainingCount > 0) {
       if (!ok) {
-        logger.warn("Recording transcribed event marked failed", {
-          run_id,
-          fiche_id,
-          call_id,
-          error,
-        });
+        wlog.warn("Recording marked FAILED", { call_id, error });
       }
+      wlog.end("waiting", { remaining: remainingCount, processed, failed: failedCount, target: targetTotal });
       return { ok, run_id, fiche_id, call_id, remaining: remainingCount };
     }
+
+    wlog.info("All recordings processed! Finalizing run...", { processed, failed: failedCount, cached: cachedCount });
 
     // Finalize once (idempotent)
     const finalized = await step.run(`mark-finalized-${run_id}`, async () => {

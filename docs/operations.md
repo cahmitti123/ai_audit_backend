@@ -92,6 +92,12 @@ Workflow tracer DB persistence is controlled by `WORKFLOW_LOG_DB_ENABLED=1` (wri
 Metadata is sanitized/redacted before being persisted (see `src/shared/log-sanitizer.ts`).
 Make sure the DB schema is up to date (apply migrations via `npx prisma migrate dev` or `npx prisma migrate deploy`).
 
+### End-to-end reliability verification (stuck → fixed)
+
+For a **step-by-step runbook** to reproduce a stuck automation run and prove the fix (using workflow logs + DB status), see:
+
+- `./workflow-reliability-verification-checklist.md`
+
 
 
 

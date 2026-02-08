@@ -28,6 +28,9 @@ services:
     restart: unless-stopped
     ports:
       - "3002:3002"
+    # Inject all variables from the chosen env file into the container.
+    env_file:
+      - ${ENV_FILE:-.env}
     environment:
       - NODE_ENV=production
       - PORT=3002

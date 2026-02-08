@@ -34,6 +34,16 @@ services:
       - ai-audit-network
     depends_on:
       - server
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O - http://localhost/health >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
     logging:
       driver: "json-file"
       options:
@@ -48,6 +58,10 @@ services:
       dockerfile: Dockerfile
       target: production
     restart: always
+    # Inject all variables from the chosen env file into the container.
+    # (Compose still uses `--env-file` for ${VAR} interpolation in this YAML.)
+    env_file:
+      - ${ENV_FILE:-.env}
     environment:
       - NODE_ENV=production
       - PORT=3002
@@ -140,7 +154,9 @@ services:
       - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
       - INNGEST_LOG_LEVEL=info
       - INNGEST_POLL_INTERVAL=${INNGEST_POLL_INTERVAL:-60}
-    command: inngest start --sdk-url http://lb/api/inngest --poll-interval ${INNGEST_POLL_INTERVAL:-60}
+    # Default to the load balancer so invocations distribute across replicas.
+    # If you ever need a "bypass LB" fallback, set INNGEST_SDK_URL=http://server:3002/api/inngest.
+    command: inngest start --sdk-url ${INNGEST_SDK_URL:-http://lb/api/inngest} --poll-interval ${INNGEST_POLL_INTERVAL:-60}
     networks:
       - ai-audit-network
     healthcheck:
@@ -151,7 +167,7 @@ services:
       start_period: 60s
     depends_on:
       lb:
-        condition: service_started
+        condition: service_healthy
     logging:
       driver: "json-file"
       options:

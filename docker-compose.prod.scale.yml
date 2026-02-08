@@ -33,8 +33,6 @@ services:
     networks:
       - ai-audit-network
     healthcheck:
-      # Avoid relying on tools like wget/curl inside the image.
-      # `nginx -t` is available in the image and ensures the config is valid.
       test: ["CMD", "nginx", "-t"]
       interval: 10s
       timeout: 3s
@@ -54,42 +52,20 @@ services:
       dockerfile: Dockerfile
       target: production
     restart: always
-    # Inject all variables from the chosen env file into the container.
-    # (Compose still uses `--env-file` for ${VAR} interpolation in this YAML.)
     env_file:
       - ${ENV_FILE:-.env}
     environment:
       - NODE_ENV=production
-      - PORT=3002
+      - PORT=${PORT:-3002}
       - DATABASE_URL=${DATABASE_URL}
       - DIRECT_URL=${DIRECT_URL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
       - FICHE_API_BASE_URL=${FICHE_API_BASE_URL}
+      - FICHE_API_URL=${FICHE_API_URL}
       - FICHE_API_AUTH_TOKEN=${FICHE_API_AUTH_TOKEN}
       - FICHE_SALES_INCLUDE_RECORDINGS=${FICHE_SALES_INCLUDE_RECORDINGS:-1}
-      # User authentication (JWT + refresh tokens)
-      - JWT_ACCESS_SECRET=${JWT_ACCESS_SECRET}
-      - JWT_ISSUER=${JWT_ISSUER:-ai-audit}
-      - JWT_AUDIENCE=${JWT_AUDIENCE:-ai-audit}
-      - AUTH_ACCESS_TTL_SECONDS=${AUTH_ACCESS_TTL_SECONDS:-900}
-      - AUTH_REFRESH_TTL_SECONDS=${AUTH_REFRESH_TTL_SECONDS:-2592000}
-      - AUTH_REFRESH_COOKIE_NAME=${AUTH_REFRESH_COOKIE_NAME:-refresh_token}
-      - AUTH_COOKIE_SECURE=${AUTH_COOKIE_SECURE}
-      - AUTH_COOKIE_SAMESITE=${AUTH_COOKIE_SAMESITE:-lax}
-      - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
-      - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
-      - INNGEST_BASE_URL=http://inngest:8288
-      - INNGEST_DEV=0
-      - WEBHOOK_ALLOWED_ORIGINS=${WEBHOOK_ALLOWED_ORIGINS}
-      # Pusher Channels (server-side publishing)
-      - PUSHER_APP_ID=${PUSHER_APP_ID}
-      - PUSHER_KEY=${PUSHER_KEY}
-      - PUSHER_SECRET=${PUSHER_SECRET}
-      - PUSHER_CLUSTER=${PUSHER_CLUSTER}
-      - PUSHER_USE_PRIVATE_CHANNELS=${PUSHER_USE_PRIVATE_CHANNELS:-1}
-      - PUSHER_MAX_PAYLOAD_BYTES=${PUSHER_MAX_PAYLOAD_BYTES:-9000}
       - VECTOR_STORE_ID=${VECTOR_STORE_ID}
       - VECTOR_STORE_MAX_RESULTS=${VECTOR_STORE_MAX_RESULTS:-5}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379}
@@ -103,14 +79,61 @@ services:
       - AUTOMATION_SCHEDULER_CRON=${AUTOMATION_SCHEDULER_CRON:-*/1 * * * *}
       - AUTOMATION_SCHEDULER_WINDOW_MINUTES=${AUTOMATION_SCHEDULER_WINDOW_MINUTES:-20}
       - AUTOMATION_MAX_RECORDINGS_PER_FICHE=${AUTOMATION_MAX_RECORDINGS_PER_FICHE:-0}
-      # Optional: seed an initial admin user (idempotent). Remove after first deploy if desired.
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-0}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - SMTP_FROM=${SMTP_FROM}
+      - SMTP_TIMEOUT_MS=${SMTP_TIMEOUT_MS:-10000}
+      - SERVER_REPLICAS=${SERVER_REPLICAS:-6}
+      # JWT / Auth
+      - JWT_ACCESS_SECRET=${JWT_ACCESS_SECRET}
+      - JWT_ISSUER=${JWT_ISSUER:-ai-audit}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:-ai-audit}
+      - AUTH_ACCESS_TTL_SECONDS=${AUTH_ACCESS_TTL_SECONDS:-900}
+      - AUTH_REFRESH_TTL_SECONDS=${AUTH_REFRESH_TTL_SECONDS:-2592000}
+      - AUTH_REFRESH_COOKIE_NAME=${AUTH_REFRESH_COOKIE_NAME:-refresh_token}
+      - AUTH_COOKIE_SECURE=${AUTH_COOKIE_SECURE}
+      - AUTH_COOKIE_SAMESITE=${AUTH_COOKIE_SAMESITE:-lax}
       - AUTH_SEED_ADMIN_EMAIL=${AUTH_SEED_ADMIN_EMAIL}
       - AUTH_SEED_ADMIN_PASSWORD=${AUTH_SEED_ADMIN_PASSWORD}
-      # Inngest scaling:
-      # - INNGEST_PARALLELISM_PER_SERVER: how many tasks each server replica can run in parallel (default 10)
-      # - INNGEST_SERVER_REPLICAS: how many `server` containers you scaled to (ex: --scale server=6)
+      - API_AUTH_TOKEN=${API_AUTH_TOKEN}
+      # Inngest / Schedule
+      - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
+      - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
+      - INNGEST_BASE_URL=http://inngest:8288
+      - INNGEST_DEV=${INNGEST_DEV:-0}
+      - INNGEST_PORT=${INNGEST_PORT:-8288}
+      - INNGEST_CONNECT_PORT=${INNGEST_CONNECT_PORT:-8289}
       - INNGEST_PARALLELISM_PER_SERVER=${INNGEST_PARALLELISM_PER_SERVER:-10}
       - INNGEST_SERVER_REPLICAS=${SERVER_REPLICAS:-6}
+      - INNGEST_POLL_INTERVAL=${INNGEST_POLL_INTERVAL:-60}
+      # Webhooks
+      - FRONTEND_WEBHOOK_URL=${FRONTEND_WEBHOOK_URL}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - WEBHOOK_TIMEOUT=${WEBHOOK_TIMEOUT:-10000}
+      - WEBHOOK_MAX_ATTEMPTS=${WEBHOOK_MAX_ATTEMPTS:-3}
+      - WEBHOOK_ALLOWED_ORIGINS=${WEBHOOK_ALLOWED_ORIGINS}
+      # Pusher
+      - PUSHER_APP_ID=${PUSHER_APP_ID}
+      - PUSHER_KEY=${PUSHER_KEY}
+      - PUSHER_SECRET=${PUSHER_SECRET}
+      - PUSHER_CLUSTER=${PUSHER_CLUSTER}
+      - PUSHER_USE_PRIVATE_CHANNELS=${PUSHER_USE_PRIVATE_CHANNELS:-1}
+      - PUSHER_MAX_PAYLOAD_BYTES=${PUSHER_MAX_PAYLOAD_BYTES:-9000}
+      - PUSHER_DRY_RUN=${PUSHER_DRY_RUN:-0}
+      # Logging
+      - WORKFLOW_LOG_DB_ENABLED=${WORKFLOW_LOG_DB_ENABLED:-1}
+      - WORKFLOW_DEBUG_LOG_TO_FILE=${WORKFLOW_DEBUG_LOG_TO_FILE:-1}
+      - AUDIT_DEBUG_LOG_TO_FILE=${AUDIT_DEBUG_LOG_TO_FILE:-1}
+      - TRANSCRIPTION_DEBUG_LOG_TO_FILE=${TRANSCRIPTION_DEBUG_LOG_TO_FILE:-1}
+      - FICHE_DEBUG_LOG_TO_FILE=${FICHE_DEBUG_LOG_TO_FILE:-1}
+      - AUTOMATION_DEBUG_LOG_TO_FILE=${AUTOMATION_DEBUG_LOG_TO_FILE:-1}
+      # Transcription
+      - TRANSCRIPTION_ELEVENLABS_RATE_LIMIT_PER_MINUTE=${TRANSCRIPTION_ELEVENLABS_RATE_LIMIT_PER_MINUTE:-60}
+      - TRANSCRIPTION_RECORDING_WORKER_CONCURRENCY=${TRANSCRIPTION_RECORDING_WORKER_CONCURRENCY:-0}
+      - TRANSCRIPTION_RECORDING_PER_FICHE_CONCURRENCY=${TRANSCRIPTION_RECORDING_PER_FICHE_CONCURRENCY:-0}
     volumes:
       - audit-data:/app/data
     networks:
@@ -124,7 +147,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "require('http').get('http://localhost:3002/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})",
+          "require('http').get('http://localhost:${PORT:-3002}/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})",
         ]
       interval: 30s
       timeout: 10s
@@ -142,7 +165,6 @@ services:
     image: inngest/inngest:latest
     restart: always
     ports:
-      # Bind to localhost (access UI via SSH tunnel in prod).
       - "0.0.0.0:${INNGEST_PORT:-8288}:8288"
       - "0.0.0.0:${INNGEST_CONNECT_PORT:-8289}:8289"
     environment:
@@ -150,8 +172,7 @@ services:
       - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
       - INNGEST_LOG_LEVEL=info
       - INNGEST_POLL_INTERVAL=${INNGEST_POLL_INTERVAL:-60}
-    # Default to the load balancer so invocations distribute across replicas.
-    # If you ever need a "bypass LB" fallback, set INNGEST_SDK_URL=http://server:3002/api/inngest.
+      - INNGEST_SDK_URL=${INNGEST_SDK_URL:-http://lb/api/inngest}
     command: inngest start --sdk-url ${INNGEST_SDK_URL:-http://lb/api/inngest} --poll-interval ${INNGEST_POLL_INTERVAL:-60}
     networks:
       - ai-audit-network
@@ -179,5 +200,3 @@ volumes:
     driver: local
   redis-data:
     driver: local
-
-

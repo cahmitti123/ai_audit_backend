@@ -41,9 +41,12 @@ services:
           "wget -q -O - http://localhost/health >/dev/null 2>&1 || exit 1",
         ]
       interval: 10s
-      timeout: 3s
+      timeout: 5s
       retries: 30
-      start_period: 30s
+      # Must be longer than server start_period (60s) + time for at least
+      # one of N replicas to pass its own health check. With 20 replicas
+      # competing for resources at startup, 90s is a safe minimum.
+      start_period: 90s
     logging:
       driver: "json-file"
       options:

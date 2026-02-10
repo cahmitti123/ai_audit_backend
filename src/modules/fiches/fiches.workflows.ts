@@ -169,7 +169,9 @@ export const fetchFicheFunction = inngest.createFunction(
     ],
     name: "Fetch Fiche from API",
     retries: 3,
-    rateLimit: {
+    // IMPORTANT: Use `throttle` (not `rateLimit`). Inngest `rateLimit` permanently skips
+    // (drops) events over the limit. `throttle` queues them for later execution (FIFO).
+    throttle: {
       ...RATE_LIMITS.FICHE_FETCH,
       key: "event.data.fiche_id",
     },
@@ -864,7 +866,9 @@ export const revalidateFichesFunction = inngest.createFunction(
     id: "revalidate-fiches-for-date",
     name: "Revalidate Fiches for Date",
     retries: 3,
-    rateLimit: {
+    // IMPORTANT: Use `throttle` (not `rateLimit`). Inngest `rateLimit` permanently skips
+    // (drops) events over the limit. `throttle` queues them for later execution (FIFO).
+    throttle: {
       limit: 20,
       period: "1m",
     },
@@ -916,7 +920,9 @@ export const cacheSalesListFunction = inngest.createFunction(
     id: "cache-sales-list-for-date-range",
     name: "Cache Sales List for Date Range",
     retries: 2, // Reduced retries since we handle timeouts gracefully
-    rateLimit: {
+    // IMPORTANT: Use `throttle` (not `rateLimit`). Inngest `rateLimit` permanently skips
+    // (drops) events over the limit. `throttle` queues them for later execution (FIFO).
+    throttle: {
       limit: 20,
       period: "1m",
     },
@@ -1219,7 +1225,9 @@ export const progressiveFetchContinueFunction = inngest.createFunction(
     id: "progressive-fetch-continue",
     name: "Progressive Fetch Continuation",
     retries: 2,
-    rateLimit: {
+    // IMPORTANT: Use `throttle` (not `rateLimit`). Inngest `rateLimit` permanently skips
+    // (drops) events over the limit. `throttle` queues them for later execution (FIFO).
+    throttle: {
       limit: 20,
       period: "1m",
     },
@@ -1306,7 +1314,9 @@ export const progressiveFetchDayFunction = inngest.createFunction(
     id: "progressive-fetch-day",
     name: "Progressive Fetch - Fetch & Cache Single Day",
     retries: 2,
-    rateLimit: {
+    // IMPORTANT: Use `throttle` (not `rateLimit`). Inngest `rateLimit` permanently skips
+    // (drops) events over the limit. `throttle` queues them for later execution (FIFO).
+    throttle: {
       limit: 20,
       period: "1m",
       key: "event.data.date",

@@ -723,9 +723,10 @@ export const runAutomationFunction = inngest.createFunction(
         }
 
         // Step 3c: Fetch fiches (ALWAYS revalidate cache first, then read from DB)
-        const allFiches = await step.run(
+        // Returns only fiche IDs (not full objects) to stay within Inngest's 4 MB step-output limit.
+        const fetchedFicheIds = await step.run(
           "fetch-all-fiches",
-          async (): Promise<unknown[]> => {
+          async (): Promise<string[]> => {
             const { getFichesByDateRangeWithStatus } = await import(
               "../fiches/fiches.service.js"
             );
@@ -902,88 +903,88 @@ export const runAutomationFunction = inngest.createFunction(
               api_errors: apiErrors.length,
             });
 
-            return dbResult.fiches;
-          }
-        );
-        
-        // Process fiches (extract IDs)
-        await log(
-          "info",
-          `Processing ${allFiches.length} fiches from DB (post-revalidation)`
-        );
-        
-        // NOTE: Do NOT filter by recordings here.
-        // Date-range lists are often "sales list only" until we fetch fiche details.
-        // We'll fetch fiche details in the next step and then determine which fiches truly have recordings.
-        let filteredFiches: unknown[] = allFiches;
+            // ── Apply filters INSIDE the step so we only return small fiche IDs,
+            //    not the full fiche objects (which can exceed Inngest's 4 MB step-output limit).
+            let filteredFiches: unknown[] = dbResult.fiches;
 
-        // Optional DB-level filters (applied on the post-revalidation DB snapshot)
-        if (Array.isArray(selection.groupes) && selection.groupes.length > 0) {
-          const allowed = new Set(
-            selection.groupes
-              .map((g) => (typeof g === "string" ? g.trim() : ""))
-              .filter(Boolean)
-          );
-          if (allowed.size > 0) {
-            const before = filteredFiches.length;
-            let unknownGroupKept = 0;
-            filteredFiches = filteredFiches.filter((fiche) => {
-              if (!isRecord(fiche)) {return false;}
-              const g = getStringField(fiche, "groupe");
-              // IMPORTANT: sales-list-only cache rows may not have `groupe` yet.
-              // If groupe is missing, keep the fiche and apply the real group filter
-              // AFTER fetching full fiche details (where groupe is authoritative).
-              if (typeof g !== "string" || !g.trim()) {
-                unknownGroupKept++;
-                return true;
+            // Optional DB-level filters (applied on the post-revalidation DB snapshot)
+            if (Array.isArray(selection.groupes) && selection.groupes.length > 0) {
+              const allowed = new Set(
+                selection.groupes
+                  .map((g) => (typeof g === "string" ? g.trim() : ""))
+                  .filter(Boolean)
+              );
+              if (allowed.size > 0) {
+                const before = filteredFiches.length;
+                let unknownGroupKept = 0;
+                filteredFiches = filteredFiches.filter((fiche) => {
+                  if (!isRecord(fiche)) {return false;}
+                  const g = getStringField(fiche, "groupe");
+                  // IMPORTANT: sales-list-only cache rows may not have `groupe` yet.
+                  // If groupe is missing, keep the fiche and apply the real group filter
+                  // AFTER fetching full fiche details (where groupe is authoritative).
+                  if (typeof g !== "string" || !g.trim()) {
+                    unknownGroupKept++;
+                    return true;
+                  }
+                  return allowed.has(g);
+                });
+                await log("info", `Filtered fiches by groupes (${allowed.size}) (best-effort)`, {
+                  before,
+                  after: filteredFiches.length,
+                  unknown_group_kept: unknownGroupKept,
+                  groupes: Array.from(allowed),
+                });
               }
-              return allowed.has(g);
+            }
+
+            if (selection.onlyUnaudited === true) {
+              const before = filteredFiches.length;
+              filteredFiches = filteredFiches.filter((fiche) => {
+                if (!isRecord(fiche)) {return false;}
+                const audit = fiche.audit;
+                if (!isRecord(audit)) {return true;}
+                const total = (audit as { total?: unknown }).total;
+                return typeof total === "number" ? total === 0 : true;
+              });
+              await log("info", "Filtered fiches: onlyUnaudited=true", {
+                before,
+                after: filteredFiches.length,
+              });
+            }
+
+            if (selection.onlyWithRecordings) {
+              await log(
+                "info",
+                "onlyWithRecordings is enabled - will filter AFTER fetching fiche details",
+                { totalCandidates: dbResult.fiches.length }
+              );
+            }
+
+            // Apply max limit
+            if (selection.maxFiches && filteredFiches.length > selection.maxFiches) {
+              filteredFiches = filteredFiches.slice(0, selection.maxFiches);
+              await log("info", `Limited to ${selection.maxFiches} fiches`);
+            }
+
+            // Extract final IDs (deduped, stable order) — only IDs are returned
+            // to keep step output well under Inngest's size limit.
+            const extractedIds = filteredFiches
+              .map(getFicheId)
+              .filter((id): id is string => typeof id === "string" && id.length > 0);
+            const uniqueIds = Array.from(new Set(extractedIds));
+
+            await log("info", `Final: ${uniqueIds.length} fiche IDs to process (from ${dbResult.fiches.length} loaded)`, {
+              loaded: dbResult.fiches.length,
+              afterFilters: filteredFiches.length,
+              uniqueIds: uniqueIds.length,
             });
-            await log("info", `Filtered fiches by groupes (${allowed.size}) (best-effort)`, {
-              before,
-              after: filteredFiches.length,
-              unknown_group_kept: unknownGroupKept,
-              groupes: Array.from(allowed),
-            });
+
+            return uniqueIds;
           }
-        }
+        );
 
-        if (selection.onlyUnaudited === true) {
-          const before = filteredFiches.length;
-          filteredFiches = filteredFiches.filter((fiche) => {
-            if (!isRecord(fiche)) {return false;}
-            const audit = fiche.audit;
-            if (!isRecord(audit)) {return true;}
-            const total = (audit as { total?: unknown }).total;
-            return typeof total === "number" ? total === 0 : true;
-          });
-          await log("info", "Filtered fiches: onlyUnaudited=true", {
-            before,
-            after: filteredFiches.length,
-          });
-        }
-
-        if (selection.onlyWithRecordings) {
-          await log(
-            "info",
-            "onlyWithRecordings is enabled - will filter AFTER fetching fiche details",
-            { totalCandidates: allFiches.length }
-          );
-        }
-        
-        // Apply max limit
-        if (selection.maxFiches && filteredFiches.length > selection.maxFiches) {
-          filteredFiches = filteredFiches.slice(0, selection.maxFiches);
-          await log("info", `Limited to ${selection.maxFiches} fiches`);
-        }
-        
-        // Extract final IDs (deduped, stable order)
-        const extractedIds = filteredFiches
-          .map(getFicheId)
-          .filter((id): id is string => typeof id === "string" && id.length > 0);
-        ficheIds = Array.from(new Set(extractedIds));
-        
-        await log("info", `Final: ${ficheIds.length} fiches to process`);
+        ficheIds = fetchedFicheIds;
 
         await step.run("realtime-selection", async () => {
           const groupes =

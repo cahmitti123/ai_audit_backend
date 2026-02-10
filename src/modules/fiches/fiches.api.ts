@@ -226,29 +226,16 @@ function toFicheApiError(
 }
 
 /**
- * Convert YYYY-MM-DD to DD/MM/YYYY format for CRM API
- */
-function convertToCRMDateFormat(dateStr: string): string {
-  const parts = dateStr.split("-");
-  if (parts.length === 3) {
-    return `${parts[2]}/${parts[1]}/${parts[0]}`; // DD/MM/YYYY
-  }
-  return dateStr;
-}
-
-/**
  * Fetch sales list for a date range
- * NOTE: CRM API only accepts single dates, so for ranges we fetch startDate only
- * Background jobs will handle fetching each day individually
  *
- * IMPORTANT: For date range requests, recordings are NOT included (performance optimization)
- * Recordings are only fetched when requesting individual fiche details
+ * Uses the CRM `/fiches/sales-with-calls` endpoint which applies a proper
+ * sales-status filter (status_id=53) server-side. Dates are passed in
+ * YYYY-MM-DD format; the gateway converts internally.
  *
- * @param startDate - Start date in YYYY-MM-DD format (will be converted to DD/MM/YYYY for CRM)
- * @param endDate - End date in YYYY-MM-DD format (ignored - CRM only accepts single dates)
+ * @param startDate - Start date in YYYY-MM-DD format
+ * @param endDate   - End date in YYYY-MM-DD format
  * @param options - Optional parameters
- * @param options.statusId - Status ID to filter (NOT USED - CRM endpoint doesn't support status filtering)
- * @param options.includeRecordings - Include call recordings (default: FALSE for performance)
+ * @param options.includeRecordings - Include call recordings (default: TRUE)
  */
 export async function fetchSalesWithCalls(
   startDate: string,
@@ -258,19 +245,12 @@ export async function fetchSalesWithCalls(
     includeRecordings?: boolean;
   }
 ): Promise<SalesWithCallsResponse> {
-  // DEFAULT to TRUE - recordings fetched only on fiche details request
   const includeRecordings = options?.includeRecordings ?? true;
 
-  // Convert startDate from YYYY-MM-DD to DD/MM/YYYY for CRM API
-  // NOTE: CRM API only accepts single date, not ranges!
-  const crmDate = convertToCRMDateFormat(startDate);
-
-  logger.info("Fetching sales for single date", {
+  logger.info("Fetching sales with calls", {
     start_date: startDate,
     end_date: endDate,
-    crm_date: crmDate,
-    note:
-      startDate === endDate ? "single day" : "range (fetching start date only)",
+    status_id: 53,
     include_recordings: includeRecordings,
     optimization: includeRecordings
       ? "with recordings"
@@ -278,21 +258,27 @@ export async function fetchSalesWithCalls(
   });
 
   try {
-    // CRM API endpoint: /fiches/search/by-date-with-calls
+    // CRM API endpoint: /fiches/sales-with-calls
+    // This is the correct sales endpoint with a built-in status filter.
+    // The gateway builds 3 CRM criteria:
+    //   critere_1=1 + recherche_1=53   → Status = Sales
+    //   critere_2=6 + recherche_2=start_date → Date from
+    //   critere_3=4 + recherche_3=end_date   → Date to
     // Parameters:
-    //   - date: DD/MM/YYYY format
-    //   - criteria_type: 1 (filter by date_insertion)  //   - include_recordings: true/false
+    //   - start_date: YYYY-MM-DD
+    //   - end_date:   YYYY-MM-DD
+    //   - status_id:  53 (Sales)
+    //   - include_recordings: true/false
     //   - include_transcriptions: false (we handle our own)
-    //   - force_new_session: false
     const params = new URLSearchParams({
-      date: crmDate,
-      criteria_type: "1",
+      start_date: startDate,
+      end_date: endDate,
+      status_id: "53",
       include_recordings: String(includeRecordings),
       include_transcriptions: "false",
-      force_new_session: "false",
     });
 
-    const path = "/api/fiches/search/by-date-with-calls";
+    const path = "/api/fiches/sales-with-calls";
     const response = await withFicheApiRetry(
       { operation: "fetchSalesWithCalls", path },
       async () => {
@@ -321,7 +307,7 @@ export async function fetchSalesWithCalls(
 
     return validatedData;
   } catch (error) {
-    const path = "/api/fiches/search/by-date-with-calls";
+    const path = "/api/fiches/sales-with-calls";
     const meta = getAxiosErrorMeta(error);
     const message = error instanceof Error ? error.message : String(error);
 
@@ -336,7 +322,7 @@ export async function fetchSalesWithCalls(
 
     throw toFicheApiError(error, {
       path,
-      message: `Failed to fetch sales with calls for ${startDate}${startDate === endDate ? "" : `..${endDate}`}`,
+      message: `Failed to fetch sales with calls for ${startDate}..${endDate}`,
     });
   }
 }

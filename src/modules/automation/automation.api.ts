@@ -127,12 +127,20 @@ function getEmailTransport(): { transporter: Transporter; from: string } | null 
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
+ * Convert DD/MM/YYYY to YYYY-MM-DD for the sales-with-calls endpoint.
+ */
+function convertToIsoDate(ddmmyyyy: string): string {
+  const [day, month, year] = ddmmyyyy.split("/");
+  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+}
+
+/**
  * Fetch fiches for a single date from external CRM API
- * NOTE: We use the CRM "by-date-with-calls" endpoint so we can cache sales summaries
- * with recordings metadata (call IDs + URLs when available).
+ * Uses the `/fiches/sales-with-calls` endpoint which applies a proper
+ * sales-status filter (status_id=53) server-side.
  * 
- * @param date - Date in DD/MM/YYYY format
- * @param onlyWithRecordings - Filter for fiches with recordings (not supported by API yet)
+ * @param date - Date in DD/MM/YYYY format (converted to YYYY-MM-DD for the API)
+ * @param onlyWithRecordings - Filter for fiches with recordings (best-effort client-side)
  * @param apiKey - Optional API key for authentication
  * @returns Array of basic fiche data
  */
@@ -141,19 +149,22 @@ export async function fetchFichesForDate(
   onlyWithRecordings: boolean,
   apiKey?: string
 ): Promise<unknown[]> {
+  const isoDate = convertToIsoDate(date);
+
   const params = new URLSearchParams({
-    date: date,
-    criteria_type: "1",
+    start_date: isoDate,
+    end_date: isoDate,
+    status_id: "53",
     include_recordings: "true",
     include_transcriptions: "false",
-    force_new_session: "false",
   });
 
-  const url = gateway.url("/fiches/search/by-date-with-calls", params);
+  const url = gateway.url("/fiches/sales-with-calls", params);
 
   try {
     logger.debug(`Fetching fiches for ${date}`, {
       url,
+      isoDate,
       params: params.toString(),
     });
 

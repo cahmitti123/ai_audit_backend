@@ -13,9 +13,11 @@
 - **Progressive fiche date-range jobs** run distributed per day and correctly finalize.
 - **Batch audits** require Redis for progress/finalization (`POST /api/audits/batch` returns 503 if `REDIS_URL` is not configured).
 - **Automation runs** distribute fiche detail fetch across replicas and fan out transcription/audit work.
+- **Automation runs list endpoint**: `GET /api/automation/runs` supports `limit`/`offset` across all schedules.
 - Automation now enforces `groupes` + `onlyUnaudited` selection filters, applies `onlyWithRecordings` after fetching full fiche details, and emits `automation/completed|automation/failed` domain events.
 - Automation sales-list cache revalidation is protected by a cooldown (`AUTOMATION_REVALIDATION_COOLDOWN_MS`, default 30m) using the **most recent** `fiche_cache.last_revalidated_at` within the `salesDate` range (prevents repeated gateway hammering).
 - Automation honors schedule controls (`skipIfTranscribed`, `continueOnError`, `retryFailed/maxRetries`) and SSRF-guards schedule webhook URLs.
+- Automation schedule updates validate the effective config (current + patch), preventing invalid DAILY/WEEKLY/MONTHLY schedules (missing required fields).
 - Automation can run audits in transcript tools mode by setting `ficheSelection.useRlm=true` (propagates `use_rlm=true` into `audit/run`).
 - Automation emits dedicated Pusher realtime events (`automation.run.*`) on `private-job-automation-run-<RUN_ID>`.
 - Automation can send email notifications via SMTP when `SMTP_*` env vars are configured (otherwise skipped/logged).
@@ -28,6 +30,9 @@
 - Fiche cache backfills are running in small batches; many full-detail rows now have near-empty `raw_data` (often `{}`), with legacy API shape reconstructed from normalized tables.
 - Recording transcription backfill is in progress: transcription chunks are being created and `recordings.transcription_data` is being cleared (see `scripts/transcription-chunks-status.ts`).
 - **ElevenLabs transcription** validates/normalizes `ELEVENLABS_API_KEY` and sanitizes Axios errors (avoid leaking request headers in logs).
+- Lock contention logs (fiche + recording locks) are treated as expected (info-level) to reduce noise in scaled deployments.
+- Inngest SDK endpoint (`/api/inngest`) normalizes upstream 5xx AppErrors (eg 502) to HTTP 500 to avoid engine “invalid status code” errors.
+- API error logging downgrades expected 4xx (401/403/404) from ERROR to INFO/WARN to reduce log noise.
 - TypeScript build is green (`npm run build`).
 - Docker startup runs `prisma migrate deploy` + `npm run seed:auth` so DB schema stays aligned with Prisma and RBAC roles/permissions exist (prevents runtime authZ “empty roles” issues).
 

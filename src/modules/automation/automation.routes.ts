@@ -311,6 +311,38 @@ router.get(
 
 /**
  * @swagger
+ * /api/automation/runs:
+ *   get:
+ *     summary: List automation runs (all schedules)
+ *     tags: [Automation]
+ */
+router.get(
+  "/runs",
+  asyncHandler(async (req: Request, res: Response) => {
+    const limitRaw = req.query.limit;
+    const offsetRaw = req.query.offset;
+    const limitParsed =
+      typeof limitRaw === "string" ? Number.parseInt(limitRaw, 10) : NaN;
+    const offsetParsed =
+      typeof offsetRaw === "string" ? Number.parseInt(offsetRaw, 10) : NaN;
+
+    const limit = Number.isFinite(limitParsed) ? limitParsed : 20;
+    const offset = Number.isFinite(offsetParsed) ? offsetParsed : 0;
+
+    const runs = await automationService.getAllAutomationRuns(limit, offset);
+
+    return res.json({
+      success: true,
+      data: runs,
+      count: runs.length,
+      limit,
+      offset,
+    });
+  })
+);
+
+/**
+ * @swagger
  * /api/automation/runs/{id}:
  *   get:
  *     summary: Get automation run by ID

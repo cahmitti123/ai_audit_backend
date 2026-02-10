@@ -42,12 +42,26 @@ export function fail(
   const app = error instanceof AppError ? error : null;
   const finalStatus = app?.statusCode ?? statusCode;
 
-  logger.error("API error", {
+  const logPayload = {
     status: finalStatus,
     code: app?.code,
     error: msg,
     ...meta,
-  });
+  };
+
+  // Avoid spamming ERROR logs for expected client failures (401/403/404/validation).
+  // Keep ERROR level for 5xx only.
+  if (finalStatus >= 500) {
+    logger.error("API error", logPayload);
+  } else if (finalStatus === 401 || finalStatus === 403) {
+    logger.info("API error", logPayload);
+  } else if (finalStatus === 404) {
+    logger.info("API error", logPayload);
+  } else if (finalStatus >= 400) {
+    logger.warn("API error", logPayload);
+  } else {
+    logger.info("API error", logPayload);
+  }
 
   const payload: Record<string, unknown> = {
     success: false,

@@ -41,6 +41,7 @@ As an operator, I configure schedules that automatically pick a set of fiches (b
 
 - **Runs + logs**
   - `GET /api/automation/schedules/:id/runs`
+  - `GET /api/automation/runs`
   - `GET /api/automation/runs/:id`
   - `GET /api/automation/runs/:id/logs`
 

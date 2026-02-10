@@ -519,6 +519,17 @@ export async function updateScheduleStats(
 }
 
 /**
+ * Get all automation runs (across all schedules)
+ */
+export async function getAllAutomationRuns(limit = 20, offset = 0) {
+  return await prisma.automationRun.findMany({
+    orderBy: { startedAt: "desc" },
+    take: limit,
+    skip: offset,
+  });
+}
+
+/**
  * Get automation runs for a schedule
  */
 export async function getAutomationRuns(

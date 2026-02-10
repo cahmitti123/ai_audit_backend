@@ -77,7 +77,9 @@ export const transcribeFicheFunction = inngest.createFunction(
         limit: CONCURRENCY.TRANSCRIPTION.limit,
       },
     ],
-    rateLimit: {
+    // IMPORTANT: Use `throttle` (not `rateLimit`). Inngest `rateLimit` permanently skips
+    // (drops) events over the limit. `throttle` queues them for later execution (FIFO).
+    throttle: {
       ...RATE_LIMITS.TRANSCRIPTION,
       key: "event.data.fiche_id",
     },
@@ -298,20 +300,20 @@ export const transcribeFicheFunction = inngest.createFunction(
         missing_url_to_transcribe: plan.missingRecordingUrlToTranscribeCount,
       });
 
+      const totalRecordings = toNumber(plan.totalRecordings, 0);
+      const alreadyTranscribed = toNumber(plan.alreadyTranscribed, 0);
+      const toTranscribe = plan.toTranscribe;
+
       // Send status check webhook (mirrors service behavior)
       await step.run(`send-transcription-status-check-${fiche_id}`, async () => {
         await transcriptionWebhooks.statusCheck(
           fiche_id,
-          plan.totalRecordings,
-          plan.alreadyTranscribed,
-          plan.toTranscribe.length
+          totalRecordings,
+          alreadyTranscribed,
+          toTranscribe.length
         );
         return { notified: true };
       });
-
-      const totalRecordings = plan.totalRecordings;
-      const alreadyTranscribed = plan.alreadyTranscribed;
-      const toTranscribe = plan.toTranscribe;
 
       if (totalRecordings === 0 || alreadyTranscribed === totalRecordings) {
         // Send workflow started webhook (even for already complete, to keep behaviour consistent)
@@ -393,10 +395,10 @@ export const transcribeFicheFunction = inngest.createFunction(
       // If another replica already owns the lock, optionally wait for completion so downstream
       // workflows (eg. audits) never proceed with missing transcriptions.
       if (!lock.acquired) {
-        wlog.warn("Lock NOT acquired - another transcription is already running", { lockKey, lock_enabled: lock.enabled });
-        logger.warn("Transcription already in progress for fiche", {
-          fiche_id,
+        // This is expected in scaled deployments (fan-out + retries). Avoid noisy WARN logs.
+        wlog.info("Lock NOT acquired - another transcription is already running", {
           lockKey,
+          lock_enabled: lock.enabled,
         });
 
         if (waitForCompletion) {
@@ -862,9 +864,18 @@ export const transcribeRecordingFunction = inngest.createFunction(
     ],
     // Global provider cap (prevents ElevenLabs 429 due to high fan-out across replicas).
     // Override with TRANSCRIPTION_ELEVENLABS_RATE_LIMIT_PER_MINUTE if your plan allows more throughput.
-    rateLimit: {
+    //
+    // IMPORTANT: Use `throttle` (not `rateLimit`). Inngest `rateLimit` is *lossy*: events that
+    // exceed the limit are permanently SKIPPED (the function never runs for them, silently).
+    // `throttle` queues excess events and processes them FIFO when capacity is available.
+    // Without this, a burst of fan-out events (e.g. 32 recordings for one fiche + recordings
+    // from other fiches) can exceed the per-minute limit, causing some recordings to be silently
+    // dropped and never transcribed.
+    throttle: {
       limit: ELEVENLABS_RECORDING_RATE_LIMIT_PER_MINUTE,
       period: "1m",
+      // Allow short bursts above the steady-state limit so small fan-outs complete faster.
+      burst: Math.max(1, Math.ceil(ELEVENLABS_RECORDING_RATE_LIMIT_PER_MINUTE * 0.5)),
     },
     timeouts: {
       finish: TIMEOUTS.TRANSCRIPTION,
@@ -945,7 +956,8 @@ export const transcribeRecordingFunction = inngest.createFunction(
     });
 
     if (!lock.acquired) {
-      logger.warn("Recording transcription already in progress, skipping", {
+      // Expected in scaled deployments / at-least-once delivery; avoid noisy WARN logs.
+      logger.info("Recording transcription already in progress, skipping", {
         event_id: eventId,
         run_id,
         fiche_id,
@@ -1103,13 +1115,15 @@ export const transcribeRecordingFunction = inngest.createFunction(
       while (!transcription) {
         attempt++;
         try {
-          transcription = await step.run(
+          // Inngest serializes step results to JSON-safe types (JsonifyObject),
+          // which can be overly strict/incompatible with our domain types.
+          transcription = (await step.run(
             `elevenlabs-transcribe-${call_id}-attempt-${attempt}`,
             async () => {
               const svc = new TranscriptionService(apiKey);
               return await svc.transcribe(url);
             }
-          );
+          )) as unknown as Awaited<ReturnType<TranscriptionService["transcribe"]>>;
         } catch (err: unknown) {
           const hint = getElevenLabsRetryHint(err);
           const canRetry = hint.retryable && attempt < ELEVENLABS_MAX_ATTEMPTS;
@@ -1138,7 +1152,14 @@ export const transcribeRecordingFunction = inngest.createFunction(
         }
       }
 
-      const transcriptionId = transcription.transcription_id;
+      if (!transcription) {
+        throw new Error("Transcription unexpectedly null after retry loop");
+      }
+
+      // Capture to a const so TS knows it can't change across async boundaries.
+      const finalTranscription = transcription;
+
+      const transcriptionId = finalTranscription.transcription_id;
       if (!transcriptionId) {
         throw new Error("Missing transcription_id from provider");
       }
@@ -1148,8 +1169,8 @@ export const transcribeRecordingFunction = inngest.createFunction(
           BigInt(rec.ficheCacheId),
           call_id,
           transcriptionId,
-          transcription.transcription.text,
-          transcription.transcription
+          finalTranscription.transcription.text,
+          finalTranscription.transcription
         );
         return { updated: true };
       });

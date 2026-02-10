@@ -20,7 +20,7 @@ import type {
   AutomationSchedule as DbAutomationSchedule,
 } from "@prisma/client";
 
-import { ValidationError } from "../../shared/errors.js";
+import { NotFoundError, ValidationError } from "../../shared/errors.js";
 import { logger } from "../../shared/logger.js";
 import * as automationApi from "./automation.api.js";
 import { cronMatches, parseCronExpression } from "./automation.cron.js";
@@ -818,23 +818,48 @@ export async function updateAutomationSchedule(
 
   logger.info("Updating automation schedule", { id: scheduleId.toString() });
 
-  // Business validation: Check schedule type requirements if being updated
-  if (input.scheduleType === "DAILY" && input.timeOfDay === null) {
+  // Business validation:
+  // Validate the EFFECTIVE schedule config (current + patch) so we never end up with
+  // scheduleType=DAILY/WEEKLY/MONTHLY but missing required fields.
+  const current = await automationRepository.getAutomationScheduleById(scheduleId);
+  if (!current) {
+    throw new NotFoundError("Automation schedule", scheduleId.toString());
+  }
+
+  const effectiveScheduleType = input.scheduleType ?? current.scheduleType;
+  const effectiveTimeOfDay =
+    input.timeOfDay !== undefined ? input.timeOfDay : current.timeOfDay;
+  const effectiveDayOfWeek =
+    input.dayOfWeek !== undefined ? input.dayOfWeek : current.dayOfWeek;
+  const effectiveDayOfMonth =
+    input.dayOfMonth !== undefined ? input.dayOfMonth : current.dayOfMonth;
+  const effectiveCronExpression =
+    input.cronExpression !== undefined ? input.cronExpression : current.cronExpression;
+
+  if (effectiveScheduleType === "DAILY" && !effectiveTimeOfDay) {
     throw new ValidationError("DAILY schedule requires timeOfDay");
   }
 
   if (
-    input.scheduleType === "WEEKLY" &&
-    (input.timeOfDay === null || input.dayOfWeek === null)
+    effectiveScheduleType === "WEEKLY" &&
+    (!effectiveTimeOfDay ||
+      effectiveDayOfWeek === null ||
+      effectiveDayOfWeek === undefined)
   ) {
     throw new ValidationError("WEEKLY schedule requires timeOfDay and dayOfWeek");
   }
 
   if (
-    input.scheduleType === "MONTHLY" &&
-    (input.timeOfDay === null || input.dayOfMonth === null)
+    effectiveScheduleType === "MONTHLY" &&
+    (!effectiveTimeOfDay ||
+      effectiveDayOfMonth === null ||
+      effectiveDayOfMonth === undefined)
   ) {
     throw new ValidationError("MONTHLY schedule requires timeOfDay and dayOfMonth");
+  }
+
+  if (effectiveScheduleType === "CRON" && !effectiveCronExpression) {
+    throw new ValidationError("CRON schedule requires cronExpression");
   }
 
   // Delegate to repository (it handles cron regeneration)
@@ -870,6 +895,24 @@ export async function deleteAutomationSchedule(
 // ═══════════════════════════════════════════════════════════════════════════
 // RUN CRUD WITH TRANSFORMATIONS
 // ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Get all automation runs (across all schedules)
+ */
+export async function getAllAutomationRuns(
+  limit = 20,
+  offset = 0
+): Promise<AutomationRun[]> {
+  logger.debug("Fetching automation runs (all schedules)", { limit, offset });
+
+  const runs = await automationRepository.getAllAutomationRuns(limit, offset);
+
+  logger.debug("Fetched automation runs (all schedules)", {
+    count: runs.length,
+  });
+
+  return runs.map(transformRunToApi);
+}
 
 /**
  * Get automation runs for a schedule

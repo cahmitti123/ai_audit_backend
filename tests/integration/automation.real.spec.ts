@@ -57,6 +57,35 @@ describeIntegration("Integration: automation schedules (real DB)", () => {
 
     const scheduleId: string = createRes.body.data.id;
 
+    // Create a run row so /api/automation/runs can be exercised
+    const run = await prisma.automationRun.create({
+      data: {
+        scheduleId: BigInt(scheduleId),
+        status: "completed",
+        configSnapshot: { source: "integration-test" },
+      },
+      select: { id: true },
+    });
+
+    // List runs (all schedules)
+    const listRunsRes = await request(app)
+      .get("/api/automation/runs?limit=50&offset=0")
+      .set("Authorization", `Bearer ${token}`);
+    expect(listRunsRes.status).toBe(200);
+    expect(listRunsRes.body).toEqual(
+      expect.objectContaining({
+        success: true,
+        data: expect.any(Array),
+        count: expect.any(Number),
+        limit: 50,
+        offset: 0,
+      })
+    );
+    const foundRun = (listRunsRes.body.data as Array<{ id: string }>).some(
+      (r) => r.id === run.id.toString()
+    );
+    expect(foundRun).toBe(true);
+
     // Get
     const getRes = await request(app)
       .get(`/api/automation/schedules/${scheduleId}`)

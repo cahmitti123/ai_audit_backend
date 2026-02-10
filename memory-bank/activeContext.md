@@ -40,11 +40,14 @@
 - **Automation run distribution**:
   - Replaced inline fiche detail fetching with distributed `fiche/fetch` fan-out.
   - Made fan-out event IDs deterministic to avoid duplicate dispatch on retries.
+- **Automation runs listing**:
+  - Added `GET /api/automation/runs` to list runs across all schedules (limit/offset).
 - **Automation flow hardening**:
   - Automation now enforces `groupes` + `onlyUnaudited` selection filters, and applies `onlyWithRecordings` after fetching full fiche details.
   - Automation emits `automation/completed` and `automation/failed` domain events for event-driven consumers.
   - Automation fiche sales-list cache revalidation honors a cooldown (`AUTOMATION_REVALIDATION_COOLDOWN_MS`, default 30 minutes) based on the **most recent** `fiche_cache.last_revalidated_at` within the requested `salesDate` range (prevents repeated revalidation on frequent retries/runs).
   - Automation now honors schedule controls: `skipIfTranscribed`, `continueOnError`, and `retryFailed/maxRetries` (stall wait extension + transcription re-dispatch).
+  - Schedule update validation now checks the effective config (current + patch) so DAILY/WEEKLY/MONTHLY can’t be saved without required fields.
   - Automation can enable transcript tools mode for audits via `ficheSelection.useRlm=true` (propagates `use_rlm=true` into `audit/run`).
   - Automation schedule webhook URLs are SSRF-guarded via `validateOutgoingWebhookUrl` (honors `WEBHOOK_ALLOWED_ORIGINS`).
   - Automation emits dedicated Pusher realtime events (`automation.run.*`) on `private-job-automation-run-<RUN_ID>` for frontend observability.
@@ -76,9 +79,12 @@
 - **Transcription hardening (ElevenLabs)**:
   - Normalizes `ELEVENLABS_API_KEY` (trims whitespace / strips surrounding quotes).
   - Axios errors are rethrown as **sanitized** messages (avoid leaking headers like `xi-api-key`).
+  - Lock contention logs (fiche + recording locks) are downgraded to info (expected under fan-out + retries) to reduce noise.
 - **Operational hardening**:
   - Docker startup now runs `prisma migrate deploy` **and** `npm run seed:auth` to prevent schema drift and ensure RBAC roles/permissions exist (optional admin user via `AUTH_SEED_ADMIN_*`).
   - Self-hosted Inngest is configured to poll the SDK URL (`--poll-interval`) so new function IDs/events are discovered without requiring a restart.
+  - API error logging downgrades expected 4xx (401/403/404) from ERROR to INFO/WARN to reduce log noise.
+  - `/api/inngest` normalizes 5xx AppErrors (eg 502) to HTTP 500 to avoid Inngest engine “invalid status code” errors.
 - **Batch audits**:
   - `POST /api/audits/batch` now requires Redis for progress/finalization (fails fast if `REDIS_URL` is not configured).
 

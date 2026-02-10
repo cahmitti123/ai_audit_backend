@@ -108,7 +108,8 @@ export const createAutomationScheduleInputSchema = z.object({
   timezone: z.string().default("UTC"),
   timeOfDay: z
     .string()
-    .regex(/^\d{2}:\d{2}$/)
+    // 24h clock HH:MM
+    .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)
     .optional(), // HH:MM format
   dayOfWeek: z.number().int().min(0).max(6).optional(), // 0 = Sunday, 6 = Saturday
   dayOfMonth: z.number().int().min(1).max(31).optional(),

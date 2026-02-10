@@ -1351,6 +1351,14 @@ Important: `scheduleId` in the request is currently validated as a **number**, b
   - `offset` (default 0)
 - **Response 200**: `{ success:true, data: AutomationRun[], count, limit, offset }`
 
+### GET `/api/automation/runs`
+
+- **Purpose**: list runs across all schedules (most recent first).
+- **Query**:
+  - `limit` (default 20)
+  - `offset` (default 0)
+- **Response 200**: `{ success:true, data: AutomationRun[], count, limit, offset }`
+
 ### GET `/api/automation/runs/:id`
 ### GET `/api/automation/runs/:id/logs`
 

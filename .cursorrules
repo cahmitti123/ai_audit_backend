@@ -9,6 +9,8 @@
   - Good: compute data inside `step.run`, then call `step.sendEvent` at top-level.
   - Good: use separate `step.run` for DB writes after emitting events.
 - When emitting multiple events, prefer a single `step.sendEvent("some-step", eventsArray)`.
+- When dealing with Inngest `JsonifyObject` typing (step results), cast via `unknown` first to avoid incompatible deep types.
+- Keep `/api/inngest` error responses standard: normalize upstream 5xx AppError status codes (eg 502) to HTTP 500 so the Inngest engine doesn’t reject them.
 
 ## Automation scheduling
 - Scheduler tick is `scheduledAutomationCheck` (Inngest cron).

@@ -758,10 +758,12 @@ export const runAutomationFunction = inngest.createFunction(
 
             // Revalidate cache for the requested dates before running automation —
             // but only if the last revalidation was more than 30 minutes ago.
-            // This prevents hammering the CRM gateway when automations retry or run frequently.
+            // Short cooldown: ensures automation runs get fresh sales data from CRM while
+            // still protecting against rapid-fire retries. Reduced from 30min to 5min because
+            // for unattended automation, data freshness is more important than CRM load reduction.
             const revalidationCooldownMs = Math.max(
               0,
-              Number(process.env.AUTOMATION_REVALIDATION_COOLDOWN_MS || 30 * 60 * 1000) // 30 min default
+              Number(process.env.AUTOMATION_REVALIDATION_COOLDOWN_MS || 5 * 60 * 1000) // 5 min default
             );
 
             const { getLastRevalidationForDateRange } = await import(
@@ -887,6 +889,71 @@ export const runAutomationFunction = inngest.createFunction(
                 // Small delay between API batches
                 if (i + 3 < sortedDates.length) {
                   await new Promise((resolve) => setTimeout(resolve, 1000));
+                }
+              }
+
+              // Retry failed dates once before giving up.
+              // CRM timeouts are often transient; a single retry recovers most failures.
+              if (apiErrors.length > 0) {
+                const failedDates = apiErrors.map((e) => e.date);
+                await log("warning", `Retrying ${failedDates.length} failed date(s)`, {
+                  failed_dates: failedDates,
+                });
+
+                // Clear errors for retry — only persistent failures remain.
+                const retryErrors: typeof apiErrors = [];
+                const retryBatches: string[][] = [];
+                for (let i = 0; i < failedDates.length; i += 2) {
+                  retryBatches.push(failedDates.slice(i, i + 2));
+                }
+
+                for (const retryBatch of retryBatches) {
+                  // Brief delay before retry to give CRM time to recover.
+                  await new Promise((resolve) => setTimeout(resolve, 3000));
+
+                  const retryResults = await Promise.allSettled(
+                    retryBatch.map(async (date) => {
+                      const fiches = await automationApi.fetchFichesForDate(date, false, apiKey);
+                      const { mapWithConcurrency: mapRetry } = await import("../../utils/concurrency.js");
+                      await mapRetry(fiches, 10, async (fiche: unknown) => {
+                        try {
+                          const cacheInput = toSalesSummaryCacheInput(fiche);
+                          if (cacheInput) {
+                            await cacheFicheSalesSummary(cacheInput, {
+                              salesDate: convertDate(date),
+                              lastRevalidatedAt: revalidatedAt,
+                            });
+                          }
+                        } catch { /* best-effort */ }
+                      });
+                      await log("info", `Retry succeeded for ${date} (${fiches.length} fiches)`);
+                      return { date, count: fiches.length };
+                    })
+                  );
+
+                  for (let j = 0; j < retryResults.length; j++) {
+                    const r = retryResults[j];
+                    const date = retryBatch[j] || "unknown";
+                    if (r.status === "rejected") {
+                      retryErrors.push({ date, error: errorMessage(r.reason) });
+                      await log(
+                        "error",
+                        `Retry also failed for ${date}: ${errorMessage(r.reason)}`
+                      );
+                    }
+                  }
+                }
+
+                // Replace apiErrors with only the persistent failures.
+                apiErrors.length = 0;
+                apiErrors.push(...retryErrors);
+
+                if (retryErrors.length === 0) {
+                  await log("info", "All failed dates recovered on retry");
+                } else {
+                  await log("warning", `${retryErrors.length} date(s) still failed after retry`, {
+                    persistent_failures: retryErrors.map((e) => e.date),
+                  });
                 }
               }
             }
@@ -1344,12 +1411,18 @@ export const runAutomationFunction = inngest.createFunction(
         if (ready === ficheIds.length) {break;}
 
         if (ready === lastReady) {
-          stableCount++;
-          if (stableCount >= 3) {
-            if (
-              maxFicheDetailsStallRetries > 0 &&
-              ficheDetailsStallRetries < maxFicheDetailsStallRetries
-            ) {
+          // Only start stall detection after at least one fiche has been fetched
+          // AND a minimum grace period has elapsed (fetches need time to reach CRM).
+          const ficheDetailsElapsedMs = Date.now() - ficheDetailsStarted;
+          const ficheDetailsGracePeriodMs = 2 * 60 * 1000; // 2 minutes
+          if (lastReady > 0 && ficheDetailsElapsedMs >= ficheDetailsGracePeriodMs) {
+            stableCount++;
+          }
+          if (stableCount >= 5) {
+            // Always allow at least 1 automatic retry, even if schedule.retryFailed is off.
+            // This catches transient CRM/network failures without requiring per-schedule config.
+            const effectiveMaxRetries = Math.max(1, maxFicheDetailsStallRetries);
+            if (ficheDetailsStallRetries < effectiveMaxRetries) {
               ficheDetailsStallRetries++;
               stableCount = 0;
                   const retryNo = ficheDetailsStallRetries;
@@ -1360,9 +1433,10 @@ export const runAutomationFunction = inngest.createFunction(
                   await log("warning", "Fiche details stalled; retrying incomplete fetches", {
                     ready,
                     total: ficheIds.length,
-                    stall_retry: `${retryNo}/${maxFicheDetailsStallRetries}`,
+                    stall_retry: `${retryNo}/${effectiveMaxRetries}`,
                     incomplete: incomplete.length,
                     incomplete_sample: incomplete.slice(0, 10),
+                    auto_retry: maxFicheDetailsStallRetries === 0,
                   });
 
                   if (incomplete.length > 0) {
@@ -1406,7 +1480,7 @@ export const runAutomationFunction = inngest.createFunction(
                     });
                   }
             } else {
-              break; // likely some failed; proceed with what we have
+              break; // exhausted all retries; proceed with what we have
             }
           }
         } else {
@@ -1419,6 +1493,96 @@ export const runAutomationFunction = inngest.createFunction(
           `sleep-fiche-details-${runIdString}-${ficheDetailsPollAttempt}`,
           `${ficheDetailsPollIntervalSeconds}s`
         );
+      }
+
+      // ── FINAL RECONCILIATION: one last attempt for any stragglers ──────────
+      // After the main polling loop exits (stall/timeout), check if any fiches are
+      // still incomplete. If so, re-dispatch fiche/fetch one final time and wait an
+      // abbreviated cycle. This ensures we never mark a fiche as failed without
+      // giving it every possible chance to complete.
+      const incompleteAfterGate = lastSnapshot.filter(
+        (r) => (!r.exists || r.isFullDetails !== true) && r.isNotFound !== true
+      );
+      if (incompleteAfterGate.length > 0) {
+        const incompleteIds = incompleteAfterGate.map((r) => r.ficheId);
+        await log("warning", `Final reconciliation: ${incompleteIds.length} fiche(s) still incomplete after details gate — dispatching final retry`, {
+          incomplete: incompleteIds.length,
+          incomplete_sample: incompleteIds.slice(0, 15),
+        });
+
+        // Re-dispatch fetch events for stragglers.
+        const finalRetryEvents = incompleteIds.map((ficheId) => ({
+          name: "fiche/fetch" as const,
+          data: { fiche_id: ficheId, force_refresh: true },
+          id: `automation-${runIdString}-fetch-${ficheId}-final`,
+        }));
+        const finalRetryChunks = chunkArray(finalRetryEvents, sendChunkSize);
+        for (let i = 0; i < finalRetryChunks.length; i++) {
+          await step.sendEvent(
+            `final-retry-fiche-fetches-${runIdString}-${i + 1}-of-${finalRetryChunks.length}`,
+            finalRetryChunks[i]!
+          );
+        }
+
+        // Abbreviated wait: poll a few times with shorter intervals to give stragglers a chance.
+        const finalPollIntervalSeconds = Math.max(5, Math.min(15, ficheDetailsPollIntervalSeconds));
+        const finalMaxPolls = 6; // ~90s max extra wait at 15s intervals
+        for (let fp = 0; fp < finalMaxPolls; fp++) {
+          await step.sleep(
+            `sleep-fiche-details-final-${runIdString}-${fp}`,
+            `${finalPollIntervalSeconds}s`
+          );
+
+          lastSnapshot = await step.run(
+            `poll-fiche-details-final-${runIdString}-${fp}`,
+            async () => {
+              const { prisma } = await import("../../shared/prisma.js");
+              const rows = await prisma.ficheCache.findMany({
+                where: { ficheId: { in: ficheIds } },
+                select: {
+                  ficheId: true,
+                  groupe: true,
+                  recordingsCount: true,
+                  hasRecordings: true,
+                  detailsSuccess: true,
+                  detailsMessage: true,
+                  rawData: true,
+                  information: { select: { id: true } },
+                },
+              });
+              const byId = new Map(rows.map((r) => [r.ficheId, r]));
+              return ficheIds.map((id) => {
+                const r = byId.get(id);
+                if (!r) {
+                  return { ficheId: id, exists: false, groupe: null, recordingsCount: null, hasRecordings: false, isSalesListOnly: true, isFullDetails: false, detailsSuccess: null, detailsMessage: null, isNotFound: false };
+                }
+                const raw = r.rawData ?? null;
+                const isSalesListOnly = isRecord(raw) && raw._salesListOnly === true;
+                const detailsSuccess = typeof r.detailsSuccess === "boolean" ? r.detailsSuccess : null;
+                const detailsMessage = typeof r.detailsMessage === "string" && r.detailsMessage.trim().length > 0 ? r.detailsMessage.trim() : null;
+                const isNotFoundVal = isNotFoundMarker(detailsSuccess, detailsMessage);
+                const isFullDetails = Boolean(r.information) || (isFullFicheDetailsRawData(raw) && !isSalesListOnly);
+                const rawRecordings = isRecord(raw) ? (raw as { recordings?: unknown }).recordings : undefined;
+                const derivedRecordingsCount = typeof r.recordingsCount === "number" ? r.recordingsCount : Array.isArray(rawRecordings) ? rawRecordings.length : null;
+                return { ficheId: id, exists: true, groupe: typeof r.groupe === "string" && r.groupe.trim() ? r.groupe.trim() : null, recordingsCount: derivedRecordingsCount, hasRecordings: Boolean(r.hasRecordings), isSalesListOnly, isFullDetails, detailsSuccess, detailsMessage, isNotFound: isNotFoundVal };
+              });
+            }
+          );
+
+          const stillIncomplete = lastSnapshot.filter(
+            (r) => (!r.exists || r.isFullDetails !== true) && r.isNotFound !== true
+          ).length;
+          const nowReady = lastSnapshot.filter(
+            (r) => r.exists && (r.isFullDetails === true || r.isNotFound === true)
+          ).length;
+
+          await log("info", `Final reconciliation poll ${fp + 1}/${finalMaxPolls}: ${nowReady}/${ficheIds.length} ready, ${stillIncomplete} still incomplete`);
+
+          if (nowReady === ficheIds.length || stillIncomplete === 0) {
+            await log("info", "Final reconciliation: all fiches resolved");
+            break;
+          }
+        }
       }
 
       const ficheFetchFailures: Array<{ ficheId: string; error: string }> = [];
@@ -1617,21 +1781,24 @@ export const runAutomationFunction = inngest.createFunction(
         maxRecordingsPerFiche: maxRecordingsPerFiche || undefined,
       });
 
-      const canContinueAfterFicheFetch =
-        schedule.continueOnError || results.failed.length === 0;
-
-      if (!canContinueAfterFicheFetch && (schedule.runTranscription || schedule.runAudits)) {
+      // Always continue to next stages with the fiches that succeeded.
+      // Individual fiche failures are tracked in results.failed and affect the
+      // per-fiche outcome, but never block the entire pipeline.
+      if (results.failed.length > 0 && (schedule.runTranscription || schedule.runAudits)) {
         await log(
           "warning",
-          "Aborting remaining stages due to failures (continueOnError=false)",
-          { failed: results.failed.length }
+          `${results.failed.length} fiche(s) failed detail fetch — continuing with remaining fiches`,
+          { failed: results.failed.length, remaining: fichesWithRecordings.length }
         );
       }
 
       // STEP 2: Fan out transcriptions (optionally skip already-transcribed fiches)
-      if (schedule.runTranscription && fichesWithRecordings.length > 0 && canContinueAfterFicheFetch) {
+      if (schedule.runTranscription && fichesWithRecordings.length > 0) {
+        const failedFicheIdsBeforeTranscription = new Set(
+          results.failed.map((f) => f.ficheId)
+        );
         const transcriptionTargets = fichesWithRecordings.filter(
-          (id) => !terminalNotFoundFicheIds.has(id)
+          (id) => !terminalNotFoundFicheIds.has(id) && !failedFicheIdsBeforeTranscription.has(id)
         );
 
         // Load fiche cache IDs once (JSON-safe) so we can poll recordings efficiently without per-fiche DB queries.
@@ -2012,14 +2179,20 @@ export const runAutomationFunction = inngest.createFunction(
           }
 
           if (completed === lastCompleted) {
-            transcriptionStableCount++;
+            // Only start stall detection after at least one transcription has completed
+            // AND a minimum grace period has elapsed (transcriptions need time to process).
+            const txElapsedMs = Date.now() - transcriptionStarted;
+            const txGracePeriodMs = 3 * 60 * 1000; // 3 minutes
+            if (lastCompleted > 0 && txElapsedMs >= txGracePeriodMs) {
+              transcriptionStableCount++;
+            }
           } else {
             transcriptionStableCount = 0;
             lastCompleted = completed;
           }
 
           // If progress stalls, optionally retry by re-dispatching `fiche/transcribe` for incomplete fiches.
-          if (transcriptionStableCount >= 3 && maxRetries > 0 && retryAttempt < maxRetries) {
+          if (transcriptionStableCount >= 5 && maxRetries > 0 && retryAttempt < maxRetries) {
             const retryNo = retryAttempt + 1;
             const incompleteFicheIds = await step.run(
               `find-incomplete-transcriptions-${runIdString}-retry-${retryNo}`,
@@ -2131,11 +2304,11 @@ export const runAutomationFunction = inngest.createFunction(
         if (results.transcriptions < targetCount) {
           await log(
             "warning",
-            `Transcription timeout/stall - completed ${results.transcriptions}/${targetCount}`
+            `Transcription timeout/stall - completed ${results.transcriptions}/${targetCount} — starting final reconciliation`
           );
 
-          // Mark remaining fiches as failed to avoid reporting a false "completed" run.
-          const incomplete = await step.run(
+          // ── FINAL RECONCILIATION: re-dispatch for stragglers and wait one last time ──
+          const incompleteForReconciliation = await step.run(
             `find-incomplete-transcriptions-${runIdString}`,
             async () => {
               const { prisma } = await import("../../shared/prisma.js");
@@ -2170,31 +2343,169 @@ export const runAutomationFunction = inngest.createFunction(
             }
           );
 
-          for (const ficheId of incomplete) {
-            results.failed.push({
-              ficheId,
-              error: "Transcription incomplete (timeout/stall)",
+          if (incompleteForReconciliation.length > 0) {
+            await log("warning", `Final reconciliation: re-dispatching transcription for ${incompleteForReconciliation.length} incomplete fiche(s)`, {
+              incomplete: incompleteForReconciliation.length,
+              incomplete_sample: incompleteForReconciliation.slice(0, 15),
             });
+
+            // Re-dispatch transcribe events for stragglers.
+            const finalTxEvents = incompleteForReconciliation.map((ficheId) => ({
+              name: "fiche/transcribe" as const,
+              data: {
+                fiche_id: ficheId,
+                priority: (schedule.transcriptionPriority as "normal" | "high" | "low") || "normal",
+                wait_for_completion: false,
+              },
+              id: `automation-${runIdString}-transcribe-${ficheId}-final`,
+            }));
+            const finalTxChunks = chunkArray(finalTxEvents, sendChunkSize);
+            for (let i = 0; i < finalTxChunks.length; i++) {
+              await step.sendEvent(
+                `final-retry-transcriptions-${runIdString}-${i + 1}-of-${finalTxChunks.length}`,
+                finalTxChunks[i]!
+              );
+            }
+
+            // Abbreviated wait: poll a few times to give stragglers a chance.
+            const finalTxPollInterval = Math.max(5, Math.min(20, transcriptionPollIntervalSeconds));
+            const finalTxMaxPolls = 8; // ~160s max extra wait at 20s intervals
+            for (let fp = 0; fp < finalTxMaxPolls; fp++) {
+              await step.sleep(
+                `sleep-transcription-final-${runIdString}-${fp}`,
+                `${finalTxPollInterval}s`
+              );
+
+              const finalPoll = await step.run(
+                `poll-transcription-final-${runIdString}-${fp}`,
+                async () => {
+                  const { prisma } = await import("../../shared/prisma.js");
+                  const cacheIds = transcriptionTargetsWithCache
+                    .map((ficheId) => cacheIdByFicheId.get(ficheId))
+                    .filter((v): v is string => typeof v === "string" && v.length > 0)
+                    .map((idStr) => BigInt(idStr));
+
+                  const rows = await prisma.recording.groupBy({
+                    by: ["ficheCacheId", "hasTranscription"],
+                    where: { ficheCacheId: { in: cacheIds } },
+                    _count: { _all: true },
+                  });
+
+                  const agg = new Map<string, { total: number; transcribed: number }>();
+                  for (const r of rows) {
+                    const key = r.ficheCacheId.toString();
+                    const current = agg.get(key) || { total: 0, transcribed: 0 };
+                    const n = typeof r._count?._all === "number" ? r._count._all : 0;
+                    current.total += n;
+                    if (r.hasTranscription) {current.transcribed += n;}
+                    agg.set(key, current);
+                  }
+
+                  let completed = 0;
+                  let stillIncomplete = 0;
+                  for (const ficheId of transcriptionTargetsWithCache) {
+                    const cacheId = cacheIdByFicheId.get(ficheId);
+                    const counts = cacheId ? agg.get(cacheId) : undefined;
+                    const total = counts?.total ?? 0;
+                    const transcribed = counts?.transcribed ?? 0;
+                    if (total > 0 && transcribed === total) {completed++;}
+                    else {stillIncomplete++;}
+                  }
+                  return { completed, stillIncomplete };
+                }
+              );
+
+              const comp = isRecord(finalPoll) && typeof finalPoll.completed === "number" ? finalPoll.completed : 0;
+              const inc = isRecord(finalPoll) && typeof finalPoll.stillIncomplete === "number" ? finalPoll.stillIncomplete : 0;
+              await log("info", `Final transcription reconciliation poll ${fp + 1}/${finalTxMaxPolls}: ${comp}/${targetCount} complete, ${inc} still incomplete`);
+
+              if (comp >= targetCount || inc === 0) {
+                results.transcriptions = comp;
+                await log("info", "Final reconciliation: all transcriptions resolved");
+                break;
+              }
+            }
+
+            // Update transcription count from final reconciliation.
+            if (results.transcriptions === 0 && lastCompleted > 0) {
+              results.transcriptions = lastCompleted;
+            }
+          }
+
+          // After final reconciliation, check what is STILL incomplete and mark as failed.
+          const stillIncomplete = await step.run(
+            `find-still-incomplete-transcriptions-${runIdString}`,
+            async () => {
+              const { prisma } = await import("../../shared/prisma.js");
+              const cacheIds = transcriptionTargetsWithCache
+                .map((ficheId) => cacheIdByFicheId.get(ficheId))
+                .filter((v): v is string => typeof v === "string" && v.length > 0)
+                .map((idStr) => BigInt(idStr));
+
+              const rows = await prisma.recording.groupBy({
+                by: ["ficheCacheId", "hasTranscription"],
+                where: { ficheCacheId: { in: cacheIds } },
+                _count: { _all: true },
+              });
+
+              const agg = new Map<string, { total: number; transcribed: number }>();
+              for (const r of rows) {
+                const key = r.ficheCacheId.toString();
+                const current = agg.get(key) || { total: 0, transcribed: 0 };
+                const n = typeof r._count?._all === "number" ? r._count._all : 0;
+                current.total += n;
+                if (r.hasTranscription) {current.transcribed += n;}
+                agg.set(key, current);
+              }
+
+              return transcriptionTargetsWithCache.filter((ficheId) => {
+                const cacheId = cacheIdByFicheId.get(ficheId);
+                const counts = cacheId ? agg.get(cacheId) : undefined;
+                const total = counts?.total ?? 0;
+                const transcribed = counts?.transcribed ?? 0;
+                return !(total > 0 && transcribed === total);
+              });
+            }
+          );
+
+          if (stillIncomplete.length > 0) {
+            await log("error", `${stillIncomplete.length} fiche(s) still have incomplete transcriptions after all retries`, {
+              fiches: stillIncomplete.slice(0, 15),
+            });
+            for (const ficheId of stillIncomplete) {
+              results.failed.push({
+                ficheId,
+                error: "Transcription incomplete after final reconciliation",
+              });
+            }
           }
         }
       }
 
       // STEP 3: Fan out ALL audits at once
-      const canContinueToAudits =
-        schedule.continueOnError || results.failed.length === 0;
+      // Compute audit targets AFTER transcription stage: exclude fiches that failed
+      // in any prior stage (detail fetch failures, transcription timeouts, etc.)
+      // so we never waste audit work on fiches with incomplete data.
+      const failedFicheIdsBeforeAudits = new Set(
+        results.failed.map((f) => f.ficheId)
+      );
       const auditFicheTargets = fichesWithRecordings.filter(
-        (id) => !terminalNotFoundFicheIds.has(id)
+        (id) => !terminalNotFoundFicheIds.has(id) && !failedFicheIdsBeforeAudits.has(id)
       );
 
-      if (schedule.runAudits && !canContinueToAudits) {
-        await log(
-          "warning",
-          "Skipping audit stage due to failures (continueOnError=false)",
-          { failed: results.failed.length }
-        );
+      if (auditFicheTargets.length < fichesWithRecordings.length) {
+        const excluded = fichesWithRecordings.length - auditFicheTargets.length - terminalNotFoundFicheIds.size;
+        if (excluded > 0) {
+          await log("info", `Excluded ${excluded} fiche(s) from audit stage due to prior failures`, {
+            fichesWithRecordings: fichesWithRecordings.length,
+            auditTargets: auditFicheTargets.length,
+            terminalNotFound: terminalNotFoundFicheIds.size,
+            priorFailures: failedFicheIdsBeforeAudits.size,
+          });
+        }
       }
 
-      if (schedule.runAudits && auditFicheTargets.length > 0 && canContinueToAudits) {
+      if (schedule.runAudits && auditFicheTargets.length > 0) {
         const auditConfigIds = await step.run(
           "resolve-all-audit-configs",
           async (): Promise<number[]> => {
@@ -2505,21 +2816,30 @@ export const runAutomationFunction = inngest.createFunction(
             }
 
             if (doneAudits === lastDone) {
-              auditStableCount++;
-              if (auditStableCount >= 3) {
-                if (maxAuditStallRetries > 0 && auditStallRetries < maxAuditStallRetries) {
+              // Only start stall detection after at least one audit has completed
+              // AND a minimum grace period has elapsed (audits fan out many GPT calls).
+              const auditElapsedMs = Date.now() - auditWaitStarted;
+              const auditGracePeriodMs = 5 * 60 * 1000; // 5 minutes
+              if (lastDone > 0 && auditElapsedMs >= auditGracePeriodMs) {
+                auditStableCount++;
+              }
+              if (auditStableCount >= 5) {
+                // Always allow at least 1 automatic retry extension, even if schedule.retryFailed is off.
+                const effectiveMaxAuditRetries = Math.max(1, maxAuditStallRetries);
+                if (auditStallRetries < effectiveMaxAuditRetries) {
                   auditStallRetries++;
                   auditStableCount = 0;
                   await log("warning", "Audits stalled; extending wait", {
                     done: doneAudits,
                     total: auditTasks.length,
-                    stall_retry: `${auditStallRetries}/${maxAuditStallRetries}`,
+                    stall_retry: `${auditStallRetries}/${effectiveMaxAuditRetries}`,
+                    auto_retry: maxAuditStallRetries === 0,
                   });
                 } else {
                   results.audits = doneAudits;
                   await log(
                     "info",
-                    `Audits stable at ${doneAudits}/${auditTasks.length} - proceeding`
+                    `Audits stable at ${doneAudits}/${auditTasks.length} - proceeding (retries exhausted)`
                   );
                   break;
                 }
@@ -2543,8 +2863,149 @@ export const runAutomationFunction = inngest.createFunction(
           if (results.audits < auditTasks.length) {
             await log(
               "warning",
-              `Audit timeout/stall - finished ${results.audits}/${auditTasks.length} (completed=${completedAudits}, failed=${failedAudits})`
+              `Audit timeout/stall - finished ${results.audits}/${auditTasks.length} (completed=${completedAudits}, failed=${failedAudits}) — starting final reconciliation`
             );
+
+            // ── FINAL RECONCILIATION: find incomplete fiches and re-dispatch audit/run ──
+            // Identify which fiches still have incomplete audits and re-dispatch once more.
+            const incompleteFichesForAuditReconciliation: string[] = [];
+            for (const [ficheId, cacheIdStr] of auditCacheIdByFicheId.entries()) {
+              if (!cacheIdStr || !/^\d+$/.test(cacheIdStr)) {
+                incompleteFichesForAuditReconciliation.push(ficheId);
+                continue;
+              }
+            }
+
+            // Check which fiches are actually incomplete via DB.
+            const auditReconciliationCheck = await step.run(
+              `audit-reconciliation-check-${runIdString}`,
+              async () => {
+                const { prisma } = await import("../../shared/prisma.js");
+                const configIds = auditConfigIdsClean.map((id) => BigInt(Number(id)));
+                const cacheIds = Array.from(auditCacheIdByFicheId.values())
+                  .filter((v) => typeof v === "string" && /^\d+$/.test(v))
+                  .map((idStr) => BigInt(idStr));
+
+                const rows = await prisma.audit.groupBy({
+                  by: ["ficheCacheId", "status"],
+                  where: {
+                    ficheCacheId: { in: cacheIds },
+                    auditConfigId: { in: configIds },
+                    automationRunId: runId,
+                    isLatest: true,
+                  },
+                  _count: { _all: true },
+                });
+
+                const doneByCacheId = new Map<string, number>();
+                for (const r of rows) {
+                  if (r.status === "completed" || r.status === "failed") {
+                    const key = r.ficheCacheId.toString();
+                    const n = typeof r._count?._all === "number" ? r._count._all : 0;
+                    doneByCacheId.set(key, (doneByCacheId.get(key) || 0) + n);
+                  }
+                }
+
+                const incomplete: string[] = [];
+                for (const [ficheId, cacheIdStr] of auditCacheIdByFicheId.entries()) {
+                  if (!cacheIdStr || !/^\d+$/.test(cacheIdStr)) {incomplete.push(ficheId); continue;}
+                  const done = doneByCacheId.get(cacheIdStr) || 0;
+                  if (done < expectedAuditsPerFiche) {
+                    incomplete.push(ficheId);
+                  }
+                }
+                return incomplete;
+              }
+            );
+
+            const auditReconciliationIncomplete: string[] = Array.isArray(auditReconciliationCheck)
+              ? auditReconciliationCheck.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+              : [];
+
+            if (auditReconciliationIncomplete.length > 0) {
+              await log("warning", `Final reconciliation: re-dispatching audits for ${auditReconciliationIncomplete.length} incomplete fiche(s)`, {
+                incomplete: auditReconciliationIncomplete.length,
+                incomplete_sample: auditReconciliationIncomplete.slice(0, 15),
+              });
+
+              // Re-dispatch audit events for incomplete fiches.
+              const finalAuditEvents = auditReconciliationIncomplete.flatMap((ficheId) =>
+                auditConfigIdsClean.map((configId) => ({
+                  name: "audit/run" as const,
+                  data: {
+                    fiche_id: ficheId,
+                    audit_config_id: Number(configId),
+                    automation_schedule_id: String(schedule_id),
+                    automation_run_id: String(runIdString),
+                    trigger_source: "automation",
+                    use_rlm: Boolean(selection.useRlm),
+                  },
+                  id: `automation-${runIdString}-audit-${ficheId}-${configId}-final`,
+                }))
+              );
+              const finalAuditChunks = chunkArray(finalAuditEvents, sendChunkSize);
+              for (let i = 0; i < finalAuditChunks.length; i++) {
+                await step.sendEvent(
+                  `final-retry-audits-${runIdString}-${i + 1}-of-${finalAuditChunks.length}`,
+                  finalAuditChunks[i]!
+                );
+              }
+
+              // Abbreviated wait: poll a few times to give stragglers a chance.
+              const finalAuditPollInterval = Math.max(10, Math.min(30, auditPollIntervalSeconds));
+              const finalAuditMaxPolls = 10; // ~5 min max extra wait at 30s intervals
+              for (let fp = 0; fp < finalAuditMaxPolls; fp++) {
+                await step.sleep(
+                  `sleep-audit-final-${runIdString}-${fp}`,
+                  `${finalAuditPollInterval}s`
+                );
+
+                const finalAuditPoll = await step.run(
+                  `poll-audit-final-${runIdString}-${fp}`,
+                  async () => {
+                    const { prisma } = await import("../../shared/prisma.js");
+                    const configIds = auditConfigIdsClean.map((id) => BigInt(Number(id)));
+                    const cacheIds = Array.from(auditCacheIdByFicheId.values())
+                      .filter((v) => typeof v === "string" && /^\d+$/.test(v))
+                      .map((idStr) => BigInt(idStr));
+
+                    const rows = await prisma.audit.groupBy({
+                      by: ["ficheCacheId", "status"],
+                      where: {
+                        ficheCacheId: { in: cacheIds },
+                        auditConfigId: { in: configIds },
+                        automationRunId: runId,
+                        isLatest: true,
+                      },
+                      _count: { _all: true },
+                    });
+
+                    let completed = 0;
+                    let failed = 0;
+                    for (const r of rows) {
+                      const n = typeof r._count?._all === "number" ? r._count._all : 0;
+                      if (r.status === "completed") {completed += n;}
+                      if (r.status === "failed") {failed += n;}
+                    }
+                    return { completed, failed, done: completed + failed };
+                  }
+                );
+
+                const finalDone = isRecord(finalAuditPoll) && typeof finalAuditPoll.done === "number" ? finalAuditPoll.done : 0;
+                const finalComp = isRecord(finalAuditPoll) && typeof finalAuditPoll.completed === "number" ? finalAuditPoll.completed : 0;
+                const finalFailed = isRecord(finalAuditPoll) && typeof finalAuditPoll.failed === "number" ? finalAuditPoll.failed : 0;
+                await log("info", `Final audit reconciliation poll ${fp + 1}/${finalAuditMaxPolls}: ${finalDone}/${auditTasks.length} done (completed=${finalComp}, failed=${finalFailed})`);
+
+                if (finalDone >= auditTasks.length) {
+                  results.audits = finalDone;
+                  doneAudits = finalDone;
+                  completedAudits = finalComp;
+                  failedAudits = finalFailed;
+                  await log("info", "Final reconciliation: all audits resolved");
+                  break;
+                }
+              }
+            }
           }
 
           // Attribute failures/incomplete work to fiches so run status is accurate.

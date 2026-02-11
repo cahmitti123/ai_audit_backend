@@ -1931,12 +1931,25 @@ export const runAutomationFunction = inngest.createFunction(
           };
         });
 
-        const toTranscribe = schedule.skipIfTranscribed ? pre.toTranscribe : transcriptionTargetsWithCache;
+        // IMPORTANT: In automation mode, ALWAYS transcribe ALL fiches — never skip based
+        // on pre-check snapshots. The fiche-details stage uses force_refresh which can
+        // overwrite recording rows (resetting hasTranscription=false). If we skip a fiche
+        // because the pre-check saw it as "already complete" but force_refresh then
+        // overwrites its recordings, the polling gate would wait forever for a fiche
+        // that never received a transcription event.
+        // The transcription workflow itself handles "already transcribed" recordings
+        // efficiently (returns immediately via the finalizer), so the cost is minimal.
+        const toTranscribe = transcriptionTargetsWithCache;
+
+        const preAlreadyComplete = isRecord(pre) && typeof pre.alreadyCompleteCount === "number" ? pre.alreadyCompleteCount : 0;
+        if (preAlreadyComplete > 0) {
+          await log("info", `Pre-check found ${preAlreadyComplete} already-transcribed fiche(s), but dispatching transcription for ALL to guarantee completeness (force_refresh may overwrite recordings)`);
+        }
 
         await log("info", `Sending ${toTranscribe.length} transcription events`, {
           target: transcriptionTargetsWithCache.length,
-          skipIfTranscribed: schedule.skipIfTranscribed,
-          alreadyComplete: pre.alreadyCompleteCount,
+          skipIfTranscribed: false, // always false in automation mode for safety
+          alreadyComplete: preAlreadyComplete,
           send_event_chunk_size: sendChunkSize,
         });
 

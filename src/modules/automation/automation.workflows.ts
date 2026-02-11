@@ -1602,15 +1602,21 @@ export const runAutomationFunction = inngest.createFunction(
       );
 
       // Ignore fiches with too many recordings (protects transcription/audit fan-out).
+      // Hard default of 50: fiches with more than 50 recordings are skipped to avoid
+      // excessive transcription costs and audit timeouts. Schedule config or env var
+      // can lower this but never disable the safety net entirely.
+      const HARD_MAX_RECORDINGS_PER_FICHE = 50;
       const maxRecordingsPerFicheEnv = Number(
         process.env.AUTOMATION_MAX_RECORDINGS_PER_FICHE || 0
       );
-      const maxRecordingsPerFiche =
-        typeof selection.maxRecordingsPerFiche === "number"
+      const configuredMax =
+        typeof selection.maxRecordingsPerFiche === "number" && selection.maxRecordingsPerFiche > 0
           ? selection.maxRecordingsPerFiche
           : Number.isFinite(maxRecordingsPerFicheEnv) && maxRecordingsPerFicheEnv > 0
           ? Math.floor(maxRecordingsPerFicheEnv)
-          : 0;
+          : HARD_MAX_RECORDINGS_PER_FICHE;
+      // Always enforce the hard ceiling — schedule config can lower but not exceed it.
+      const maxRecordingsPerFiche = Math.min(configuredMax, HARD_MAX_RECORDINGS_PER_FICHE);
 
       for (const snap of lastSnapshot) {
         if (snap.isNotFound === true) {

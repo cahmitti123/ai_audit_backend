@@ -15,7 +15,6 @@ import { NonRetriableError } from "inngest";
 import { inngest } from "../../inngest/client.js";
 import { CONCURRENCY,RATE_LIMITS, TIMEOUTS } from "../../shared/constants.js";
 import {
-  getInngestGlobalConcurrency,
   getInngestParallelismPerServer,
 } from "../../shared/inngest-concurrency.js";
 import { prisma } from "../../shared/prisma.js";
@@ -112,8 +111,15 @@ function getProgressiveFetchDayContext(event: unknown): {
   if (!isRecord(event)) {return {};}
   const data = event.data;
   if (!isRecord(data)) {return {};}
-  const jobId = typeof data.jobId === "string" ? data.jobId : undefined;
-  const date = typeof data.date === "string" ? data.date : undefined;
+  // Inngest failure events wrap the original event at `data.event`.
+  const maybeOriginalEvent = data.event;
+  const source =
+    isRecord(maybeOriginalEvent) && isRecord(maybeOriginalEvent.data)
+      ? maybeOriginalEvent.data
+      : data;
+
+  const jobId = typeof source.jobId === "string" ? source.jobId : undefined;
+  const date = typeof source.date === "string" ? source.date : undefined;
   return { jobId, date };
 }
 
@@ -929,6 +935,13 @@ export const cacheSalesListFunction = inngest.createFunction(
     timeouts: {
       finish: "10m", // Increased for large date ranges
     },
+    // IMPORTANT: This function hits the upstream CRM (via the gateway).
+    // Constrain global concurrency so scaled replicas don't overwhelm the CRM.
+    concurrency: [
+      {
+        limit: CONCURRENCY.FICHE_SALES_SEARCH.limit,
+      },
+    ],
   },
   { event: "fiches/cache-sales-list" },
   async ({ event, step, logger }) => {
@@ -1020,6 +1033,8 @@ export const cacheSalesListFunction = inngest.createFunction(
         const allFiches: SalesWithCallsResponse["fiches"] = [];
         let successfulChunks = 0;
         let failedChunks = 0;
+        const failedRanges: Array<{ start: string; end: string; error: string }> =
+          [];
 
         for (const range of dateRanges) {
           try {
@@ -1036,11 +1051,18 @@ export const cacheSalesListFunction = inngest.createFunction(
               count: chunkSales.fiches.length,
             });
           } catch (chunkError) {
+            const message =
+              chunkError instanceof Error ? chunkError.message : String(chunkError);
             failedChunks++;
             logger.error("Failed to fetch chunk sales", {
               start: range.start,
               end: range.end,
-              error: (chunkError as Error).message,
+              error: message,
+            });
+            failedRanges.push({
+              start: range.start,
+              end: range.end,
+              error: message,
             });
             // Continue with other chunks
           }
@@ -1070,6 +1092,7 @@ export const cacheSalesListFunction = inngest.createFunction(
             successful_chunks: successfulChunks,
             failed_chunks: failedChunks,
             success_rate: `${successfulChunks}/${dateRanges.length}`,
+            failed_ranges: failedRanges,
           },
         };
       }
@@ -1218,7 +1241,11 @@ export const cacheSalesListFunction = inngest.createFunction(
 /**
  * Progressive Fetch Continuation
  * ==============================
- * Orchestrator: fans out per-day work so multiple replicas can process the date range in parallel.
+ * Orchestrator: fetches sales for the missing range in ONE request (date-range search),
+ * then emits per-day "processed" events so the serialized updater can update/finalize the job.
+ *
+ * This intentionally avoids fanning out day-by-day CRM searches across replicas which can
+ * overwhelm the upstream CRM under load.
  */
 export const progressiveFetchContinueFunction = inngest.createFunction(
   {
@@ -1238,6 +1265,51 @@ export const progressiveFetchContinueFunction = inngest.createFunction(
       // Prevent duplicate runs for the same job
       key: "event.data.jobId",
       limit: 1,
+    },
+    onFailure: async ({ error, step, event }) => {
+      const jobId = (() => {
+        const data: unknown = (event as unknown as { data?: unknown }).data;
+        if (!isRecord(data)) {return undefined;}
+
+        // Inngest passes an internal failure event whose payload includes the original event.
+        const originalEvent = data.event;
+        if (isRecord(originalEvent) && isRecord(originalEvent.data)) {
+          const originalData = originalEvent.data;
+          const fromOriginal =
+            typeof originalData.jobId === "string" ? originalData.jobId : undefined;
+          if (fromOriginal) {return fromOriginal;}
+        }
+
+        // Fallback: some runtimes may pass the original event directly.
+        return typeof data.jobId === "string" ? data.jobId : undefined;
+      })();
+      if (!jobId) {
+        return;
+      }
+
+      const job = await prisma.progressiveFetchJob.findUnique({
+        where: { id: jobId },
+      });
+      const remainingDates = job?.datesRemaining || [];
+      if (remainingDates.length === 0) {
+        return;
+      }
+
+      await step.sendEvent(
+        "emit-remaining-days-failed",
+        remainingDates.map((date) => ({
+          name: "fiches/progressive-fetch-day.processed",
+          data: {
+            jobId,
+            date,
+            ok: false,
+            cached: false,
+            fichesCount: 0,
+            error: error.message,
+          },
+          id: `pf-day-processed-${jobId}-${date}-failed`,
+        }))
+      );
     },
   },
   { event: "fiches/progressive-fetch-continue" },
@@ -1280,25 +1352,118 @@ export const progressiveFetchContinueFunction = inngest.createFunction(
       return { success: true, jobId, remaining: 0 };
     }
 
-    logger.info("Fanning out progressive fetch day workers", {
+    const remainingSet = new Set<string>(remainingDates);
+    const sortedRemaining = [...remainingDates].sort();
+    const fetchStartDate = sortedRemaining[0]!;
+    const fetchEndDate = sortedRemaining[sortedRemaining.length - 1]!;
+
+    logger.info("Fetching + caching sales list for remaining dates (single range)", {
       jobId,
+      fetchStartDate,
+      fetchEndDate,
       remaining: remainingDates.length,
       force_refresh: forceRefresh,
     });
 
-    await step.sendEvent(
-      "fan-out-days",
-      remainingDates.map((date) => ({
-        name: "fiches/progressive-fetch-day",
-        data: { jobId, date, force_refresh: forceRefresh },
-        id: `pf-day-${jobId}-${date}`,
-      }))
-    );
+    const cacheWorkflowResult = await step.invoke("cache-sales-list-range", {
+      function: cacheSalesListFunction,
+      data: {
+        startDate: fetchStartDate,
+        endDate: fetchEndDate,
+      },
+    });
+
+    const expandRangeToDates = (start: string, end: string) => {
+      const dates: string[] = [];
+      const cur = new Date(`${start}T00:00:00.000Z`);
+      const last = new Date(`${end}T00:00:00.000Z`);
+      while (cur <= last) {
+        dates.push(cur.toISOString().split("T")[0]);
+        cur.setUTCDate(cur.getUTCDate() + 1);
+      }
+      return dates;
+    };
+
+    const failedDateErrors = new Map<string, string>();
+    const chunkStats = (cacheWorkflowResult as Record<string, unknown> | null | undefined)
+      ?.sales_fetch as { chunk_stats?: unknown } | undefined;
+    const failedRanges = (
+      (chunkStats?.chunk_stats as { failed_ranges?: unknown } | undefined)
+        ?.failed_ranges ?? []
+    ) as Array<{ start?: unknown; end?: unknown; error?: unknown }>;
+
+    for (const r of failedRanges) {
+      const start = typeof r.start === "string" ? r.start : null;
+      const end = typeof r.end === "string" ? r.end : null;
+      if (!start || !end) {
+        continue;
+      }
+      const error =
+        typeof r.error === "string" && r.error.trim().length > 0
+          ? r.error.trim()
+          : "Chunk sales fetch failed";
+
+      for (const d of expandRangeToDates(start, end)) {
+        if (!remainingSet.has(d) || failedDateErrors.has(d)) {
+          continue;
+        }
+        failedDateErrors.set(d, `Failed to fetch sales for ${start}..${end}: ${error}`);
+      }
+    }
+
+    const dayProcessedEventName = "fiches/progressive-fetch-day.processed" as const;
+    const processedEvents: Array<{
+      name: typeof dayProcessedEventName;
+      data: {
+        jobId: string;
+        date: string;
+        ok: boolean;
+        cached: boolean;
+        fichesCount: number;
+        error?: string;
+      };
+      id: string;
+    }> = remainingDates.map((date) => {
+      const error = failedDateErrors.get(date);
+      if (error) {
+        return {
+          name: dayProcessedEventName,
+          data: {
+            jobId,
+            date,
+            ok: false,
+            cached: false,
+            fichesCount: 0,
+            error,
+          },
+          id: `pf-day-processed-${jobId}-${date}-failed`,
+        };
+      }
+
+      return {
+        name: dayProcessedEventName,
+        data: {
+          jobId,
+          date,
+          ok: true,
+          cached: false,
+          fichesCount: 0,
+        },
+        id: `pf-day-processed-${jobId}-${date}`,
+      };
+    });
+
+    await step.sendEvent("emit-days-processed", processedEvents);
 
     return {
       success: true,
       jobId,
       remaining: remainingDates.length,
+      fetchStartDate,
+      fetchEndDate,
+      cache: (cacheWorkflowResult as Record<string, unknown> | null | undefined)
+        ?.workflow_summary,
+      failed_dates: Array.from(failedDateErrors.keys()),
     };
   }
 );
@@ -1330,7 +1495,7 @@ export const progressiveFetchDayFunction = inngest.createFunction(
           1,
           Number(
             process.env.PROGRESSIVE_FETCH_DAY_CONCURRENCY ||
-              getInngestGlobalConcurrency()
+              CONCURRENCY.FICHE_SALES_SEARCH.limit
           )
         ),
       },

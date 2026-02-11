@@ -29,8 +29,9 @@
     - **tools** (optional): keep timeline out of the prompt; LLM uses constrained transcript tools (`searchTranscript`, `getTranscriptChunks`) to fetch evidence
 - **Progressive fiche fetch (date range)**:
   - Orchestrator: `fiches/progressive-fetch-continue`
-  - Worker: `fiches/progressive-fetch-day` (one date per event)
-  - Updater: `fiches/progressive-fetch-day.processed` (serialized per jobId)
+  - Worker: `fiches/cache-sales-list` (single date-range sales search + DB caching)
+  - Updater: `fiches/progressive-fetch-day.processed` (serialized per jobId; emitted after caching to drive progress/finalization)
+  - Legacy: `fiches/progressive-fetch-day` remains available but is no longer used by the main flow (avoids per-day CRM fan-out)
 - **Automation**:
   - Orchestrator: `automation/run`
   - Fan-out: `fiche/fetch` (details), `fiche/transcribe`, `audit/run`

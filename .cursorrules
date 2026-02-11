@@ -22,6 +22,12 @@
 - For user-provided webhook URLs (progressive fetch), validate with SSRF guard.
 - For debugging webhook failures, log axios `code`, `status`, and URL path (avoid full secret leakage).
 
+## CRM load protection
+- Avoid fanning out day-by-day CRM sales searches across replicas; prefer a single date-range sales search (`fiches/cache-sales-list`) and then process/update job state.
+- Keep CRM-bound concurrency **small and global** by default (don’t scale with replicas):
+  - `FICHE_SALES_SEARCH_CONCURRENCY` (default `1`) for `/sales-with-calls` searches
+  - `FICHE_FETCH_CONCURRENCY` (default `3`) for fiche by-id detail fetches
+
 
 
 

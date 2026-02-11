@@ -9,7 +9,7 @@ This doc explains how the backend serves **fast date-range fiche lists** by retu
 - HTTP: `GET /api/fiches/status/by-date-range?startDate&endDate&refresh?&webhookUrl?&webhookSecret?`
 - HTTP (polling): `GET /api/fiches/webhooks/fiches?jobId=...`
 - HTTP (debug): `GET /api/fiches/jobs`, `GET /api/fiches/jobs/:jobId`
-- Inngest: `fiches/progressive-fetch-continue` → per-day workers → serialized job updater
+- Inngest: `fiches/progressive-fetch-continue` → `fiches/cache-sales-list` (single date-range search) → serialized job updater
 - Cache coverage logic via `FicheCache.salesDate` + `getDateRangeCoverage()`
 - RBAC scope filtering (self/group/all) and why users can see fewer fiches than exist in cache
 - Webhook delivery semantics (progress/complete/failed) and retry tracking
@@ -128,15 +128,18 @@ All functions are defined in `src/modules/fiches/fiches.workflows.ts`.
 
 | Inngest event | Function id | Exported const | Notes |
 |---|---:|---|---|
-| `fiches/progressive-fetch-continue` | `progressive-fetch-continue` | `progressiveFetchContinueFunction` | Orchestrator: fans out per-day events |
-| `fiches/progressive-fetch-day` | `progressive-fetch-day` | `progressiveFetchDayFunction` | Worker: fetch+cache one date |
+| `fiches/progressive-fetch-continue` | `progressive-fetch-continue` | `progressiveFetchContinueFunction` | Orchestrator: runs **one** date-range sales search via `cache-sales-list`, then emits per-day processed events |
+| `fiches/cache-sales-list` | `cache-sales-list-for-date-range` | `cacheSalesListFunction` | Worker: fetches sales list for a date range (single request; may fall back to sequential chunks) and caches sales summaries |
+| `fiches/progressive-fetch-day` | `progressive-fetch-day` | `progressiveFetchDayFunction` | Legacy worker (day-by-day CRM fetch). Not used by the main progressive-fetch flow anymore, but kept for compatibility/debug |
 | `fiches/progressive-fetch-day.processed` | `progressive-fetch-update-job` | `progressiveFetchUpdateJobFunction` | Serialized updater + finalizer + webhook sender |
 
 **Implementation note (important)**: the orchestrator loads the job from Postgres and uses `job.datesRemaining` as the source of truth. Today, only `event.data.jobId` and `event.data.force_refresh` are actually used; `startDate/endDate/datesAlreadyFetched/webhookUrl/webhookSecret` in the event type are effectively informational.
 
 ### Key environment knobs (tuning)
 
-- `PROGRESSIVE_FETCH_DAY_CONCURRENCY`: global max concurrency for `fiches/progressive-fetch-day` (defaults to `getInngestGlobalConcurrency()`).
+- `FICHE_SALES_SEARCH_CONCURRENCY`: global max concurrency for upstream CRM sales searches (defaults to `1`).
+- `FICHE_FETCH_CONCURRENCY`: global max concurrency for upstream CRM fiche detail fetches (defaults to `3`).
+- `PROGRESSIVE_FETCH_DAY_CONCURRENCY`: legacy knob for `fiches/progressive-fetch-day` (defaults to `FICHE_SALES_SEARCH_CONCURRENCY`).
 - `PROGRESSIVE_FETCH_WEBHOOK_FREQUENCY`: send `"progress"` webhooks every N processed days (default `5`, and always on terminal).
 - `FICHE_SALES_INCLUDE_RECORDINGS=1`: include recording metadata in sales-list fetches (larger payloads, slower).
 - `FICHE_SALES_CACHE_CONCURRENCY`: per-day DB upsert concurrency (defaults to `INNGEST_PARALLELISM_PER_SERVER`).

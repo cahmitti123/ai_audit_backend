@@ -10,7 +10,7 @@
 - **Scaled backend** behind nginx load balancer (3 replicas).
 - **Audit pipeline** executes in parallel at the **step** level across replicas.
 - **Optional audit transcript tools mode** (`use_rlm: true` per request) keeps long timelines out of prompts and lets the LLM fetch/quote evidence via constrained tools.
-- **Progressive fiche date-range jobs** run distributed per day and correctly finalize.
+- **Progressive fiche date-range jobs** use a single date-range sales search (no per-day CRM fan-out) and correctly finalize, with CRM-protective concurrency caps (`FICHE_SALES_SEARCH_CONCURRENCY`, `FICHE_FETCH_CONCURRENCY`).
 - **Batch audits** require Redis for progress/finalization (`POST /api/audits/batch` returns 503 if `REDIS_URL` is not configured).
 - **Automation runs** distribute fiche detail fetch across replicas and fan out transcription/audit work.
 - **Automation runs list endpoint**: `GET /api/automation/runs` supports `limit`/`offset` across all schedules.

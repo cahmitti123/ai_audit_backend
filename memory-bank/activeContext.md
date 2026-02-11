@@ -33,9 +33,12 @@
   - Existing deterministic **evidence gating** still validates citations against the transcript and downgrades unsupported claims.
 - **Chat history ordering**:
   - Chat endpoints use the most recent ~50 messages (returned chronologically), so long conversations don’t keep prompting on the oldest context.
-- **Progressive fiche date-range fan-out**:
-  - `fiches/progressive-fetch-continue` fans out per-day work.
-  - Day workers emit processed events; a serialized updater updates/finalizes the job.
+- **Progressive fiche date-range background fetch (CRM-safe)**:
+  - `fiches/progressive-fetch-continue` triggers a **single** date-range sales search via `fiches/cache-sales-list` (sequential chunk fallback if needed).
+  - Then it emits per-day `fiches/progressive-fetch-day.processed` events; a serialized updater updates/finalizes the job.
+  - Global concurrency caps protect the upstream CRM:
+    - `FICHE_SALES_SEARCH_CONCURRENCY` (default `1`) for sales searches
+    - `FICHE_FETCH_CONCURRENCY` (default `3`) for fiche by-id detail fetches
   - Added defensive “derived status” in job polling endpoints.
 - **Automation run distribution**:
   - Replaced inline fiche detail fetching with distributed `fiche/fetch` fan-out.

@@ -57,11 +57,17 @@ export const CONCURRENCY = {
       getInngestGlobalConcurrency()
     ),
   },
+  FICHE_SALES_SEARCH: {
+    // IMPORTANT: This hits the upstream CRM (via the gateway). Do NOT scale with replicas by default.
+    // Default: 1 concurrent sales search globally across all replicas.
+    limit: toPositiveInt(process.env.FICHE_SALES_SEARCH_CONCURRENCY, 1),
+  },
   FICHE_FETCH: {
-    // Default: 10 per server * number of server replicas
+    // IMPORTANT: This hits the upstream CRM (via the gateway). Do NOT scale with replicas by default.
+    // Default: 3 concurrent fiche detail fetches globally across all replicas.
     limit: toPositiveInt(
       process.env.FICHE_FETCH_CONCURRENCY,
-      getInngestGlobalConcurrency()
+      3
     ),
   },
 } as const;

@@ -304,6 +304,41 @@ export const transcribeFicheFunction = inngest.createFunction(
       const alreadyTranscribed = toNumber(plan.alreadyTranscribed, 0);
       const toTranscribe = plan.toTranscribe;
 
+      // Hard safety limit: refuse to transcribe fiches with an excessive number of recordings.
+      // This prevents runaway costs and timeouts on abnormal fiches (e.g., 1600+ recordings).
+      const MAX_RECORDINGS_HARD_LIMIT = 50;
+      if (totalRecordings > MAX_RECORDINGS_HARD_LIMIT) {
+        const msg = `Fiche ${fiche_id} has ${totalRecordings} recordings (hard limit: ${MAX_RECORDINGS_HARD_LIMIT}) — skipping transcription`;
+        logger.warn(msg, { fiche_id, totalRecordings, limit: MAX_RECORDINGS_HARD_LIMIT });
+        wlog.end("skipped", { reason: "too_many_recordings", totalRecordings, limit: MAX_RECORDINGS_HARD_LIMIT });
+
+        await step.sendEvent(`emit-skipped-too-many-recordings-${fiche_id}`, {
+          name: "fiche/transcribed",
+          data: {
+            fiche_id,
+            transcribed_count: 0,
+            cached_count: 0,
+            failed_count: 0,
+            skipped: true,
+            reason: "too_many_recordings",
+          },
+        });
+
+        return {
+          success: false,
+          batch_size: 1,
+          results: [{
+            success: false,
+            fiche_id,
+            cached: false,
+            transcribed: 0,
+            newTranscriptions: 0,
+            total: totalRecordings,
+            error: msg,
+          }],
+        };
+      }
+
       // Send status check webhook (mirrors service behavior)
       await step.run(`send-transcription-status-check-${fiche_id}`, async () => {
         await transcriptionWebhooks.statusCheck(

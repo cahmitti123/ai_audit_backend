@@ -1618,6 +1618,50 @@ export const runAutomationFunction = inngest.createFunction(
       // Always enforce the hard ceiling — schedule config can lower but not exceed it.
       const maxRecordingsPerFiche = Math.min(configuredMax, HARD_MAX_RECORDINGS_PER_FICHE);
 
+      // Load ACTUAL recording counts from the Recording table for all fiches.
+      // The ficheCache.recordingsCount column can be null/stale; the Recording table
+      // is the source of truth. Without this, fiches with hasRecordings=true but
+      // recordingsCount=null bypass the maxRecordingsPerFiche limit entirely.
+      const actualRecordingCounts = await step.run(
+        `load-actual-recording-counts-${runIdString}`,
+        async () => {
+          const { prisma } = await import("../../shared/prisma.js");
+          const cacheRows = await prisma.ficheCache.findMany({
+            where: { ficheId: { in: ficheIds } },
+            select: { ficheId: true, id: true },
+          });
+          const cacheIdToFicheId = new Map(cacheRows.map((r) => [r.id.toString(), r.ficheId]));
+          const cacheIds = cacheRows.map((r) => r.id);
+
+          if (cacheIds.length === 0) {return {} as Record<string, number>;}
+
+          const counts = await prisma.recording.groupBy({
+            by: ["ficheCacheId"],
+            where: { ficheCacheId: { in: cacheIds } },
+            _count: { _all: true },
+          });
+
+          const result: Record<string, number> = {};
+          for (const row of counts) {
+            const ficheId = cacheIdToFicheId.get(row.ficheCacheId.toString());
+            if (ficheId) {
+              result[ficheId] = typeof row._count?._all === "number" ? row._count._all : 0;
+            }
+          }
+          return result;
+        }
+      );
+
+      // Normalize the step output (Inngest serialization can return unexpected types).
+      const recordingCountByFicheId = new Map<string, number>();
+      if (isRecord(actualRecordingCounts)) {
+        for (const [ficheId, count] of Object.entries(actualRecordingCounts)) {
+          if (typeof count === "number" && Number.isFinite(count)) {
+            recordingCountByFicheId.set(ficheId, count);
+          }
+        }
+      }
+
       for (const snap of lastSnapshot) {
         if (snap.isNotFound === true) {
           terminalNotFoundFicheIds.add(snap.ficheId);
@@ -1650,19 +1694,20 @@ export const runAutomationFunction = inngest.createFunction(
           }
         }
 
+        // Use the ACTUAL recording count from the Recording table (source of truth).
+        // Fall back to the snapshot's count only if the DB query didn't return a result.
+        const actualCount = recordingCountByFicheId.get(snap.ficheId);
         const recordingsCount =
-          typeof snap.recordingsCount === "number" && Number.isFinite(snap.recordingsCount)
+          typeof actualCount === "number"
+            ? actualCount
+            : typeof snap.recordingsCount === "number" && Number.isFinite(snap.recordingsCount)
             ? snap.recordingsCount
-            : null;
+            : 0; // Default to 0 instead of null — never let an unknown count bypass the limit.
 
-        const hasAnyRecordings = (recordingsCount ?? 0) > 0 || snap.hasRecordings;
+        const hasAnyRecordings = recordingsCount > 0 || snap.hasRecordings;
 
         if (hasAnyRecordings) {
-          if (
-            maxRecordingsPerFiche > 0 &&
-            typeof recordingsCount === "number" &&
-            recordingsCount > maxRecordingsPerFiche
-          ) {
+          if (maxRecordingsPerFiche > 0 && recordingsCount > maxRecordingsPerFiche) {
             ignoredTooManyRecordings.push({
               ficheId: snap.ficheId,
               recordingsCount,

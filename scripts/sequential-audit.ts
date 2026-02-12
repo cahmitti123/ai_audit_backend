@@ -530,6 +530,11 @@ async function main() {
   console.log(`============================================================\n`);
 
   fileLog(`Config: ${JSON.stringify({ ...config, startDate: config.startDate, endDate: config.endDate })}`);
+  fileLog(`Env: DATABASE_URL=${process.env.DATABASE_URL ? "set (" + process.env.DATABASE_URL.slice(0, 30) + "...)" : "NOT SET"}`);
+  fileLog(`Env: ELEVENLABS_API_KEY=${process.env.ELEVENLABS_API_KEY ? "set" : "NOT SET"}`);
+  fileLog(`Env: OPENAI_API_KEY=${process.env.OPENAI_API_KEY ? "set" : "NOT SET"}`);
+  fileLog(`Env: CRM_GATEWAY_BASE_URL=${process.env.CRM_GATEWAY_BASE_URL || process.env.GATEWAY_BASE_URL || "not set (using default)"}`);
+  fileLog(`Node: ${process.version}, platform: ${process.platform}, cwd: ${process.cwd()}`);
 
   // ── Step 0: Validate prerequisites ──────────────────────────────────────────
 
@@ -576,12 +581,17 @@ async function main() {
   for (const isoDate of dates) {
     const slashDate = toSlashDate(isoDate);
     try {
+      const fetchStart = Date.now();
       const fiches = await withRetry(`CRM fetch ${isoDate}`, () => fetchFichesForDate(slashDate, false));
       const ids = fiches.map(extractFicheId).filter((id): id is string => id !== null);
       for (const id of ids) {allFicheIds.add(id);}
-      log(`  ${isoDate}: ${ids.length} fiche(s)`);
+      log(`  ${isoDate}: ${ids.length} fiche(s) (${elapsed(fetchStart)})`);
+      fileLog(`CRM ${isoDate} (${slashDate}): ${ids.length} fiches, raw_response_length=${Array.isArray(fiches) ? fiches.length : "not_array"} (${elapsed(fetchStart)})${ids.length > 0 ? ` sample=[${ids.slice(0, 3).join(",")}]` : ""}`);
     } catch (err) {
-      logWarn(`  ${isoDate}: failed to fetch — ${err instanceof Error ? err.message : String(err)}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error && err.stack ? err.stack.split("\n").slice(0, 3).join(" | ") : "";
+      logWarn(`  ${isoDate}: failed to fetch — ${msg}`);
+      fileLog(`CRM ${isoDate} FAILED: ${msg}${stack ? ` STACK: ${stack}` : ""}`);
     }
 
     // Small delay between API calls to avoid hammering CRM
@@ -592,7 +602,7 @@ async function main() {
 
   let ficheIds: string[] = Array.from(allFicheIds);
   log(`\n  Total unique fiches: ${c.bold}${ficheIds.length}${c.reset}`);
-  fileLog(`Total unique fiches from CRM: ${ficheIds.length}`);
+  fileLog(`Total unique fiches from CRM: ${ficheIds.length}${ficheIds.length > 0 ? ` first_10=[${ficheIds.slice(0, 10).join(",")}]` : ""}`);
 
   // ── Step 1b: Optionally filter fiches with recordings ───────────────────────
 
@@ -750,12 +760,19 @@ async function main() {
           ficheData.recordings = ficheData.recordings.map(enrichRecording);
         }
 
-        await cacheFicheDetails(ficheData);
+        const cacheResult = await cacheFicheDetails(ficheData);
         result.recordingsCount = ficheData.recordings?.length ?? 0;
 
+        const prospectStr = ficheData.prospect
+          ? `${ficheData.prospect.prenom || ""} ${ficheData.prospect.nom || ""}`.trim()
+          : "N/A";
+        const ficheIdFromData = ficheData.information?.fiche_id ?? ficheId;
+
         logSuccess(
-          `Details fetched and cached (${elapsed(detailsStart)}) — recordings: ${result.recordingsCount}`
+          `Details fetched and cached (${elapsed(detailsStart)}) — ` +
+            `recordings: ${result.recordingsCount}, prospect: ${prospectStr}, cache_id: ${cacheResult.id}`
         );
+        fileLog(`DETAILS ${ficheId} — ok in ${elapsed(detailsStart)}, fiche_id_crm=${ficheIdFromData}, recordings=${result.recordingsCount}, prospect=${prospectStr}, cache_id=${cacheResult.id}`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg.includes("404") || msg.toLowerCase().includes("not found")) {
@@ -824,6 +841,7 @@ async function main() {
             `new: ${txResult.newTranscriptions}` +
             (txResult.failed ? `, failed: ${txResult.failed}` : "")
         );
+        fileLog(`TRANSCRIBE ${ficheId} — ok in ${elapsed(txStart)}, total=${txResult.total}, transcribed=${txResult.transcribed}, new=${txResult.newTranscriptions}, failed=${txResult.failed ?? 0}${txResult.error ? `, warning=${txResult.error}` : ""}`);
       } else if (config.skipTranscription) {
         logStep("TRANSCRIBE", `${c.yellow}Skipped${c.reset} (using existing DB transcriptions)`);
       }
@@ -836,6 +854,7 @@ async function main() {
       const totalChunks = timeline.reduce((sum, r) => sum + (r.total_chunks || 0), 0);
 
       logSuccess(`Timeline: ${timeline.length} recording(s), ${totalChunks} chunks`);
+      fileLog(`TIMELINE ${ficheId} — recordings=${timeline.length}, chunks=${totalChunks}`);
 
       if (timeline.length === 0) {
         logWarn(`Empty timeline for fiche ${ficheId} — skipping audit`);
@@ -884,6 +903,7 @@ async function main() {
           `ok: ${auditResults.statistics.successful}, fail: ${auditResults.statistics.failed}, ` +
           `tokens: ${auditResults.statistics.total_tokens}`
       );
+      fileLog(`ANALYZE ${ficheId} — ok in ${elapsed(auditStart)}, steps_ok=${auditResults.statistics.successful}, steps_fail=${auditResults.statistics.failed}, tokens=${auditResults.statistics.total_tokens}, time_s=${auditResults.statistics.total_time_seconds}`);
 
       // ── STEP F: Calculate compliance + save ─────────────────────────────
 
@@ -979,13 +999,16 @@ async function main() {
       fileLog(`OK ${ficheId} — score=${compliance.score}% niveau=${compliance.niveau} recs=${result.recordingsCount} time=${elapsed(ficheStart)}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error && err.stack ? err.stack.split("\n").slice(0, 5).join(" | ") : "";
       result.status = "failed";
       result.error = msg;
       failCount++;
       progress.failed.push(ficheId);
 
       logError(`Fiche ${ficheId} failed: ${msg}`);
+      if (stack) {logError(`  ${c.dim}${stack}${c.reset}`);}
       fileLog(`FAIL ${ficheId} — ${msg}`);
+      if (stack) {fileLog(`FAIL ${ficheId} STACK: ${stack}`);}
 
       if (config.stopOnError) {
         logError("Stopping (--stop-on-error is set)");

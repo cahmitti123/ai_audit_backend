@@ -23,6 +23,7 @@
     "seed:auth": "tsx src/scripts/seed-auth.ts",
     "export:audit-configs": "tsx scripts/export-audit-configs.ts",
     "abtest:audits": "tsx scripts/ab-test-audits.ts",
+    "sequential-audit": "tsx scripts/sequential-audit.ts",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
     "prisma:studio": "prisma studio",

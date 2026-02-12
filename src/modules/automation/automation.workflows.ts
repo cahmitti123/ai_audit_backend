@@ -258,7 +258,7 @@ export const runAutomationFunction = inngest.createFunction(
     name: "Run Automated Audit Processing",
     retries: 2,
     timeouts: {
-      finish: "2h", // 2 hours max
+      finish: "5h", // 2 hours max
     },
   },
   { event: "automation/run" },

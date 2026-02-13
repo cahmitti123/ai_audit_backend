@@ -2053,10 +2053,14 @@ export async function getDateRangeCoverage(
   const endDateStr =
     typeof endDate === "string" ? endDate : endDate.toISOString().split("T")[0];
 
-  // Generate all dates in the requested range using string manipulation
+  // Generate all dates in the requested range using string manipulation.
+  // Clamp end to today (UTC) so future dates are never queried.
   const allRequestedDates: string[] = [];
   const current = new Date(startDateStr + "T00:00:00.000Z");
-  const end = new Date(endDateStr + "T00:00:00.000Z");
+  const todayUTC = new Date();
+  todayUTC.setUTCHours(23, 59, 59, 999);
+  const rawEnd = new Date(endDateStr + "T00:00:00.000Z");
+  const end = rawEnd > todayUTC ? todayUTC : rawEnd;
 
   while (current <= end) {
     allRequestedDates.push(current.toISOString().split("T")[0]);

@@ -1376,7 +1376,11 @@ export const progressiveFetchContinueFunction = inngest.createFunction(
     const expandRangeToDates = (start: string, end: string) => {
       const dates: string[] = [];
       const cur = new Date(`${start}T00:00:00.000Z`);
-      const last = new Date(`${end}T00:00:00.000Z`);
+      // Clamp end to today (UTC) – no point fetching future dates
+      const todayUTC = new Date();
+      todayUTC.setUTCHours(23, 59, 59, 999);
+      const rawLast = new Date(`${end}T00:00:00.000Z`);
+      const last = rawLast > todayUTC ? todayUTC : rawLast;
       while (cur <= last) {
         dates.push(cur.toISOString().split("T")[0]);
         cur.setUTCDate(cur.getUTCDate() + 1);
@@ -1657,7 +1661,11 @@ export const progressiveFetchUpdateJobFunction = inngest.createFunction(
     const buildAllDates = (start: string, end: string) => {
       const dates: string[] = [];
       const cur = new Date(`${start}T00:00:00.000Z`);
-      const last = new Date(`${end}T00:00:00.000Z`);
+      // Clamp end to today (UTC) – future dates can't have fiches
+      const todayUTC = new Date();
+      todayUTC.setUTCHours(23, 59, 59, 999);
+      const rawLast = new Date(`${end}T00:00:00.000Z`);
+      const last = rawLast > todayUTC ? todayUTC : rawLast;
       while (cur <= last) {
         dates.push(cur.toISOString().split("T")[0]);
         cur.setUTCDate(cur.getUTCDate() + 1);

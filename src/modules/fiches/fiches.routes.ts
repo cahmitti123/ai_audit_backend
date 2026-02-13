@@ -580,6 +580,31 @@ fichesRouter.get(
       throw new ValidationError("startDate must be before or equal to endDate");
     }
 
+    // Clamp endDate to today – fetching future dates is unnecessary (no fiches exist yet)
+    const todayStr = new Date().toISOString().split("T")[0];
+    const clampedEndDate = endDate > todayStr ? todayStr : endDate;
+
+    // If the entire range is in the future, return empty immediately
+    if (startDate > todayStr) {
+      res.json({
+        startDate,
+        endDate,
+        total: 0,
+        fiches: [],
+        meta: {
+          complete: true,
+          partial: false,
+          backgroundJobId: null,
+          totalDaysRequested: 0,
+          daysFetched: 0,
+          daysRemaining: 0,
+          daysCached: 0,
+          cacheCoverage: { datesWithData: [], datesMissing: [] },
+        },
+      });
+      return;
+    }
+
     // Validate webhook URL if provided
     if (webhookUrlStr) {
       const validation = validateOutgoingWebhookUrl(webhookUrlStr);
@@ -606,7 +631,7 @@ fichesRouter.get(
           data: {
             jobId,
             startDate,
-            endDate,
+            endDate: clampedEndDate,
             datesAlreadyFetched: [], // Background will fetch ALL remaining dates
             webhookUrl: webhookUrlStr,
             webhookSecret: webhookSecretStr,
@@ -624,10 +649,10 @@ fichesRouter.get(
       }
     };
 
-    // Use progressive fetch strategy
+    // Use progressive fetch strategy (clamped to today – no future dates)
     const result = await fichesService.getFichesByDateRangeProgressive(
       startDate,
-      endDate,
+      clampedEndDate,
       {
         webhookUrl: webhookUrlStr,
         webhookSecret: webhookSecretStr,

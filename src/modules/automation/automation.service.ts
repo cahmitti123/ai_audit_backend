@@ -502,14 +502,25 @@ function calculateDateRange(
   customEndDate?: string
 ): { startDate: string | null; endDate: string | null } {
   if (dateRange === "custom") {
+    // Clamp custom endDate so it never exceeds today (no future-date fetching)
+    const todayFormatted = formatDate(new Date());
+    let clampedEnd = customEndDate || null;
+    if (clampedEnd) {
+      const endParsed = parseDateDDMMYYYY(clampedEnd);
+      const todayParsed = parseDateDDMMYYYY(todayFormatted);
+      if (endParsed > todayParsed) {
+        clampedEnd = todayFormatted;
+      }
+    }
     return {
       startDate: customStartDate || null,
-      endDate: customEndDate || null,
+      endDate: clampedEnd,
     };
   }
 
   const now = new Date();
   let startDate: Date | null = null;
+  // endDate defaults to today (never future)
   let endDate: Date = now;
 
   switch (dateRange) {

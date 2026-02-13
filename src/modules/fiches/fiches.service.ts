@@ -32,12 +32,15 @@ import type {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Generate array of dates between start and end (inclusive)
+ * Generate array of dates between start and end (inclusive).
+ * Defensively clamps end to today so future dates are never generated.
  */
 function generateDateRange(startDate: string, endDate: string): string[] {
   const dates: string[] = [];
   const current = new Date(startDate);
-  const end = new Date(endDate);
+  const today = new Date();
+  today.setHours(23, 59, 59, 999); // end of today
+  const end = new Date(endDate) > today ? today : new Date(endDate);
 
   while (current <= end) {
     dates.push(current.toISOString().split("T")[0]);

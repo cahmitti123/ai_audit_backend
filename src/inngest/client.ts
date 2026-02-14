@@ -70,6 +70,8 @@ type Events = {
   "automation/run": { data: AutomationEvents["automation/run"] };
   "automation/completed": { data: AutomationEvents["automation/completed"] };
   "automation/failed": { data: AutomationEvents["automation/failed"] };
+  "automation/process-day": { data: AutomationEvents["automation/process-day"] };
+  "automation/process-fiche": { data: AutomationEvents["automation/process-fiche"] };
 };
 
 /**

@@ -42,4 +42,38 @@ export type AutomationEvents = {
     run_id: string;
     error: string;
   };
+
+  /**
+   * Process a single day (child workflow invoked by orchestrator)
+   */
+  "automation/process-day": {
+    date: string; // DD/MM/YYYY
+    schedule_id: string;
+    run_id: string;
+    audit_config_id: number;
+    run_transcription: boolean;
+    run_audits: boolean;
+    max_recordings: number;
+    max_fiches?: number;
+    only_with_recordings: boolean;
+    use_rlm: boolean;
+    api_key?: string;
+    only_unaudited?: boolean;
+    groupes?: string[];
+  };
+
+  /**
+   * Process a single fiche (child workflow invoked by day worker)
+   */
+  "automation/process-fiche": {
+    fiche_id: string;
+    audit_config_id: number;
+    schedule_id: string;
+    run_id: string;
+    run_transcription: boolean;
+    run_audits: boolean;
+    max_recordings?: number;
+    only_with_recordings?: boolean;
+    use_rlm?: boolean;
+  };
 };

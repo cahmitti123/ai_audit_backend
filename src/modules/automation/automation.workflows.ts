@@ -16,6 +16,8 @@ import { createWorkflowLogger } from "../../shared/workflow-logger.js";
 import { createWorkflowTracer } from "../../shared/workflow-tracer.js";
 import type { RecordingLike } from "../../utils/recording-parser.js";
 import * as automationApi from "./automation.api.js";
+import { processDayFunction as registeredProcessDayFunction } from "./automation.day-worker.js";
+import { processFicheFunction as registeredProcessFicheFunction } from "./automation.fiche-worker.js";
 import * as automationRepository from "./automation.repository.js";
 import type {
   AutomationLogLevel,
@@ -77,7 +79,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function isFullFicheDetailsRawData(value: unknown): boolean {
+function _isFullFicheDetailsRawData(value: unknown): boolean {
   if (!isRecord(value)) {return false;}
   const success = (value as { success?: unknown }).success;
   const information = (value as { information?: unknown }).information;
@@ -133,7 +135,7 @@ function getFicheId(value: unknown): string | null {
   return null;
 }
 
-function toSalesSummaryCacheInput(value: unknown): {
+function _toSalesSummaryCacheInput(value: unknown): {
   id: string;
   cle: string | null;
   nom: string;
@@ -182,7 +184,7 @@ function safeOneLineJson(value: unknown, maxChars = 15_000): string {
     const json = JSON.stringify(sanitized);
     if (typeof json !== "string") {return "";}
     if (json.length <= maxChars) {return json;}
-    return `${json.slice(0, maxChars)}…(truncated ${json.length - maxChars} chars)`;
+    return `${json.slice(0, maxChars)}â€¦(truncated ${json.length - maxChars} chars)`;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return `{"_error":"failed to stringify metadata","message":${JSON.stringify(msg)}}`;
@@ -206,7 +208,7 @@ function chunkArray<T>(items: T[], chunkSize: number): T[][] {
   return chunks;
 }
 
-function isNotFoundMarker(detailsSuccess: unknown, detailsMessage: unknown): boolean {
+function _isNotFoundMarker(detailsSuccess: unknown, detailsMessage: unknown): boolean {
   if (detailsSuccess !== false) {return false;}
   if (typeof detailsMessage !== "string") {return false;}
   const msg = detailsMessage.trim();
@@ -220,8 +222,9 @@ function isNotFoundMarker(detailsSuccess: unknown, detailsMessage: unknown): boo
 }
 
 function getAutomationDerivedStaleThresholdMs(): number {
-  // Derived from per-stage max waits so scheduler can self-heal faster than the
-  // Inngest finish timeout when waits are configured smaller.
+  // New architecture: orchestrator (5h) invokes day workers (4h each) which invoke
+  // fiche workers (1h each). The stale threshold should be the orchestrator finish
+  // timeout plus a grace period.
   const msEnv = (name: string, fallback: number, min = 60_000) => {
     const raw = process.env[name];
     const n = raw === undefined || raw === "" ? fallback : Number(raw);
@@ -229,18 +232,13 @@ function getAutomationDerivedStaleThresholdMs(): number {
     return Math.max(min, safe);
   };
 
-  const ficheDetailsMaxWaitMs = msEnv(
-    "AUTOMATION_FICHE_DETAILS_MAX_WAIT_MS",
-    10 * 60 * 1000
+  const orchestratorTimeoutMs = msEnv(
+    "AUTOMATION_STALE_THRESHOLD_MS",
+    5 * 60 * 60 * 1000 // 5h (matches orchestrator finish timeout)
   );
-  const transcriptionMaxWaitMs = msEnv(
-    "AUTOMATION_TRANSCRIPTION_MAX_WAIT_MS",
-    15 * 60 * 1000
-  );
-  const auditMaxWaitMs = msEnv("AUTOMATION_AUDIT_MAX_WAIT_MS", 30 * 60 * 1000);
-  const graceMs = msEnv("AUTOMATION_SCHEDULER_STALE_GRACE_MS", 15 * 60 * 1000);
+  const graceMs = msEnv("AUTOMATION_SCHEDULER_STALE_GRACE_MS", 30 * 60 * 1000); // 30 min grace
 
-  return ficheDetailsMaxWaitMs + transcriptionMaxWaitMs + auditMaxWaitMs + graceMs;
+  return orchestratorTimeoutMs + graceMs;
 }
 
 /**
@@ -520,10 +518,11 @@ export const runAutomationFunction = inngest.createFunction(
             }
           : rawSelection
       );
-      const apiKey = schedule.externalApiKey || undefined;
+      const _apiKey = schedule.externalApiKey || undefined;
 
       // Declare variables that will be set in either manual or API mode
       let ficheIds: string[] = [];
+      let dates: string[] = [];
 
       // Step 3a: Handle manual mode
       if (selection.mode === "manual" && selection.ficheIds) {
@@ -647,7 +646,7 @@ export const runAutomationFunction = inngest.createFunction(
         }
       } else {
         // Step 3b: Calculate dates for API mode
-        const dates = await step.run("calculate-dates", async () => {
+        dates = await step.run("calculate-dates", async () => {
           const datesToQuery =
             automationService.calculateDatesToQuery(selection);
           await log(
@@ -722,337 +721,8 @@ export const runAutomationFunction = inngest.createFunction(
           };
         }
 
-        // Step 3c: Fetch fiches (ALWAYS revalidate cache first, then read from DB)
-        // Returns only fiche IDs (not full objects) to stay within Inngest's 4 MB step-output limit.
-        const fetchedFicheIds = await step.run(
-          "fetch-all-fiches",
-          async (): Promise<string[]> => {
-            const { getFichesByDateRangeWithStatus } = await import(
-              "../fiches/fiches.service.js"
-            );
-            const { cacheFicheSalesSummary } = await import(
-              "../fiches/fiches.cache.js"
-            );
-
-            // Convert DD/MM/YYYY to YYYY-MM-DD for DB queries
-            const convertDate = (d: string) => {
-              const [day, month, year] = d.split("/");
-              return `${year}-${month.padStart(2, "0")}-${day.padStart(
-                2,
-                "0"
-              )}`;
-            };
-
-            // Compute the encompassing date range (in DB format)
-            const sortedDates = [...dates].sort((a, b) => {
-              const [dayA, monthA, yearA] = a.split("/");
-              const [dayB, monthB, yearB] = b.split("/");
-              return (
-                new Date(+yearA, +monthA - 1, +dayA).getTime() -
-                new Date(+yearB, +monthB - 1, +dayB).getTime()
-              );
-            });
-
-            const startDate = convertDate(sortedDates[0]);
-            const endDate = convertDate(sortedDates[sortedDates.length - 1]);
-
-            // Revalidate cache for the requested dates before running automation —
-            // but only if the last revalidation was more than 30 minutes ago.
-            // Short cooldown: ensures automation runs get fresh sales data from CRM while
-            // still protecting against rapid-fire retries. Reduced from 30min to 5min because
-            // for unattended automation, data freshness is more important than CRM load reduction.
-            const revalidationCooldownMs = Math.max(
-              0,
-              Number(process.env.AUTOMATION_REVALIDATION_COOLDOWN_MS || 5 * 60 * 1000) // 5 min default
-            );
-
-            const { getLastRevalidationForDateRange } = await import(
-              "../fiches/fiches.revalidation.js"
-            );
-            const lastRevalidation = await getLastRevalidationForDateRange(
-              new Date(startDate + "T00:00:00.000Z"),
-              new Date(endDate + "T23:59:59.999Z")
-            );
-            const msSinceLastRevalidation = lastRevalidation
-              ? Date.now() - lastRevalidation.getTime()
-              : Infinity;
-            const skipRevalidation =
-              lastRevalidation !== null && msSinceLastRevalidation < revalidationCooldownMs;
-
-            const revalidatedAt = new Date();
-            const apiErrors: Array<{ date: string; error: string }> = [];
-
-            if (skipRevalidation) {
-              const minutesAgo = Math.round(msSinceLastRevalidation / 60_000);
-              await log(
-                "info",
-                `Skipping revalidation (last revalidated ${minutesAgo}m ago, cooldown ${Math.round(revalidationCooldownMs / 60_000)}m)`,
-                {
-                  startDate,
-                  endDate,
-                  last_revalidated_at: lastRevalidation!.toISOString(),
-                  cooldown_ms: revalidationCooldownMs,
-                }
-              );
-            } else {
-              await log(
-                "info",
-                `Revalidating fiche cache for ${sortedDates.length} date(s) before automation`,
-                {
-                  startDate,
-                  endDate,
-                  dates: sortedDates.length <= 10 ? sortedDates : undefined,
-                  last_revalidated_at: lastRevalidation?.toISOString() ?? "never",
-                }
-              );
-            }
-
-            // Fetch from external API in small batches (max 3 concurrent) to avoid hammering CRM.
-            // Skip entirely if revalidation was done recently (cooldown).
-            if (!skipRevalidation) {
-              for (let i = 0; i < sortedDates.length; i += 3) {
-                const batch = sortedDates.slice(i, i + 3);
-                const batchResults = await Promise.allSettled(
-                  batch.map(async (date) => {
-                    const fiches = await automationApi.fetchFichesForDate(
-                      date,
-                      // IMPORTANT: never pre-filter by recordings at this stage.
-                      // Sales-list endpoints are often incomplete; we enforce `onlyWithRecordings`
-                      // only AFTER fetching full fiche details.
-                      false,
-                      apiKey
-                    );
-
-                    // Cache them (sales-list summary)
-                    const cacheConcurrency = Math.max(
-                      1,
-                      Number(process.env.FICHE_SALES_CACHE_CONCURRENCY || 10)
-                    );
-                    const { mapWithConcurrency } = await import("../../utils/concurrency.js");
-
-                    type CacheOneResult =
-                      | { ok: true; ficheId: string; hasCle: boolean }
-                      | { ok: false; error: string };
-
-                    const perFicheCache = await mapWithConcurrency<unknown, CacheOneResult>(
-                      fiches,
-                      cacheConcurrency,
-                      async (fiche) => {
-                        try {
-                          const cacheInput = toSalesSummaryCacheInput(fiche);
-                          if (!cacheInput) {return { ok: false, error: "missing fiche id" };}
-                          await cacheFicheSalesSummary(cacheInput, {
-                            salesDate: convertDate(date),
-                            lastRevalidatedAt: revalidatedAt,
-                          });
-                          return {
-                            ok: true,
-                            ficheId: cacheInput.id,
-                            hasCle: typeof cacheInput.cle === "string" && cacheInput.cle.length > 0,
-                          };
-                        } catch (err: unknown) {
-                          return {
-                            ok: false,
-                            error: err instanceof Error ? err.message : String(err),
-                          };
-                        }
-                      }
-                    );
-
-                    const cached = perFicheCache.filter(
-                      (r): r is { ok: true; ficheId: string; hasCle: boolean } => r.ok
-                    );
-                    const missingCleCount = cached.filter((r) => !r.hasCle).length;
-
-                    await log("info", `Revalidated ${date} (${fiches.length} fiches)`, {
-                      cached: cached.length,
-                      cacheConcurrency,
-                      missingCle: missingCleCount,
-                    });
-                    return { date, count: fiches.length };
-                  })
-                );
-
-                for (let j = 0; j < batchResults.length; j++) {
-                  const r = batchResults[j];
-                  const date = batch[j] || "unknown";
-                  if (r.status === "rejected") {
-                    const msg = errorMessage(r.reason);
-                    apiErrors.push({ date, error: msg });
-                    await log(
-                      "error",
-                      `Failed to revalidate ${date}: ${msg} (will fall back to existing cache if present)`
-                    );
-                  }
-                }
-
-                // Small delay between API batches
-                if (i + 3 < sortedDates.length) {
-                  await new Promise((resolve) => setTimeout(resolve, 1000));
-                }
-              }
-
-              // Retry failed dates once before giving up.
-              // CRM timeouts are often transient; a single retry recovers most failures.
-              if (apiErrors.length > 0) {
-                const failedDates = apiErrors.map((e) => e.date);
-                await log("warning", `Retrying ${failedDates.length} failed date(s)`, {
-                  failed_dates: failedDates,
-                });
-
-                // Clear errors for retry — only persistent failures remain.
-                const retryErrors: typeof apiErrors = [];
-                const retryBatches: string[][] = [];
-                for (let i = 0; i < failedDates.length; i += 2) {
-                  retryBatches.push(failedDates.slice(i, i + 2));
-                }
-
-                for (const retryBatch of retryBatches) {
-                  // Brief delay before retry to give CRM time to recover.
-                  await new Promise((resolve) => setTimeout(resolve, 3000));
-
-                  const retryResults = await Promise.allSettled(
-                    retryBatch.map(async (date) => {
-                      const fiches = await automationApi.fetchFichesForDate(date, false, apiKey);
-                      const { mapWithConcurrency: mapRetry } = await import("../../utils/concurrency.js");
-                      await mapRetry(fiches, 10, async (fiche: unknown) => {
-                        try {
-                          const cacheInput = toSalesSummaryCacheInput(fiche);
-                          if (cacheInput) {
-                            await cacheFicheSalesSummary(cacheInput, {
-                              salesDate: convertDate(date),
-                              lastRevalidatedAt: revalidatedAt,
-                            });
-                          }
-                        } catch { /* best-effort */ }
-                      });
-                      await log("info", `Retry succeeded for ${date} (${fiches.length} fiches)`);
-                      return { date, count: fiches.length };
-                    })
-                  );
-
-                  for (let j = 0; j < retryResults.length; j++) {
-                    const r = retryResults[j];
-                    const date = retryBatch[j] || "unknown";
-                    if (r.status === "rejected") {
-                      retryErrors.push({ date, error: errorMessage(r.reason) });
-                      await log(
-                        "error",
-                        `Retry also failed for ${date}: ${errorMessage(r.reason)}`
-                      );
-                    }
-                  }
-                }
-
-                // Replace apiErrors with only the persistent failures.
-                apiErrors.length = 0;
-                apiErrors.push(...retryErrors);
-
-                if (retryErrors.length === 0) {
-                  await log("info", "All failed dates recovered on retry");
-                } else {
-                  await log("warning", `${retryErrors.length} date(s) still failed after retry`, {
-                    persistent_failures: retryErrors.map((e) => e.date),
-                  });
-                }
-              }
-            }
-
-            // Now read from DB (cache) for the whole range
-            const dbResult = await getFichesByDateRangeWithStatus(
-              startDate,
-              endDate
-            );
-            await log("info", `Loaded ${dbResult.fiches.length} fiches from DB`, {
-              startDate,
-              endDate,
-              cache_revalidated_at: revalidatedAt.toISOString(),
-              api_errors: apiErrors.length,
-            });
-
-            // ── Apply filters INSIDE the step so we only return small fiche IDs,
-            //    not the full fiche objects (which can exceed Inngest's 4 MB step-output limit).
-            let filteredFiches: unknown[] = dbResult.fiches;
-
-            // Optional DB-level filters (applied on the post-revalidation DB snapshot)
-            if (Array.isArray(selection.groupes) && selection.groupes.length > 0) {
-              const allowed = new Set(
-                selection.groupes
-                  .map((g) => (typeof g === "string" ? g.trim() : ""))
-                  .filter(Boolean)
-              );
-              if (allowed.size > 0) {
-                const before = filteredFiches.length;
-                let unknownGroupKept = 0;
-                filteredFiches = filteredFiches.filter((fiche) => {
-                  if (!isRecord(fiche)) {return false;}
-                  const g = getStringField(fiche, "groupe");
-                  // IMPORTANT: sales-list-only cache rows may not have `groupe` yet.
-                  // If groupe is missing, keep the fiche and apply the real group filter
-                  // AFTER fetching full fiche details (where groupe is authoritative).
-                  if (typeof g !== "string" || !g.trim()) {
-                    unknownGroupKept++;
-                    return true;
-                  }
-                  return allowed.has(g);
-                });
-                await log("info", `Filtered fiches by groupes (${allowed.size}) (best-effort)`, {
-                  before,
-                  after: filteredFiches.length,
-                  unknown_group_kept: unknownGroupKept,
-                  groupes: Array.from(allowed),
-                });
-              }
-            }
-
-            if (selection.onlyUnaudited === true) {
-              const before = filteredFiches.length;
-              filteredFiches = filteredFiches.filter((fiche) => {
-                if (!isRecord(fiche)) {return false;}
-                const audit = fiche.audit;
-                if (!isRecord(audit)) {return true;}
-                const total = (audit as { total?: unknown }).total;
-                return typeof total === "number" ? total === 0 : true;
-              });
-              await log("info", "Filtered fiches: onlyUnaudited=true", {
-                before,
-                after: filteredFiches.length,
-              });
-            }
-
-            if (selection.onlyWithRecordings) {
-              await log(
-                "info",
-                "onlyWithRecordings is enabled - will filter AFTER fetching fiche details",
-                { totalCandidates: dbResult.fiches.length }
-              );
-            }
-
-            // Apply max limit
-            if (selection.maxFiches && filteredFiches.length > selection.maxFiches) {
-              filteredFiches = filteredFiches.slice(0, selection.maxFiches);
-              await log("info", `Limited to ${selection.maxFiches} fiches`);
-            }
-
-            // Extract final IDs (deduped, stable order) — only IDs are returned
-            // to keep step output well under Inngest's size limit.
-            const extractedIds = filteredFiches
-              .map(getFicheId)
-              .filter((id): id is string => typeof id === "string" && id.length > 0);
-            const uniqueIds = Array.from(new Set(extractedIds));
-
-            await log("info", `Final: ${uniqueIds.length} fiche IDs to process (from ${dbResult.fiches.length} loaded)`, {
-              loaded: dbResult.fiches.length,
-              afterFilters: filteredFiches.length,
-              uniqueIds: uniqueIds.length,
-            });
-
-            return uniqueIds;
-          }
-        );
-
-        ficheIds = fetchedFicheIds;
-
+        // CRM fetching is now handled per-day by day workers (no upfront fetch needed).
+        // Emit realtime selection event with dates info.
         await step.run("realtime-selection", async () => {
           const groupes =
             Array.isArray(selection.groupes) && selection.groupes.length <= 10
@@ -1079,85 +749,91 @@ export const runAutomationFunction = inngest.createFunction(
                   ? selection.maxRecordingsPerFiche
                   : null,
               useRlm: Boolean((selection as unknown as { useRlm?: unknown }).useRlm),
-              total_fiches: ficheIds.length,
+              total_dates: dates.length,
             },
           });
           return { ok: true };
         });
       }
 
-      // Step 4: Check if we have fiches to process
-      if (ficheIds.length === 0) {
-        await log("warning", "No fiches found matching criteria");
-
-        // Update run status
+      // In API mode ficheIds are empty here (day workers fetch per-day).
+      // In manual mode ficheIds are already populated.
+      // The "no fiches" early-exit only applies to manual mode.
+      if (selection.mode === "manual" && ficheIds.length === 0) {
+        await log("warning", "No fiches found matching criteria (manual mode)");
         await step.run("update-run-no-fiches-found", async () => {
           await automationRepository.updateAutomationRun(runId, {
             status: "completed",
             completedAt: new Date(),
             durationMs: Date.now() - startTime!,
-            totalFiches: 0,
-            successfulFiches: 0,
-            failedFiches: 0,
-            resultSummary: {
-              message: "No fiches found",
-              ficheIds: [],
-            },
+            totalFiches: 0, successfulFiches: 0, failedFiches: 0,
+            resultSummary: { message: "No fiches found", ficheIds: [] },
           });
-          await automationRepository.updateScheduleStats(
-            scheduleId,
-            "success"
-          );
+          await automationRepository.updateScheduleStats(scheduleId, "success");
         });
-
         await step.sendEvent("emit-automation-completed-no-fiches-found", {
           name: "automation/completed",
-          data: {
-            schedule_id,
-            run_id: String(runId),
-            status: "completed",
-            total_fiches: 0,
-            successful_fiches: 0,
-            failed_fiches: 0,
-            duration_ms: Date.now() - startTime!,
-          },
+          data: { schedule_id, run_id: String(runId), status: "completed", total_fiches: 0, successful_fiches: 0, failed_fiches: 0, duration_ms: Date.now() - startTime! },
           id: `automation-completed-${runIdString}-no-fiches-found`,
         });
-
         await step.run("realtime-run-finished", async () => {
-          await publishPusherEvent({
-            event: "automation.run.completed",
-            payload: {
-              job_id: realtimeJobId,
-              schedule_id: String(schedule_id),
-              run_id: runIdString,
-              status: "completed",
-              total_fiches: 0,
-              successful_fiches: 0,
-              failed_fiches: 0,
-              reason: "no_fiches_found",
-            },
-          });
+          await publishPusherEvent({ event: "automation.run.completed", payload: { job_id: realtimeJobId, schedule_id: String(schedule_id), run_id: runIdString, status: "completed", total_fiches: 0, successful_fiches: 0, failed_fiches: 0, reason: "no_fiches_manual" } });
           return { ok: true };
         });
-
-        return {
-          success: true,
-          schedule_id,
-          run_id: String(runId),
-          total_fiches: 0,
-          message: "No fiches found",
-        };
+        return { success: true, schedule_id, run_id: String(runId), total_fiches: 0, message: "No fiches found" };
       }
 
-      // Update run with total fiches
-      await step.run("update-run-total", async () => {
-        await automationRepository.updateAutomationRun(runId, {
-          totalFiches: ficheIds.length,
-        });
-      });
+      // Step 5: Resolve audit config(s) for this run
+      const auditConfigIds = await step.run(
+        "resolve-audit-configs",
+        async (): Promise<number[]> => {
+          let configIds: number[] = [];
 
-      // Step 5: Process fiches in batches for better parallelism
+          if (schedule.specificAuditConfigs.length > 0) {
+            for (const maybeId of schedule.specificAuditConfigs as unknown[]) {
+              if (typeof maybeId !== "number") {continue;}
+              if (!Number.isFinite(maybeId) || maybeId <= 0) {continue;}
+              configIds.push(maybeId);
+            }
+          }
+
+          if (schedule.useAutomaticAudits) {
+            const automaticConfigs =
+              await automationRepository.getAutomaticAuditConfigs();
+            for (const cfg of automaticConfigs as Array<{ id: unknown }>) {
+              const n = typeof cfg.id === "bigint" ? Number(cfg.id) : Number(cfg.id);
+              if (!Number.isFinite(n) || n <= 0) {continue;}
+              configIds.push(n);
+            }
+          }
+
+          configIds = [...new Set(configIds)];
+          await log("info", `Resolved ${configIds.length} audit config(s)`, { configIds });
+          return configIds;
+        }
+      );
+
+      const cleanConfigIds: number[] = Array.isArray(auditConfigIds)
+        ? (auditConfigIds as unknown[])
+            .filter((id): id is number => typeof id === "number" && Number.isFinite(id) && id > 0)
+        : [];
+
+      if (cleanConfigIds.length === 0 && schedule.runAudits) {
+        await log("error", "No audit configs resolved; cannot proceed with audits");
+      }
+
+      const primaryConfigId = cleanConfigIds.length > 0 ? cleanConfigIds[0]! : 0;
+
+      // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+      // Step 6: Process days using bounded-parallel day workers
+      // Each day fetches its own fiche IDs from CRM, then invokes fiche workers.
+      // Architecture: orchestrator â†’ day workers â†’ fiche workers
+      //
+      // Concurrency controls:
+      //   AUTOMATION_DAY_CONCURRENCY (default 3) â€” how many days run in parallel
+      //   AUTOMATION_FICHE_WORKER_CONCURRENCY (default 5) â€” how many fiches run in parallel
+      // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
       const results = {
         successful: [] as string[],
         failed: [] as { ficheId: string; error: string }[],
@@ -1169,2044 +845,192 @@ export const runAutomationFunction = inngest.createFunction(
         transcriptions: 0,
         audits: 0,
       };
-      // Track fiches that become terminal NOT_FOUND at any stage so later gates
-      // (transcription/audit) can exclude them from waiting/fan-out.
-      const terminalNotFoundFicheIds = new Set<string>();
 
-      // STEP 1: Ensure all fiches have FULL details cached (distributed across replicas)
-      const sendChunkSize = toPositiveInt(process.env.AUTOMATION_SEND_EVENT_CHUNK_SIZE, 200);
-      const fetchEvents = ficheIds.map((ficheId) => ({
-        name: "fiche/fetch" as const,
-        data: {
-          fiche_id: ficheId,
-          // Always refresh to avoid stale recordings/details during automation fan-out.
-          force_refresh: true,
-        },
-        // Deterministic id: retries won't dispatch duplicate fetches for the same run+fiche
-        id: `automation-${runIdString}-fetch-${ficheId}`,
-      }));
+      // For API mode: process each date via day workers
+      // For manual mode: ficheIds are already set, process them directly
+      const isManualMode = selection.mode === "manual";
 
-      const fetchChunks = chunkArray(fetchEvents, sendChunkSize);
-      await log(
-        "info",
-        `Ensuring fiche details via distributed 'fiche/fetch' fan-out (${ficheIds.length} fiches)`,
-        {
-          inngest_event_id: event.id,
-          force_refresh: true,
-          total: ficheIds.length,
-          send_event_chunk_size: sendChunkSize,
-          chunks: fetchChunks.length,
-          deterministic_event_id_prefix: `automation-${runIdString}-fetch-`,
-        }
-      );
+      if (!isManualMode && dates.length > 0) {
+        // â”€â”€ Day-by-day processing (API mode) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        const { processDayFunction } = await import("./automation.day-worker.js");
+        type ProcessDayResultType = import("./automation.day-worker.js").ProcessDayResult;
 
-      let fetchFanoutEventIdsCount = 0;
-      const fetchFanoutEventIdsSample: string[] = [];
-      for (let i = 0; i < fetchChunks.length; i++) {
-        const stepName = `fan-out-fiche-fetches-${i + 1}-of-${fetchChunks.length}`;
-        const sendResult = await step.sendEvent(stepName, fetchChunks[i]!);
+        const HARD_MAX_RECORDINGS_PER_FICHE = 50;
+        const maxRecordingsPerFicheEnv = Number(process.env.AUTOMATION_MAX_RECORDINGS_PER_FICHE || 0);
+        const configuredMax =
+          typeof selection.maxRecordingsPerFiche === "number" && selection.maxRecordingsPerFiche > 0
+            ? selection.maxRecordingsPerFiche
+            : Number.isFinite(maxRecordingsPerFicheEnv) && maxRecordingsPerFicheEnv > 0
+            ? Math.floor(maxRecordingsPerFicheEnv)
+            : HARD_MAX_RECORDINGS_PER_FICHE;
+        const maxRecordingsPerFiche = Math.min(configuredMax, HARD_MAX_RECORDINGS_PER_FICHE);
+        const useRlm = Boolean((selection as unknown as { useRlm?: unknown }).useRlm);
 
-        const eventIdsRaw =
-          isRecord(sendResult) && Array.isArray(sendResult.ids)
-            ? (sendResult.ids as unknown[])
-            : null;
-        if (eventIdsRaw) {
-          for (const v of eventIdsRaw) {
-            if (typeof v !== "string" || !v.trim()) {continue;}
-            fetchFanoutEventIdsCount++;
-            if (fetchFanoutEventIdsSample.length < 10) {
-              fetchFanoutEventIdsSample.push(v);
+        await log("info", `Processing ${dates.length} day(s) via bounded-parallel day workers`, {
+          dates: dates.length <= 15 ? dates : `${dates.slice(0, 5).join(", ")}... (${dates.length} total)`,
+          audit_config_id: primaryConfigId,
+          run_transcription: schedule.runTranscription,
+          max_recordings_per_fiche: maxRecordingsPerFiche,
+          use_rlm: useRlm,
+          day_concurrency: process.env.AUTOMATION_DAY_CONCURRENCY || 3,
+          fiche_concurrency: process.env.AUTOMATION_FICHE_WORKER_CONCURRENCY || 5,
+        });
+
+        // Process days in batches â€” each batch of days runs in parallel
+        const DAY_BATCH_SIZE = toPositiveInt(process.env.AUTOMATION_DAY_BATCH_SIZE, 3);
+        const dayChunks = chunkArray(dates, DAY_BATCH_SIZE);
+
+        for (let dayBatchIdx = 0; dayBatchIdx < dayChunks.length; dayBatchIdx++) {
+          const dayBatch = dayChunks[dayBatchIdx]!;
+
+          // Invoke all days in this batch in parallel
+          const dayPromises = dayBatch.map((date) =>
+            step.invoke(`process-day-${date.replace(/\//g, "")}`, {
+              function: processDayFunction,
+              data: {
+                date,
+                schedule_id: String(schedule_id),
+                run_id: runIdString,
+                audit_config_id: primaryConfigId,
+                run_transcription: schedule.runTranscription,
+                run_audits: schedule.runAudits !== false,
+                max_recordings: maxRecordingsPerFiche,
+                ...(typeof selection.maxFiches === "number" && selection.maxFiches > 0
+                  ? { max_fiches: selection.maxFiches }
+                  : {}),
+                only_with_recordings: Boolean(selection.onlyWithRecordings),
+                use_rlm: useRlm,
+                api_key: schedule.externalApiKey || undefined,
+                only_unaudited: Boolean(selection.onlyUnaudited),
+                ...(Array.isArray(selection.groupes) && selection.groupes.length > 0
+                  ? { groupes: selection.groupes }
+                  : {}),
+              },
+            })
+          );
+
+          const dayResults = await Promise.all(dayPromises);
+
+          // Aggregate results from all days in this batch
+          for (const raw of dayResults) {
+            const dayResult = raw as unknown as ProcessDayResultType;
+            if (!dayResult) {continue;}
+
+            results.successful.push(...(dayResult.successful || []));
+            results.audits += dayResult.audits || 0;
+
+            for (const f of dayResult.failed || []) {
+              results.failed.push(f);
+            }
+            for (const f of dayResult.ignored || []) {
+              results.ignored.push({ ficheId: f.ficheId, reason: f.reason });
             }
           }
-        }
-      }
 
-      await log("info", "Dispatched fiche/fetch fan-out events", {
-        total_events: fetchEvents.length,
-        chunks: fetchChunks.length,
-        ...(fetchFanoutEventIdsCount > 0
-          ? { inngest_event_ids_count: fetchFanoutEventIdsCount }
-          : {}),
-        ...(fetchFanoutEventIdsSample.length > 0
-          ? { inngest_event_ids_sample: fetchFanoutEventIdsSample }
-          : {}),
-      });
-      wlog.fanOut("fiche/fetch", fetchEvents.length);
-
-      // ── Clear stale NOT_FOUND markers BEFORE polling ──────────────────────────
-      // Previous automation runs (or intermittent CRM 404s) may have left NOT_FOUND
-      // markers in the DB cache. The fiche/fetch events we just dispatched use
-      // `force_refresh: true` and WILL overwrite them — but the polling gate below
-      // checks the DB immediately and would count stale NOT_FOUND markers as "ready",
-      // opening the gate before the fetches finish.
-      // Fix: clear the NOT_FOUND markers now so the gate waits for fresh data.
-      await step.run(`clear-stale-not-found-markers-${runIdString}`, async () => {
-        const { prisma } = await import("../../shared/prisma.js");
-        const result = await prisma.ficheCache.updateMany({
-          where: {
-            ficheId: { in: ficheIds },
-            detailsSuccess: false,
-            detailsMessage: "NOT_FOUND",
-          },
-          data: {
-            detailsSuccess: null,
-            detailsMessage: null,
-          },
-        });
-        return { cleared: result.count };
-      });
-
-      wlog.waiting("fiche-details gate (polling DB for full details)");
-
-      // Durable wait (no in-step busy polling): poll DB snapshot with `step.run` + `step.sleep`.
-      const ficheDetailsMaxWaitMs = Math.max(
-        60_000,
-        Number(
-          process.env.AUTOMATION_FICHE_DETAILS_MAX_WAIT_MS || 10 * 60 * 1000
-        )
-      );
-      const ficheDetailsPollIntervalSeconds = Math.max(
-        5,
-        Number(process.env.AUTOMATION_FICHE_DETAILS_POLL_INTERVAL_SECONDS || 20)
-      );
-
-      // IMPORTANT (Inngest replay semantics):
-      // Use a memoized step value for "started at" so the max-wait window is durable across replays.
-      const ficheDetailsStartedRaw = await step.run(
-        `started-at-fiche-details-${runIdString}`,
-        async () => Date.now()
-      );
-      const ficheDetailsStarted =
-        typeof ficheDetailsStartedRaw === "number" && Number.isFinite(ficheDetailsStartedRaw)
-          ? ficheDetailsStartedRaw
-          : Date.now();
-      let lastReady = 0;
-      let stableCount = 0;
-      let ficheDetailsStallRetries = 0;
-      const maxRetriesRaw = schedule.maxRetries;
-      const maxFicheDetailsStallRetries =
-        schedule.retryFailed &&
-        typeof maxRetriesRaw === "number" &&
-        Number.isFinite(maxRetriesRaw) &&
-        maxRetriesRaw > 0
-          ? Math.floor(maxRetriesRaw)
-          : 0;
-      let lastSnapshot: Array<{
-        ficheId: string;
-        exists: boolean;
-        groupe: string | null;
-        recordingsCount: number | null;
-        hasRecordings: boolean;
-        isSalesListOnly: boolean;
-        isFullDetails: boolean;
-        detailsSuccess: boolean | null;
-        detailsMessage: string | null;
-        isNotFound: boolean;
-      }> = [];
-
-      let ficheDetailsPollAttempt = 0;
-      while (Date.now() - ficheDetailsStarted < ficheDetailsMaxWaitMs) {
-        lastSnapshot = await step.run(
-          `poll-fiche-details-${runIdString}-${ficheDetailsPollAttempt}`,
-          async () => {
-            const { prisma } = await import("../../shared/prisma.js");
-
-            const rows = await prisma.ficheCache.findMany({
-              where: { ficheId: { in: ficheIds } },
-              select: {
-                ficheId: true,
-                groupe: true,
-                recordingsCount: true,
-                hasRecordings: true,
-                detailsSuccess: true,
-                detailsMessage: true,
-                rawData: true,
-                information: { select: { id: true } },
+          // Progress update after each day batch
+          const daysProcessed = Math.min((dayBatchIdx + 1) * DAY_BATCH_SIZE, dates.length);
+          await step.run(`progress-day-batch-${dayBatchIdx}`, async () => {
+            await publishPusherEvent({
+              event: "automation.run.progress",
+              payload: {
+                job_id: realtimeJobId,
+                schedule_id: String(schedule_id),
+                run_id: runIdString,
+                days_processed: daysProcessed,
+                days_total: dates.length,
+                successful: results.successful.length,
+                failed: results.failed.length,
+                ignored: results.ignored.length,
+                audits: results.audits,
               },
             });
+            return { ok: true };
+          });
 
-            const byId = new Map(rows.map((r) => [r.ficheId, r]));
+          await log("info", `Day batch ${dayBatchIdx + 1}/${dayChunks.length} complete: ${daysProcessed}/${dates.length} days`, {
+            successful: results.successful.length,
+            failed: results.failed.length,
+            ignored: results.ignored.length,
+            audits: results.audits,
+          });
+        }
 
-            return ficheIds.map((id) => {
-              const r = byId.get(id);
-              if (!r) {
-                return {
-                  ficheId: id,
-                  exists: false,
-                  groupe: null,
-                  recordingsCount: null,
-                  hasRecordings: false,
-                  isSalesListOnly: true,
-                  isFullDetails: false,
-                  detailsSuccess: null,
-                  detailsMessage: null,
-                  isNotFound: false,
-                };
-              }
-              const raw = r.rawData ?? null;
-              const isSalesListOnly = isRecord(raw) && raw._salesListOnly === true;
-              const detailsSuccess =
-                typeof r.detailsSuccess === "boolean" ? r.detailsSuccess : null;
-              const detailsMessage =
-                typeof r.detailsMessage === "string" && r.detailsMessage.trim().length > 0
-                  ? r.detailsMessage.trim()
-                  : null;
-              const isNotFound = isNotFoundMarker(detailsSuccess, detailsMessage);
-              const isFullDetails =
-                Boolean(r.information) ||
-                (isFullFicheDetailsRawData(raw) && !isSalesListOnly);
-              const rawRecordings = isRecord(raw)
-                ? (raw as { recordings?: unknown }).recordings
-                : undefined;
-              const derivedRecordingsCount =
-                typeof r.recordingsCount === "number"
-                  ? r.recordingsCount
-                  : Array.isArray(rawRecordings)
-                  ? rawRecordings.length
-                  : null;
-              return {
-                ficheId: id,
-                exists: true,
-                groupe: typeof r.groupe === "string" && r.groupe.trim() ? r.groupe.trim() : null,
-                recordingsCount: derivedRecordingsCount,
-                hasRecordings: Boolean(r.hasRecordings),
-                isSalesListOnly,
-                isFullDetails,
-                detailsSuccess,
-                detailsMessage,
-                isNotFound,
-              };
-            });
-          }
-        );
+        // Update ficheIds for finalization (include all processed fiches: successful + failed + ignored)
+        ficheIds = [
+          ...results.successful,
+          ...results.failed.map((f) => f.ficheId),
+          ...results.ignored.map((f) => f.ficheId).filter((id) => id !== "*"),
+        ];
+      } else {
+        // â”€â”€ Manual mode: process fiches directly (no day splitting) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        const { processFicheFunction } = await import("./automation.fiche-worker.js");
+        type ProcessFicheResultType = import("./automation.fiche-worker.js").ProcessFicheResult;
 
-        const notFound = lastSnapshot.filter((r) => r.exists && r.isNotFound === true).length;
-        const ready = lastSnapshot.filter(
-          (r) => r.exists && (r.isFullDetails === true || r.isNotFound === true)
-        ).length;
-        const incompleteIds = lastSnapshot
-          .filter((r) => (!r.exists || r.isFullDetails !== true) && r.isNotFound !== true)
-          .map((r) => r.ficheId);
-        const missingCache = lastSnapshot.filter((r) => !r.exists).length;
-        const salesListOnly = lastSnapshot.filter((r) => r.exists && r.isSalesListOnly).length;
-        const nextStableCount = ready === lastReady ? stableCount + 1 : 0;
+        const HARD_MAX_RECORDINGS_PER_FICHE = 50;
+        const maxRecordingsPerFicheEnv = Number(process.env.AUTOMATION_MAX_RECORDINGS_PER_FICHE || 0);
+        const configuredMax =
+          typeof selection.maxRecordingsPerFiche === "number" && selection.maxRecordingsPerFiche > 0
+            ? selection.maxRecordingsPerFiche
+            : Number.isFinite(maxRecordingsPerFicheEnv) && maxRecordingsPerFicheEnv > 0
+            ? Math.floor(maxRecordingsPerFicheEnv)
+            : HARD_MAX_RECORDINGS_PER_FICHE;
+        const maxRecordingsPerFiche = Math.min(configuredMax, HARD_MAX_RECORDINGS_PER_FICHE);
+        const useRlm = Boolean((selection as unknown as { useRlm?: unknown }).useRlm);
 
-        await log("info", `Fiche details progress: ${ready}/${ficheIds.length}`, {
-          attempt: ficheDetailsPollAttempt,
-          elapsed_ms: Date.now() - ficheDetailsStarted,
-          max_wait_ms: ficheDetailsMaxWaitMs,
-          poll_interval_seconds: ficheDetailsPollIntervalSeconds,
-          ready,
-          total: ficheIds.length,
-          stable_count: nextStableCount,
-          stall_retries: ficheDetailsStallRetries,
-          max_stall_retries: maxFicheDetailsStallRetries,
-          not_found: notFound,
-          incomplete: incompleteIds.length,
-          incomplete_sample: incompleteIds.slice(0, 10),
-          missing_cache: missingCache,
-          sales_list_only: salesListOnly,
+        const FICHE_BATCH_SIZE = toPositiveInt(process.env.AUTOMATION_FICHE_BATCH_SIZE, 5);
+        const ficheChunks = chunkArray(ficheIds, FICHE_BATCH_SIZE);
+
+        await log("info", `Processing ${ficheIds.length} manual fiches via child workers`, {
+          total_fiches: ficheIds.length,
+          audit_config_id: primaryConfigId,
         });
 
-        if (ready === ficheIds.length) {break;}
-
-        if (ready === lastReady) {
-          // Only start stall detection after at least one fiche has been fetched
-          // AND a minimum grace period has elapsed (fetches need time to reach CRM).
-          const ficheDetailsElapsedMs = Date.now() - ficheDetailsStarted;
-          const ficheDetailsGracePeriodMs = 2 * 60 * 1000; // 2 minutes
-          if (lastReady > 0 && ficheDetailsElapsedMs >= ficheDetailsGracePeriodMs) {
-            stableCount++;
-          }
-          if (stableCount >= 5) {
-            // Always allow at least 1 automatic retry, even if schedule.retryFailed is off.
-            // This catches transient CRM/network failures without requiring per-schedule config.
-            const effectiveMaxRetries = Math.max(1, maxFicheDetailsStallRetries);
-            if (ficheDetailsStallRetries < effectiveMaxRetries) {
-              ficheDetailsStallRetries++;
-              stableCount = 0;
-                  const retryNo = ficheDetailsStallRetries;
-                  const incomplete = lastSnapshot
-                    .filter((r) => (!r.exists || r.isFullDetails !== true) && r.isNotFound !== true)
-                    .map((r) => r.ficheId);
-
-                  await log("warning", "Fiche details stalled; retrying incomplete fetches", {
-                    ready,
-                    total: ficheIds.length,
-                    stall_retry: `${retryNo}/${effectiveMaxRetries}`,
-                    incomplete: incomplete.length,
-                    incomplete_sample: incomplete.slice(0, 10),
-                    auto_retry: maxFicheDetailsStallRetries === 0,
-                  });
-
-                  if (incomplete.length > 0) {
-                    const retryEvents = incomplete.map((ficheId) => ({
-                      name: "fiche/fetch" as const,
-                      data: { fiche_id: ficheId, force_refresh: true },
-                      id: `automation-${runIdString}-fetch-${ficheId}-retry-${retryNo}`,
-                    }));
-                    const retryChunks = chunkArray(retryEvents, sendChunkSize);
-                    let retryFetchEventIdsCount = 0;
-                    const retryFetchEventIdsSample: string[] = [];
-                    for (let i = 0; i < retryChunks.length; i++) {
-                      const stepName = `retry-fiche-fetches-${runIdString}-${retryNo}-${i + 1}-of-${retryChunks.length}`;
-                      const sendResult = await step.sendEvent(stepName, retryChunks[i]!);
-
-                      const eventIdsRaw =
-                        isRecord(sendResult) && Array.isArray(sendResult.ids)
-                          ? (sendResult.ids as unknown[])
-                          : null;
-                      if (eventIdsRaw) {
-                        for (const v of eventIdsRaw) {
-                          if (typeof v !== "string" || !v.trim()) {continue;}
-                          retryFetchEventIdsCount++;
-                          if (retryFetchEventIdsSample.length < 10) {
-                            retryFetchEventIdsSample.push(v);
-                          }
-                        }
-                      }
-                    }
-
-                    await log("info", "Dispatched retry fiche/fetch events", {
-                      retry_no: retryNo,
-                      total_events: retryEvents.length,
-                      chunks: retryChunks.length,
-                      ...(retryFetchEventIdsCount > 0
-                        ? { inngest_event_ids_count: retryFetchEventIdsCount }
-                        : {}),
-                      ...(retryFetchEventIdsSample.length > 0
-                        ? { inngest_event_ids_sample: retryFetchEventIdsSample }
-                        : {}),
-                    });
-                  }
-            } else {
-              break; // exhausted all retries; proceed with what we have
-            }
-          }
-        } else {
-          stableCount = 0;
-          lastReady = ready;
-        }
-
-        ficheDetailsPollAttempt++;
-        await step.sleep(
-          `sleep-fiche-details-${runIdString}-${ficheDetailsPollAttempt}`,
-          `${ficheDetailsPollIntervalSeconds}s`
-        );
-      }
-
-      // ── FINAL RECONCILIATION: one last attempt for any stragglers ──────────
-      // After the main polling loop exits (stall/timeout), check if any fiches are
-      // still incomplete. If so, re-dispatch fiche/fetch one final time and wait an
-      // abbreviated cycle. This ensures we never mark a fiche as failed without
-      // giving it every possible chance to complete.
-      const incompleteAfterGate = lastSnapshot.filter(
-        (r) => (!r.exists || r.isFullDetails !== true) && r.isNotFound !== true
-      );
-      if (incompleteAfterGate.length > 0) {
-        const incompleteIds = incompleteAfterGate.map((r) => r.ficheId);
-        await log("warning", `Final reconciliation: ${incompleteIds.length} fiche(s) still incomplete after details gate — dispatching final retry`, {
-          incomplete: incompleteIds.length,
-          incomplete_sample: incompleteIds.slice(0, 15),
-        });
-
-        // Re-dispatch fetch events for stragglers.
-        const finalRetryEvents = incompleteIds.map((ficheId) => ({
-          name: "fiche/fetch" as const,
-          data: { fiche_id: ficheId, force_refresh: true },
-          id: `automation-${runIdString}-fetch-${ficheId}-final`,
-        }));
-        const finalRetryChunks = chunkArray(finalRetryEvents, sendChunkSize);
-        for (let i = 0; i < finalRetryChunks.length; i++) {
-          await step.sendEvent(
-            `final-retry-fiche-fetches-${runIdString}-${i + 1}-of-${finalRetryChunks.length}`,
-            finalRetryChunks[i]!
-          );
-        }
-
-        // Abbreviated wait: poll a few times with shorter intervals to give stragglers a chance.
-        const finalPollIntervalSeconds = Math.max(5, Math.min(15, ficheDetailsPollIntervalSeconds));
-        const finalMaxPolls = 6; // ~90s max extra wait at 15s intervals
-        for (let fp = 0; fp < finalMaxPolls; fp++) {
-          await step.sleep(
-            `sleep-fiche-details-final-${runIdString}-${fp}`,
-            `${finalPollIntervalSeconds}s`
-          );
-
-          lastSnapshot = await step.run(
-            `poll-fiche-details-final-${runIdString}-${fp}`,
-            async () => {
-              const { prisma } = await import("../../shared/prisma.js");
-              const rows = await prisma.ficheCache.findMany({
-                where: { ficheId: { in: ficheIds } },
-                select: {
-                  ficheId: true,
-                  groupe: true,
-                  recordingsCount: true,
-                  hasRecordings: true,
-                  detailsSuccess: true,
-                  detailsMessage: true,
-                  rawData: true,
-                  information: { select: { id: true } },
-                },
-              });
-              const byId = new Map(rows.map((r) => [r.ficheId, r]));
-              return ficheIds.map((id) => {
-                const r = byId.get(id);
-                if (!r) {
-                  return { ficheId: id, exists: false, groupe: null, recordingsCount: null, hasRecordings: false, isSalesListOnly: true, isFullDetails: false, detailsSuccess: null, detailsMessage: null, isNotFound: false };
-                }
-                const raw = r.rawData ?? null;
-                const isSalesListOnly = isRecord(raw) && raw._salesListOnly === true;
-                const detailsSuccess = typeof r.detailsSuccess === "boolean" ? r.detailsSuccess : null;
-                const detailsMessage = typeof r.detailsMessage === "string" && r.detailsMessage.trim().length > 0 ? r.detailsMessage.trim() : null;
-                const isNotFoundVal = isNotFoundMarker(detailsSuccess, detailsMessage);
-                const isFullDetails = Boolean(r.information) || (isFullFicheDetailsRawData(raw) && !isSalesListOnly);
-                const rawRecordings = isRecord(raw) ? (raw as { recordings?: unknown }).recordings : undefined;
-                const derivedRecordingsCount = typeof r.recordingsCount === "number" ? r.recordingsCount : Array.isArray(rawRecordings) ? rawRecordings.length : null;
-                return { ficheId: id, exists: true, groupe: typeof r.groupe === "string" && r.groupe.trim() ? r.groupe.trim() : null, recordingsCount: derivedRecordingsCount, hasRecordings: Boolean(r.hasRecordings), isSalesListOnly, isFullDetails, detailsSuccess, detailsMessage, isNotFound: isNotFoundVal };
-              });
-            }
-          );
-
-          const stillIncomplete = lastSnapshot.filter(
-            (r) => (!r.exists || r.isFullDetails !== true) && r.isNotFound !== true
-          ).length;
-          const nowReady = lastSnapshot.filter(
-            (r) => r.exists && (r.isFullDetails === true || r.isNotFound === true)
-          ).length;
-
-          await log("info", `Final reconciliation poll ${fp + 1}/${finalMaxPolls}: ${nowReady}/${ficheIds.length} ready, ${stillIncomplete} still incomplete`);
-
-          if (nowReady === ficheIds.length || stillIncomplete === 0) {
-            await log("info", "Final reconciliation: all fiches resolved");
-            break;
-          }
-        }
-      }
-
-      const ficheFetchFailures: Array<{ ficheId: string; error: string }> = [];
-      const fichesWithRecordings: string[] = [];
-      const fichesWithoutRecordings: string[] = [];
-      const ignoredNotFound: string[] = [];
-      const ignoredTooManyRecordings: Array<{ ficheId: string; recordingsCount: number }> =
-        [];
-      const ignoredWrongGroup: Array<{ ficheId: string; groupe: string | null }> = [];
-
-      const allowedGroupes = new Set(
-        Array.isArray(selection.groupes)
-          ? selection.groupes
-              .map((g) => (typeof g === "string" ? g.trim() : ""))
-              .filter(Boolean)
-          : []
-      );
-
-      // Ignore fiches with too many recordings (protects transcription/audit fan-out).
-      // Hard default of 50: fiches with more than 50 recordings are skipped to avoid
-      // excessive transcription costs and audit timeouts. Schedule config or env var
-      // can lower this but never disable the safety net entirely.
-      const HARD_MAX_RECORDINGS_PER_FICHE = 50;
-      const maxRecordingsPerFicheEnv = Number(
-        process.env.AUTOMATION_MAX_RECORDINGS_PER_FICHE || 0
-      );
-      const configuredMax =
-        typeof selection.maxRecordingsPerFiche === "number" && selection.maxRecordingsPerFiche > 0
-          ? selection.maxRecordingsPerFiche
-          : Number.isFinite(maxRecordingsPerFicheEnv) && maxRecordingsPerFicheEnv > 0
-          ? Math.floor(maxRecordingsPerFicheEnv)
-          : HARD_MAX_RECORDINGS_PER_FICHE;
-      // Always enforce the hard ceiling — schedule config can lower but not exceed it.
-      const maxRecordingsPerFiche = Math.min(configuredMax, HARD_MAX_RECORDINGS_PER_FICHE);
-
-      // Load ACTUAL recording counts from the Recording table for all fiches.
-      // The ficheCache.recordingsCount column can be null/stale; the Recording table
-      // is the source of truth. Without this, fiches with hasRecordings=true but
-      // recordingsCount=null bypass the maxRecordingsPerFiche limit entirely.
-      const actualRecordingCounts = await step.run(
-        `load-actual-recording-counts-${runIdString}`,
-        async () => {
-          const { prisma } = await import("../../shared/prisma.js");
-          const cacheRows = await prisma.ficheCache.findMany({
-            where: { ficheId: { in: ficheIds } },
-            select: { ficheId: true, id: true },
-          });
-          const cacheIdToFicheId = new Map(cacheRows.map((r) => [r.id.toString(), r.ficheId]));
-          const cacheIds = cacheRows.map((r) => r.id);
-
-          if (cacheIds.length === 0) {return {} as Record<string, number>;}
-
-          const counts = await prisma.recording.groupBy({
-            by: ["ficheCacheId"],
-            where: { ficheCacheId: { in: cacheIds } },
-            _count: { _all: true },
-          });
-
-          const result: Record<string, number> = {};
-          for (const row of counts) {
-            const ficheId = cacheIdToFicheId.get(row.ficheCacheId.toString());
-            if (ficheId) {
-              result[ficheId] = typeof row._count?._all === "number" ? row._count._all : 0;
-            }
-          }
-          return result;
-        }
-      );
-
-      // Normalize the step output (Inngest serialization can return unexpected types).
-      const recordingCountByFicheId = new Map<string, number>();
-      if (isRecord(actualRecordingCounts)) {
-        for (const [ficheId, count] of Object.entries(actualRecordingCounts)) {
-          if (typeof count === "number" && Number.isFinite(count)) {
-            recordingCountByFicheId.set(ficheId, count);
-          }
-        }
-      }
-
-      for (const snap of lastSnapshot) {
-        if (snap.isNotFound === true) {
-          terminalNotFoundFicheIds.add(snap.ficheId);
-          ignoredNotFound.push(snap.ficheId);
-          results.ignored.push({
-            ficheId: snap.ficheId,
-            reason: "Fiche not found (404)",
-          });
-          continue;
-        }
-        if (!snap.exists || !snap.isFullDetails) {
-          ficheFetchFailures.push({
-            ficheId: snap.ficheId,
-            error: !snap.exists
-              ? "Fiche not found in cache"
-              : snap.isSalesListOnly
-              ? "Fiche details not fetched (still sales-list-only cache)"
-              : "Fiche details not fetched (cache incomplete)",
-          });
-          continue;
-        }
-
-        // Enforce group filter AFTER full details are present.
-        // Sales-list rows may not contain the group information.
-        if (allowedGroupes.size > 0) {
-          const g = snap.groupe;
-          if (!g || !allowedGroupes.has(g)) {
-            ignoredWrongGroup.push({ ficheId: snap.ficheId, groupe: g });
-            continue;
-          }
-        }
-
-        // Use the ACTUAL recording count from the Recording table (source of truth).
-        // Fall back to the snapshot's count only if the DB query didn't return a result.
-        const actualCount = recordingCountByFicheId.get(snap.ficheId);
-        const recordingsCount =
-          typeof actualCount === "number"
-            ? actualCount
-            : typeof snap.recordingsCount === "number" && Number.isFinite(snap.recordingsCount)
-            ? snap.recordingsCount
-            : 0; // Default to 0 instead of null — never let an unknown count bypass the limit.
-
-        const hasAnyRecordings = recordingsCount > 0 || snap.hasRecordings;
-
-        if (hasAnyRecordings) {
-          if (maxRecordingsPerFiche > 0 && recordingsCount > maxRecordingsPerFiche) {
-            ignoredTooManyRecordings.push({
-              ficheId: snap.ficheId,
-              recordingsCount,
-            });
-            continue;
-          }
-
-          fichesWithRecordings.push(snap.ficheId);
-        } else {
-          fichesWithoutRecordings.push(snap.ficheId);
-        }
-      }
-
-      if (ignoredNotFound.length > 0) {
-        const ignoredSet = new Set(ignoredNotFound);
-        const before = ficheIds.length;
-        ficheIds = ficheIds.filter((id) => !ignoredSet.has(id));
-
-        await log("warning", "Ignoring NOT_FOUND fiches (404)", {
-          before,
-          after: ficheIds.length,
-          ignored: ignoredNotFound.length,
-          ignored_sample: ignoredNotFound.slice(0, 10),
-        });
-
-        // Keep run totals accurate after removing ignored fiches.
-        await step.run("update-run-total-after-not-found", async () => {
-          await automationRepository.updateAutomationRun(runId, {
-            totalFiches: ficheIds.length,
-          });
-        });
-      }
-
-      if (ignoredWrongGroup.length > 0) {
-        const ignoredSet = new Set(ignoredWrongGroup.map((f) => f.ficheId));
-        const before = ficheIds.length;
-        ficheIds = ficheIds.filter((id) => !ignoredSet.has(id));
-
-        for (const f of ignoredWrongGroup) {
-          results.ignored.push({
-            ficheId: f.ficheId,
-            reason: f.groupe ? `Groupe not selected (${f.groupe})` : "Missing groupe",
-          });
-        }
-
-        await log("info", "Ignoring fiches outside selected groupes", {
-          before,
-          after: ficheIds.length,
-          ignored: ignoredWrongGroup.length,
-          groupes: allowedGroupes.size > 0 ? Array.from(allowedGroupes) : undefined,
-        });
-
-        await step.run("update-run-total-after-group-filter", async () => {
-          await automationRepository.updateAutomationRun(runId, {
-            totalFiches: ficheIds.length,
-          });
-        });
-      }
-
-      if (ignoredTooManyRecordings.length > 0) {
-        const ignoredSet = new Set(ignoredTooManyRecordings.map((f) => f.ficheId));
-        ficheIds = ficheIds.filter((id) => !ignoredSet.has(id));
-
-        for (const f of ignoredTooManyRecordings) {
-          results.ignored.push({
-            ficheId: f.ficheId,
-            reason: `Too many recordings (${f.recordingsCount} > ${maxRecordingsPerFiche})`,
-            recordingsCount: f.recordingsCount,
-          });
-        }
-
-        await log("warning", "Ignoring fiches with too many recordings", {
-          maxRecordingsPerFiche,
-          ignored: ignoredTooManyRecordings,
-        });
-
-        // Keep run totals accurate after removing ignored fiches.
-        await step.run("update-run-total-after-ignores", async () => {
-          await automationRepository.updateAutomationRun(runId, {
-            totalFiches: ficheIds.length,
-          });
-        });
-      }
-
-      // If the schedule requested "onlyWithRecordings", drop fiches that ended up with 0 recordings
-      // (after fetching full details) and track them as ignored.
-      if (selection.onlyWithRecordings === true && fichesWithoutRecordings.length > 0) {
-        const ignoredSet = new Set(fichesWithoutRecordings);
-        const before = ficheIds.length;
-        ficheIds = ficheIds.filter((id) => !ignoredSet.has(id));
-
-        for (const ficheId of fichesWithoutRecordings) {
-          results.ignored.push({
-            ficheId,
-            reason: "No recordings",
-          });
-        }
-
-        await log("info", "onlyWithRecordings=true: ignoring fiches without recordings", {
-          before,
-          after: ficheIds.length,
-          ignored: fichesWithoutRecordings.length,
-        });
-
-        await step.run("update-run-total-after-only-with-recordings", async () => {
-          await automationRepository.updateAutomationRun(runId, {
-            totalFiches: ficheIds.length,
-          });
-        });
-      }
-
-      // Merge failures into run results
-      results.failed.push(...ficheFetchFailures);
-
-      wlog.stepDone("fiche-details-gate");
-      await log("info", "Fiche detail fetch complete (distributed)", {
-        total: ficheIds.length,
-        withRecordings: fichesWithRecordings.length,
-        withoutRecordings: fichesWithoutRecordings.length,
-        ignored_too_many_recordings: ignoredTooManyRecordings.length,
-        failed: results.failed.length,
-        maxRecordingsPerFiche: maxRecordingsPerFiche || undefined,
-      });
-
-      // Always continue to next stages with the fiches that succeeded.
-      // Individual fiche failures are tracked in results.failed and affect the
-      // per-fiche outcome, but never block the entire pipeline.
-      if (results.failed.length > 0 && (schedule.runTranscription || schedule.runAudits)) {
-        await log(
-          "warning",
-          `${results.failed.length} fiche(s) failed detail fetch — continuing with remaining fiches`,
-          { failed: results.failed.length, remaining: fichesWithRecordings.length }
-        );
-      }
-
-      // STEP 2: Fan out transcriptions (optionally skip already-transcribed fiches)
-      if (schedule.runTranscription && fichesWithRecordings.length > 0) {
-        const failedFicheIdsBeforeTranscription = new Set(
-          results.failed.map((f) => f.ficheId)
-        );
-        const transcriptionTargets = fichesWithRecordings.filter(
-          (id) => !terminalNotFoundFicheIds.has(id) && !failedFicheIdsBeforeTranscription.has(id)
-        );
-
-        // Load fiche cache IDs once (JSON-safe) so we can poll recordings efficiently without per-fiche DB queries.
-        const cacheRows = await step.run(
-          `load-fiche-cache-ids-transcriptions-${runIdString}`,
-          async () => {
-            const { prisma } = await import("../../shared/prisma.js");
-            const rows = await prisma.ficheCache.findMany({
-              where: { ficheId: { in: transcriptionTargets } },
-              select: { ficheId: true, id: true },
-            });
-            return rows.map((r) => ({ ficheId: r.ficheId, ficheCacheId: r.id.toString() }));
-          }
-        );
-
-        const cacheIdByFicheId = new Map(
-          cacheRows.map((r) => [r.ficheId, r.ficheCacheId] as const)
-        );
-        const missingCacheIds = transcriptionTargets.filter((id) => !cacheIdByFicheId.has(id));
-        if (missingCacheIds.length > 0) {
-          await log("error", "Missing fiche cache rows for transcription polling", {
-            missing: missingCacheIds.length,
-          });
-          for (const ficheId of missingCacheIds) {
-            results.failed.push({
-              ficheId,
-              error: "Missing fiche cache row (cannot poll transcription status)",
-            });
-          }
-        }
-
-        let transcriptionTargetsWithCache = transcriptionTargets.filter((id) =>
-          cacheIdByFicheId.has(id)
-        );
-        let targetCount = transcriptionTargetsWithCache.length;
-
-        // Terminal classification: if a fiche is flagged NOT_FOUND, it should not block transcription waiting.
-        if (targetCount > 0) {
-          const notFoundInitial = await step.run(
-            `detect-notfound-transcriptions-${runIdString}`,
-            async () => {
-              const { prisma } = await import("../../shared/prisma.js");
-              const rows = await prisma.ficheCache.findMany({
-                where: { ficheId: { in: transcriptionTargetsWithCache } },
-                select: { ficheId: true, detailsSuccess: true, detailsMessage: true },
-              });
-
-              return rows
-                .filter((r) => isNotFoundMarker(r.detailsSuccess, r.detailsMessage))
-                .map((r) => r.ficheId);
-            }
-          );
-
-          const newNotFound = notFoundInitial.filter(
-            (id) => !terminalNotFoundFicheIds.has(id)
-          );
-          if (newNotFound.length > 0) {
-            await log(
-              "warning",
-              "Detected NOT_FOUND fiches before transcription fan-out; skipping",
-              {
-                not_found: newNotFound.length,
-                not_found_sample: newNotFound.slice(0, 10),
-              }
-            );
-            for (const ficheId of newNotFound) {
-              terminalNotFoundFicheIds.add(ficheId);
-              results.ignored.push({ ficheId, reason: "Fiche not found (404)" });
-            }
-
-            const notFoundSet = new Set(newNotFound);
-            const beforeTotal = ficheIds.length;
-            ficheIds = ficheIds.filter((id) => !notFoundSet.has(id));
-            transcriptionTargetsWithCache = transcriptionTargetsWithCache.filter(
-              (id) => !notFoundSet.has(id)
-            );
-            targetCount = transcriptionTargetsWithCache.length;
-
-            if (ficheIds.length !== beforeTotal) {
-              await step.run("update-run-total-after-not-found-before-transcriptions", async () => {
-                await automationRepository.updateAutomationRun(runId, {
-                  totalFiches: ficheIds.length,
-                });
-              });
-            }
-          }
-        }
-
-        // Pre-check current completion so we can skip already-complete fiches when configured.
-        const pre = await step.run(`prefilter-transcriptions-${runIdString}`, async () => {
-          const { prisma } = await import("../../shared/prisma.js");
-          const cacheIds = transcriptionTargetsWithCache
-            .map((ficheId) => cacheIdByFicheId.get(ficheId))
-            .filter((v): v is string => typeof v === "string" && v.length > 0)
-            .map((idStr) => BigInt(idStr));
-
-          const rows = await prisma.recording.groupBy({
-            by: ["ficheCacheId", "hasTranscription"],
-            where: { ficheCacheId: { in: cacheIds } },
-            _count: { _all: true },
-          });
-
-          const agg = new Map<string, { total: number; transcribed: number }>();
-          for (const r of rows) {
-            const key = r.ficheCacheId.toString();
-            const current = agg.get(key) || { total: 0, transcribed: 0 };
-            const n = typeof r._count?._all === "number" ? r._count._all : 0;
-            current.total += n;
-            if (r.hasTranscription) {current.transcribed += n;}
-            agg.set(key, current);
-          }
-
-          const alreadyComplete: string[] = [];
-          const toTranscribe: string[] = [];
-
-          for (const ficheId of transcriptionTargetsWithCache) {
-            const cacheId = cacheIdByFicheId.get(ficheId);
-            const counts = cacheId ? agg.get(cacheId) : undefined;
-            const total = counts?.total ?? 0;
-            const transcribed = counts?.transcribed ?? 0;
-            const complete = total > 0 && transcribed === total;
-            if (complete) {alreadyComplete.push(ficheId);}
-            else {toTranscribe.push(ficheId);}
-          }
-
-          return {
-            target: transcriptionTargetsWithCache.length,
-            alreadyCompleteCount: alreadyComplete.length,
-            toTranscribe,
-          };
-        });
-
-        // IMPORTANT: In automation mode, ALWAYS transcribe ALL fiches — never skip based
-        // on pre-check snapshots. The fiche-details stage uses force_refresh which can
-        // overwrite recording rows (resetting hasTranscription=false). If we skip a fiche
-        // because the pre-check saw it as "already complete" but force_refresh then
-        // overwrites its recordings, the polling gate would wait forever for a fiche
-        // that never received a transcription event.
-        // The transcription workflow itself handles "already transcribed" recordings
-        // efficiently (returns immediately via the finalizer), so the cost is minimal.
-        const toTranscribe = transcriptionTargetsWithCache;
-
-        const preAlreadyComplete = isRecord(pre) && typeof pre.alreadyCompleteCount === "number" ? pre.alreadyCompleteCount : 0;
-        if (preAlreadyComplete > 0) {
-          await log("info", `Pre-check found ${preAlreadyComplete} already-transcribed fiche(s), but dispatching transcription for ALL to guarantee completeness (force_refresh may overwrite recordings)`);
-        }
-
-        await log("info", `Sending ${toTranscribe.length} transcription events`, {
-          target: transcriptionTargetsWithCache.length,
-          skipIfTranscribed: false, // always false in automation mode for safety
-          alreadyComplete: preAlreadyComplete,
-          send_event_chunk_size: sendChunkSize,
-        });
-
-        if (toTranscribe.length > 0) {
-          const transcriptionEvents = toTranscribe.map((ficheId) => ({
-            name: "fiche/transcribe" as const,
-            data: {
-              fiche_id: ficheId,
-              priority:
-                (schedule.transcriptionPriority as "normal" | "high" | "low") ||
-                "normal",
-              // Automation doesn't need each fiche-level transcription orchestrator to block;
-              // we wait/poll at the automation level (and audits also ensure transcription when needed).
-              wait_for_completion: false,
-            },
-            id: `automation-${runIdString}-transcribe-${ficheId}`,
-          }));
-
-          const txChunks = chunkArray(transcriptionEvents, sendChunkSize);
-          let txFanoutEventIdsCount = 0;
-          const txFanoutEventIdsSample: string[] = [];
-          for (let i = 0; i < txChunks.length; i++) {
-            const stepName = `fan-out-transcriptions-${i + 1}-of-${txChunks.length}`;
-            const sendResult = await step.sendEvent(stepName, txChunks[i]!);
-
-            const eventIdsRaw =
-              isRecord(sendResult) && Array.isArray(sendResult.ids)
-                ? (sendResult.ids as unknown[])
-                : null;
-            if (eventIdsRaw) {
-              for (const v of eventIdsRaw) {
-                if (typeof v !== "string" || !v.trim()) {continue;}
-                txFanoutEventIdsCount++;
-                if (txFanoutEventIdsSample.length < 10) {
-                  txFanoutEventIdsSample.push(v);
-                }
-              }
-            }
-          }
-
-          wlog.fanOut("fiche/transcribe", transcriptionEvents.length);
-          wlog.waiting("transcription gate (polling DB for has_transcription)");
-          await log("info", "Dispatched fiche/transcribe fan-out events", {
-            total_events: transcriptionEvents.length,
-            chunks: txChunks.length,
-            ...(txFanoutEventIdsCount > 0 ? { inngest_event_ids_count: txFanoutEventIdsCount } : {}),
-            ...(txFanoutEventIdsSample.length > 0
-              ? { inngest_event_ids_sample: txFanoutEventIdsSample }
-              : {}),
-          });
-        }
-
-        // Durable wait (no in-step busy polling): poll recording table snapshot with `step.run` + `step.sleep`.
-        const transcriptionMaxWaitMs = Math.max(
-          60_000,
-          Number(process.env.AUTOMATION_TRANSCRIPTION_MAX_WAIT_MS || 15 * 60 * 1000)
-        );
-        const transcriptionPollIntervalSeconds = Math.max(
-          5,
-          Number(process.env.AUTOMATION_TRANSCRIPTION_POLL_INTERVAL_SECONDS || 30)
-        );
-
-        // IMPORTANT (Inngest replay semantics):
-        // Use a memoized step value for "started at" so the max-wait window is durable across replays.
-      const transcriptionStartedRaw = await step.run(
-          `started-at-transcriptions-${runIdString}`,
-          async () => Date.now()
-        );
-      const transcriptionStarted =
-        typeof transcriptionStartedRaw === "number" && Number.isFinite(transcriptionStartedRaw)
-          ? transcriptionStartedRaw
-          : Date.now();
-        let lastCompleted = 0;
-        let transcriptionStableCount = 0;
-        let transcriptionPollAttempt = 0;
-        let retryAttempt = 0;
-
-        const maxTranscriptionRetriesRaw = schedule.maxRetries;
-        const maxRetries =
-          schedule.retryFailed &&
-          typeof maxTranscriptionRetriesRaw === "number" &&
-          Number.isFinite(maxTranscriptionRetriesRaw) &&
-          maxTranscriptionRetriesRaw > 0
-            ? Math.floor(maxTranscriptionRetriesRaw)
-            : 0;
-
-        while (Date.now() - transcriptionStarted < transcriptionMaxWaitMs) {
-          const poll = await step.run(
-            `poll-transcriptions-${runIdString}-${transcriptionPollAttempt}`,
-            async () => {
-              const { prisma } = await import("../../shared/prisma.js");
-              const ficheRows = await prisma.ficheCache.findMany({
-                where: { ficheId: { in: transcriptionTargetsWithCache } },
-                select: { ficheId: true, detailsSuccess: true, detailsMessage: true },
-              });
-              const notFoundFicheIds = ficheRows
-                .filter((r) => isNotFoundMarker(r.detailsSuccess, r.detailsMessage))
-                .map((r) => r.ficheId);
-              const notFoundSet = new Set(notFoundFicheIds);
-              const activeTargets = transcriptionTargetsWithCache.filter(
-                (ficheId) => !notFoundSet.has(ficheId)
-              );
-
-              const cacheIds = activeTargets
-                .map((ficheId) => cacheIdByFicheId.get(ficheId))
-                .filter((v): v is string => typeof v === "string" && v.length > 0)
-                .map((idStr) => BigInt(idStr));
-
-              const rows = await prisma.recording.groupBy({
-                by: ["ficheCacheId", "hasTranscription"],
-                where: { ficheCacheId: { in: cacheIds } },
-                _count: { _all: true },
-              });
-
-              const agg = new Map<string, { total: number; transcribed: number }>();
-              for (const r of rows) {
-                const key = r.ficheCacheId.toString();
-                const current = agg.get(key) || { total: 0, transcribed: 0 };
-                const n = typeof r._count?._all === "number" ? r._count._all : 0;
-                current.total += n;
-                if (r.hasTranscription) {current.transcribed += n;}
-                agg.set(key, current);
-              }
-
-              let completed = 0;
-              let incomplete = 0;
-              const incomplete_sample: string[] = [];
-              for (const ficheId of activeTargets) {
-                const cacheId = cacheIdByFicheId.get(ficheId);
-                const counts = cacheId ? agg.get(cacheId) : undefined;
-                const total = counts?.total ?? 0;
-                const transcribed = counts?.transcribed ?? 0;
-                const isComplete = total > 0 && transcribed === total;
-                if (isComplete) {completed++;}
-                else {
-                  incomplete++;
-                  if (incomplete_sample.length < 10) {incomplete_sample.push(ficheId);}
-                }
-              }
-              return {
-                completed,
-                incomplete,
-                incomplete_sample,
-                not_found_fiche_ids: notFoundFicheIds,
-              };
-            }
-          );
-
-          const completed =
-            isRecord(poll) && typeof poll.completed === "number" && Number.isFinite(poll.completed)
-              ? poll.completed
-              : 0;
-
-          // Terminal classification: if a fiche becomes NOT_FOUND mid-run (e.g., force-refresh 404),
-          // exclude it from the waiting target set so the automation run can finish deterministically.
-          const notFoundFicheIds =
-            isRecord(poll) && Array.isArray(poll.not_found_fiche_ids)
-              ? (poll.not_found_fiche_ids as unknown[])
-                  .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
-                  .map((v) => v.trim())
-              : [];
-          const newlyNotFound = notFoundFicheIds.filter(
-            (id) => !terminalNotFoundFicheIds.has(id)
-          );
-          if (newlyNotFound.length > 0) {
-            await log(
-              "warning",
-              "Detected NOT_FOUND fiches during transcription wait; skipping",
-              {
-                not_found: newlyNotFound.length,
-                not_found_sample: newlyNotFound.slice(0, 10),
-              }
-            );
-            for (const ficheId of newlyNotFound) {
-              terminalNotFoundFicheIds.add(ficheId);
-              results.ignored.push({ ficheId, reason: "Fiche not found (404)" });
-            }
-
-            const newlyNotFoundSet = new Set(newlyNotFound);
-            const notFoundSet = new Set(notFoundFicheIds);
-            const beforeTotal = ficheIds.length;
-            ficheIds = ficheIds.filter((id) => !newlyNotFoundSet.has(id));
-            transcriptionTargetsWithCache = transcriptionTargetsWithCache.filter(
-              (id) => !notFoundSet.has(id)
-            );
-            targetCount = transcriptionTargetsWithCache.length;
-
-            if (ficheIds.length !== beforeTotal) {
-              await step.run(
-                `update-run-total-after-not-found-during-transcriptions-${runIdString}-${transcriptionPollAttempt}`,
-                async () => {
-                  await automationRepository.updateAutomationRun(runId, {
-                    totalFiches: ficheIds.length,
-                  });
-                }
-              );
-            }
-
-            // If all remaining targets became terminal, there's nothing left to wait for.
-            if (targetCount === 0) {
-              results.transcriptions = 0;
-              break;
-            }
-          }
-          const incomplete =
-            isRecord(poll) && typeof poll.incomplete === "number" && Number.isFinite(poll.incomplete)
-              ? poll.incomplete
-              : Math.max(0, targetCount - completed);
-          const incompleteSample =
-            isRecord(poll) && Array.isArray(poll.incomplete_sample)
-              ? (poll.incomplete_sample as unknown[]).filter(
-                  (v): v is string => typeof v === "string" && v.trim().length > 0
-                ).slice(0, 10)
-              : [];
-          const nextStableCount = completed === lastCompleted ? transcriptionStableCount + 1 : 0;
-
-          await log("info", `Transcription progress: ${completed}/${targetCount}`, {
-            attempt: transcriptionPollAttempt,
-            elapsed_ms: Date.now() - transcriptionStarted,
-            max_wait_ms: transcriptionMaxWaitMs,
-            poll_interval_seconds: transcriptionPollIntervalSeconds,
-            completed,
-            total: targetCount,
-            stable_count: nextStableCount,
-            retry_attempt: retryAttempt,
-            max_retries: maxRetries,
-            incomplete,
-            incomplete_sample: incompleteSample,
-          });
-
-          if (completed >= targetCount) {
-            results.transcriptions = targetCount;
-            await log(
-              "info",
-              `All transcriptions complete in ${Math.round(
-                (Date.now() - transcriptionStarted) / 1000
-              )}s!`
-            );
-            break;
-          }
-
-          if (completed === lastCompleted) {
-            // Only start stall detection after at least one transcription has completed
-            // AND a minimum grace period has elapsed (transcriptions need time to process).
-            const txElapsedMs = Date.now() - transcriptionStarted;
-            const txGracePeriodMs = 3 * 60 * 1000; // 3 minutes
-            if (lastCompleted > 0 && txElapsedMs >= txGracePeriodMs) {
-              transcriptionStableCount++;
-            }
-          } else {
-            transcriptionStableCount = 0;
-            lastCompleted = completed;
-          }
-
-          // If progress stalls, optionally retry by re-dispatching `fiche/transcribe` for incomplete fiches.
-          if (transcriptionStableCount >= 5 && maxRetries > 0 && retryAttempt < maxRetries) {
-            const retryNo = retryAttempt + 1;
-            const incompleteFicheIds = await step.run(
-              `find-incomplete-transcriptions-${runIdString}-retry-${retryNo}`,
-              async () => {
-                const { prisma } = await import("../../shared/prisma.js");
-                const cacheIds = transcriptionTargetsWithCache
-                  .map((ficheId) => cacheIdByFicheId.get(ficheId))
-                  .filter((v): v is string => typeof v === "string" && v.length > 0)
-                  .map((idStr) => BigInt(idStr));
-
-                const rows = await prisma.recording.groupBy({
-                  by: ["ficheCacheId", "hasTranscription"],
-                  where: { ficheCacheId: { in: cacheIds } },
-                  _count: { _all: true },
-                });
-
-                const agg = new Map<string, { total: number; transcribed: number }>();
-                for (const r of rows) {
-                  const key = r.ficheCacheId.toString();
-                  const current = agg.get(key) || { total: 0, transcribed: 0 };
-                  const n = typeof r._count?._all === "number" ? r._count._all : 0;
-                  current.total += n;
-                  if (r.hasTranscription) {current.transcribed += n;}
-                  agg.set(key, current);
-                }
-
-                return transcriptionTargetsWithCache.filter((ficheId) => {
-                  const cacheId = cacheIdByFicheId.get(ficheId);
-                  const counts = cacheId ? agg.get(cacheId) : undefined;
-                  const total = counts?.total ?? 0;
-                  const transcribed = counts?.transcribed ?? 0;
-                  return !(total > 0 && transcribed === total);
-                });
-              }
-            );
-
-            if (incompleteFicheIds.length === 0) {
-              // Defensive: if the DB snapshot says no incompletes, exit the loop.
-              results.transcriptions = completed;
-              break;
-            }
-
-            retryAttempt = retryNo;
-            transcriptionStableCount = 0;
-
-            await log("warning", `Retrying transcriptions (${retryNo}/${maxRetries})`, {
-              incomplete: incompleteFicheIds.length,
-              incomplete_sample: incompleteFicheIds.slice(0, 10),
-            });
-
-            const retryEvents = incompleteFicheIds.map((ficheId) => ({
-              name: "fiche/transcribe" as const,
+        for (let batchIdx = 0; batchIdx < ficheChunks.length; batchIdx++) {
+          const batch = ficheChunks[batchIdx]!;
+          const batchPromises = batch.map((ficheId) =>
+            step.invoke(`process-fiche-${ficheId}`, {
+              function: processFicheFunction,
               data: {
                 fiche_id: ficheId,
-                priority:
-                  (schedule.transcriptionPriority as "normal" | "high" | "low") ||
-                  "normal",
-                wait_for_completion: false,
+                audit_config_id: primaryConfigId,
+                schedule_id: String(schedule_id),
+                run_id: runIdString,
+                run_transcription: schedule.runTranscription,
+                run_audits: schedule.runAudits !== false,
+                max_recordings: maxRecordingsPerFiche,
+                only_with_recordings: Boolean(selection.onlyWithRecordings),
+                use_rlm: useRlm,
               },
-              id: `automation-${runIdString}-transcribe-${ficheId}-retry-${retryNo}`,
-            }));
-
-            const retryChunks = chunkArray(retryEvents, sendChunkSize);
-            let retryTxEventIdsCount = 0;
-            const retryTxEventIdsSample: string[] = [];
-            for (let i = 0; i < retryChunks.length; i++) {
-              const stepName = `retry-transcriptions-${retryNo}-${i + 1}-of-${retryChunks.length}`;
-              const sendResult = await step.sendEvent(stepName, retryChunks[i]!);
-
-              const eventIdsRaw =
-                isRecord(sendResult) && Array.isArray(sendResult.ids)
-                  ? (sendResult.ids as unknown[])
-                  : null;
-              if (eventIdsRaw) {
-                for (const v of eventIdsRaw) {
-                  if (typeof v !== "string" || !v.trim()) {continue;}
-                  retryTxEventIdsCount++;
-                  if (retryTxEventIdsSample.length < 10) {
-                    retryTxEventIdsSample.push(v);
-                  }
-                }
-              }
-            }
-
-            await log("info", "Dispatched retry fiche/transcribe events", {
-              retry_no: retryNo,
-              total_events: retryEvents.length,
-              chunks: retryChunks.length,
-              ...(retryTxEventIdsCount > 0
-                ? { inngest_event_ids_count: retryTxEventIdsCount }
-                : {}),
-              ...(retryTxEventIdsSample.length > 0
-                ? { inngest_event_ids_sample: retryTxEventIdsSample }
-                : {}),
-            });
-          }
-
-          transcriptionPollAttempt++;
-          await step.sleep(
-            `sleep-transcriptions-${runIdString}-${transcriptionPollAttempt}`,
-            `${transcriptionPollIntervalSeconds}s`
-          );
-        }
-
-        if (results.transcriptions === 0 && lastCompleted > 0) {
-          results.transcriptions = lastCompleted;
-        }
-
-        if (results.transcriptions < targetCount) {
-          await log(
-            "warning",
-            `Transcription timeout/stall - completed ${results.transcriptions}/${targetCount} — starting final reconciliation`
+            })
           );
 
-          // ── FINAL RECONCILIATION: re-dispatch for stragglers and wait one last time ──
-          const incompleteForReconciliation = await step.run(
-            `find-incomplete-transcriptions-${runIdString}`,
-            async () => {
-              const { prisma } = await import("../../shared/prisma.js");
-              const cacheIds = transcriptionTargetsWithCache
-                .map((ficheId) => cacheIdByFicheId.get(ficheId))
-                .filter((v): v is string => typeof v === "string" && v.length > 0)
-                .map((idStr) => BigInt(idStr));
-
-              const rows = await prisma.recording.groupBy({
-                by: ["ficheCacheId", "hasTranscription"],
-                where: { ficheCacheId: { in: cacheIds } },
-                _count: { _all: true },
-              });
-
-              const agg = new Map<string, { total: number; transcribed: number }>();
-              for (const r of rows) {
-                const key = r.ficheCacheId.toString();
-                const current = agg.get(key) || { total: 0, transcribed: 0 };
-                const n = typeof r._count?._all === "number" ? r._count._all : 0;
-                current.total += n;
-                if (r.hasTranscription) {current.transcribed += n;}
-                agg.set(key, current);
-              }
-
-              return transcriptionTargetsWithCache.filter((ficheId) => {
-                const cacheId = cacheIdByFicheId.get(ficheId);
-                const counts = cacheId ? agg.get(cacheId) : undefined;
-                const total = counts?.total ?? 0;
-                const transcribed = counts?.transcribed ?? 0;
-                return !(total > 0 && transcribed === total);
-              });
-            }
-          );
-
-          if (incompleteForReconciliation.length > 0) {
-            await log("warning", `Final reconciliation: re-dispatching transcription for ${incompleteForReconciliation.length} incomplete fiche(s)`, {
-              incomplete: incompleteForReconciliation.length,
-              incomplete_sample: incompleteForReconciliation.slice(0, 15),
-            });
-
-            // Re-dispatch transcribe events for stragglers.
-            const finalTxEvents = incompleteForReconciliation.map((ficheId) => ({
-              name: "fiche/transcribe" as const,
-              data: {
-                fiche_id: ficheId,
-                priority: (schedule.transcriptionPriority as "normal" | "high" | "low") || "normal",
-                wait_for_completion: false,
-              },
-              id: `automation-${runIdString}-transcribe-${ficheId}-final`,
-            }));
-            const finalTxChunks = chunkArray(finalTxEvents, sendChunkSize);
-            for (let i = 0; i < finalTxChunks.length; i++) {
-              await step.sendEvent(
-                `final-retry-transcriptions-${runIdString}-${i + 1}-of-${finalTxChunks.length}`,
-                finalTxChunks[i]!
-              );
-            }
-
-            // Abbreviated wait: poll a few times to give stragglers a chance.
-            const finalTxPollInterval = Math.max(5, Math.min(20, transcriptionPollIntervalSeconds));
-            const finalTxMaxPolls = 8; // ~160s max extra wait at 20s intervals
-            for (let fp = 0; fp < finalTxMaxPolls; fp++) {
-              await step.sleep(
-                `sleep-transcription-final-${runIdString}-${fp}`,
-                `${finalTxPollInterval}s`
-              );
-
-              const finalPoll = await step.run(
-                `poll-transcription-final-${runIdString}-${fp}`,
-                async () => {
-                  const { prisma } = await import("../../shared/prisma.js");
-                  const cacheIds = transcriptionTargetsWithCache
-                    .map((ficheId) => cacheIdByFicheId.get(ficheId))
-                    .filter((v): v is string => typeof v === "string" && v.length > 0)
-                    .map((idStr) => BigInt(idStr));
-
-                  const rows = await prisma.recording.groupBy({
-                    by: ["ficheCacheId", "hasTranscription"],
-                    where: { ficheCacheId: { in: cacheIds } },
-                    _count: { _all: true },
-                  });
-
-                  const agg = new Map<string, { total: number; transcribed: number }>();
-                  for (const r of rows) {
-                    const key = r.ficheCacheId.toString();
-                    const current = agg.get(key) || { total: 0, transcribed: 0 };
-                    const n = typeof r._count?._all === "number" ? r._count._all : 0;
-                    current.total += n;
-                    if (r.hasTranscription) {current.transcribed += n;}
-                    agg.set(key, current);
-                  }
-
-                  let completed = 0;
-                  let stillIncomplete = 0;
-                  for (const ficheId of transcriptionTargetsWithCache) {
-                    const cacheId = cacheIdByFicheId.get(ficheId);
-                    const counts = cacheId ? agg.get(cacheId) : undefined;
-                    const total = counts?.total ?? 0;
-                    const transcribed = counts?.transcribed ?? 0;
-                    if (total > 0 && transcribed === total) {completed++;}
-                    else {stillIncomplete++;}
-                  }
-                  return { completed, stillIncomplete };
-                }
-              );
-
-              const comp = isRecord(finalPoll) && typeof finalPoll.completed === "number" ? finalPoll.completed : 0;
-              const inc = isRecord(finalPoll) && typeof finalPoll.stillIncomplete === "number" ? finalPoll.stillIncomplete : 0;
-              await log("info", `Final transcription reconciliation poll ${fp + 1}/${finalTxMaxPolls}: ${comp}/${targetCount} complete, ${inc} still incomplete`);
-
-              if (comp >= targetCount || inc === 0) {
-                results.transcriptions = comp;
-                await log("info", "Final reconciliation: all transcriptions resolved");
-                break;
-              }
-            }
-
-            // Update transcription count from final reconciliation.
-            if (results.transcriptions === 0 && lastCompleted > 0) {
-              results.transcriptions = lastCompleted;
-            }
-          }
-
-          // After final reconciliation, check what is STILL incomplete and mark as failed.
-          const stillIncomplete = await step.run(
-            `find-still-incomplete-transcriptions-${runIdString}`,
-            async () => {
-              const { prisma } = await import("../../shared/prisma.js");
-              const cacheIds = transcriptionTargetsWithCache
-                .map((ficheId) => cacheIdByFicheId.get(ficheId))
-                .filter((v): v is string => typeof v === "string" && v.length > 0)
-                .map((idStr) => BigInt(idStr));
-
-              const rows = await prisma.recording.groupBy({
-                by: ["ficheCacheId", "hasTranscription"],
-                where: { ficheCacheId: { in: cacheIds } },
-                _count: { _all: true },
-              });
-
-              const agg = new Map<string, { total: number; transcribed: number }>();
-              for (const r of rows) {
-                const key = r.ficheCacheId.toString();
-                const current = agg.get(key) || { total: 0, transcribed: 0 };
-                const n = typeof r._count?._all === "number" ? r._count._all : 0;
-                current.total += n;
-                if (r.hasTranscription) {current.transcribed += n;}
-                agg.set(key, current);
-              }
-
-              return transcriptionTargetsWithCache.filter((ficheId) => {
-                const cacheId = cacheIdByFicheId.get(ficheId);
-                const counts = cacheId ? agg.get(cacheId) : undefined;
-                const total = counts?.total ?? 0;
-                const transcribed = counts?.transcribed ?? 0;
-                return !(total > 0 && transcribed === total);
-              });
-            }
-          );
-
-          if (stillIncomplete.length > 0) {
-            await log("error", `${stillIncomplete.length} fiche(s) still have incomplete transcriptions after all retries`, {
-              fiches: stillIncomplete.slice(0, 15),
-            });
-            for (const ficheId of stillIncomplete) {
-              results.failed.push({
-                ficheId,
-                error: "Transcription incomplete after final reconciliation",
-              });
-            }
-          }
-        }
-      }
-
-      // STEP 3: Fan out ALL audits at once
-      // Compute audit targets AFTER transcription stage: exclude fiches that failed
-      // in any prior stage (detail fetch failures, transcription timeouts, etc.)
-      // so we never waste audit work on fiches with incomplete data.
-      const failedFicheIdsBeforeAudits = new Set(
-        results.failed.map((f) => f.ficheId)
-      );
-      const auditFicheTargets = fichesWithRecordings.filter(
-        (id) => !terminalNotFoundFicheIds.has(id) && !failedFicheIdsBeforeAudits.has(id)
-      );
-
-      if (auditFicheTargets.length < fichesWithRecordings.length) {
-        const excluded = fichesWithRecordings.length - auditFicheTargets.length - terminalNotFoundFicheIds.size;
-        if (excluded > 0) {
-          await log("info", `Excluded ${excluded} fiche(s) from audit stage due to prior failures`, {
-            fichesWithRecordings: fichesWithRecordings.length,
-            auditTargets: auditFicheTargets.length,
-            terminalNotFound: terminalNotFoundFicheIds.size,
-            priorFailures: failedFicheIdsBeforeAudits.size,
-          });
-        }
-      }
-
-      if (schedule.runAudits && auditFicheTargets.length > 0) {
-        const auditConfigIds = await step.run(
-          "resolve-all-audit-configs",
-          async (): Promise<number[]> => {
-            let configIds: number[] = [];
-
-            if (schedule.specificAuditConfigs.length > 0) {
-              // Avoid fancy type predicates here — `step.run` serialization and older data
-              // can produce unexpected types; do explicit runtime checks.
-              for (const maybeId of schedule.specificAuditConfigs as unknown[]) {
-                if (typeof maybeId !== "number") {continue;}
-                if (!Number.isFinite(maybeId) || maybeId <= 0) {continue;}
-                configIds.push(maybeId);
-              }
-            }
-
-            if (schedule.useAutomaticAudits) {
-              const automaticConfigs =
-                await automationRepository.getAutomaticAuditConfigs();
-              for (const cfg of automaticConfigs as Array<{ id: unknown }>) {
-                // Prisma returns BigInt IDs; normalize to number for workflow calculations.
-                const n = typeof cfg.id === "bigint" ? Number(cfg.id) : Number(cfg.id);
-                if (!Number.isFinite(n) || n <= 0) {continue;}
-                configIds.push(n);
-              }
-            }
-
-            configIds = [...new Set(configIds)];
-            await log(
-              "info",
-              `Running ${configIds.length} configs × ${
-                auditFicheTargets.length
-              } fiches = ${
-                configIds.length * auditFicheTargets.length
-              } total audits`
-            );
-            return configIds;
-          }
-        );
-
-        // Inngest JSONifies step outputs; be defensive and normalize to numbers
-        const auditConfigIdsClean: number[] = [];
-        if (Array.isArray(auditConfigIds)) {
-          for (const maybeId of auditConfigIds as unknown[]) {
-            if (typeof maybeId !== "number") {continue;}
-            if (!Number.isFinite(maybeId) || maybeId <= 0) {continue;}
-            auditConfigIdsClean.push(maybeId);
-          }
-        }
-
-        if (auditConfigIdsClean.length === 0) {
-          await log("error", "No audit configs resolved; skipping audit stage", {
-            useAutomaticAudits: schedule.useAutomaticAudits,
-            specificAuditConfigs: schedule.specificAuditConfigs.length,
-          });
-          for (const ficheId of auditFicheTargets) {
-            results.failed.push({
-              ficheId,
-              error: "No audit configs resolved",
-            });
-          }
-          // Nothing else to do in audit stage; finalization will mark the run as failed/partial.
-        }
-
-        const auditTasks = auditFicheTargets.flatMap((ficheId) =>
-          auditConfigIdsClean.map((configId) => ({
-            ficheId,
-            configId: Number(configId),
-          }))
-        );
-
-        if (auditTasks.length > 0) {
-          await log(
-            "info",
-            `Sending ${auditTasks.length} audit events (FULL FAN-OUT)`
-          );
-
-          const auditCacheRows = await step.run(
-            `load-fiche-cache-ids-audits-${runIdString}`,
-            async () => {
-              const { prisma } = await import("../../shared/prisma.js");
-              const rows = await prisma.ficheCache.findMany({
-                where: { ficheId: { in: auditFicheTargets } },
-                select: { ficheId: true, id: true },
-              });
-              return rows.map((r) => ({ ficheId: r.ficheId, ficheCacheId: r.id.toString() }));
-            }
-          );
-          const auditCacheIdByFicheId = new Map<string, string>();
-          if (Array.isArray(auditCacheRows)) {
-            for (const row of auditCacheRows as unknown[]) {
-              if (!isRecord(row)) {continue;}
-              const ficheId =
-                typeof row.ficheId === "string" ? row.ficheId.trim() : "";
-              const ficheCacheId =
-                typeof row.ficheCacheId === "string" ? row.ficheCacheId.trim() : "";
-              if (!ficheId || !ficheCacheId) {continue;}
-              auditCacheIdByFicheId.set(ficheId, ficheCacheId);
-            }
-          }
-          const missingAuditCacheIds = auditFicheTargets.filter(
-            (id) => !auditCacheIdByFicheId.has(id)
-          );
-          if (missingAuditCacheIds.length > 0) {
-            await log("warning", "Missing fiche cache rows for audit polling", {
-              missing: missingAuditCacheIds.length,
-              missing_sample: missingAuditCacheIds.slice(0, 10),
-            });
-          }
-          const expectedAuditsPerFiche = auditConfigIdsClean.length;
-
-          const auditEvents = auditTasks.map(({ ficheId, configId }) => ({
-            name: "audit/run" as const,
-            data: {
-              fiche_id: ficheId,
-              audit_config_id: Number(configId),
-              automation_schedule_id: String(schedule_id),
-              automation_run_id: String(runIdString),
-              trigger_source: "automation",
-              use_rlm: Boolean(selection.useRlm),
-            },
-            // Deterministic id: avoid duplicate audit dispatch on retries
-            id: `automation-${runIdString}-audit-${ficheId}-${configId}`,
-          }));
-
-          const auditChunks = chunkArray(auditEvents, sendChunkSize);
-          let auditFanoutEventIdsCount = 0;
-          const auditFanoutEventIdsSample: string[] = [];
-          for (let i = 0; i < auditChunks.length; i++) {
-            const stepName = `fan-out-all-audits-${i + 1}-of-${auditChunks.length}`;
-            const sendResult = await step.sendEvent(stepName, auditChunks[i]!);
-
-            const eventIdsRaw =
-              isRecord(sendResult) && Array.isArray(sendResult.ids)
-                ? (sendResult.ids as unknown[])
-                : null;
-            if (eventIdsRaw) {
-              for (const v of eventIdsRaw) {
-                if (typeof v !== "string" || !v.trim()) {continue;}
-                auditFanoutEventIdsCount++;
-                if (auditFanoutEventIdsSample.length < 10) {
-                  auditFanoutEventIdsSample.push(v);
-                }
-              }
-            }
-          }
-
-          wlog.fanOut("audit/run", auditEvents.length);
-          wlog.waiting("audit gate (polling DB for audit completion)");
-          await log("info", "Dispatched audit/run fan-out events", {
-            total_events: auditEvents.length,
-            chunks: auditChunks.length,
-            ...(auditFanoutEventIdsCount > 0
-              ? { inngest_event_ids_count: auditFanoutEventIdsCount }
-              : {}),
-            ...(auditFanoutEventIdsSample.length > 0
-              ? { inngest_event_ids_sample: auditFanoutEventIdsSample }
-              : {}),
-          });
-
-          // Durable wait (no in-step busy polling): poll audit table with `step.run` + `step.sleep`.
-          const auditMaxWaitMs = Math.max(
-            60_000,
-            Number(process.env.AUTOMATION_AUDIT_MAX_WAIT_MS || 30 * 60 * 1000)
-          );
-          const auditPollIntervalSeconds = Math.max(
-            5,
-            Number(process.env.AUTOMATION_AUDIT_POLL_INTERVAL_SECONDS || 60)
-          );
-
-          // IMPORTANT (Inngest replay semantics):
-          // Use a memoized step value for "started at" so the max-wait window is durable across replays.
-          const auditWaitStartedRaw = await step.run(
-            `started-at-audits-${runIdString}`,
-            async () => Date.now()
-          );
-          const auditWaitStarted =
-            typeof auditWaitStartedRaw === "number" && Number.isFinite(auditWaitStartedRaw)
-              ? auditWaitStartedRaw
-              : Date.now();
-          let lastDone = 0;
-          let auditStableCount = 0;
-          let auditStallRetries = 0;
-          const maxAuditRetriesRaw = schedule.maxRetries;
-          const maxAuditStallRetries =
-            schedule.retryFailed &&
-            typeof maxAuditRetriesRaw === "number" &&
-            Number.isFinite(maxAuditRetriesRaw) &&
-            maxAuditRetriesRaw > 0
-              ? Math.floor(maxAuditRetriesRaw)
-              : 0;
-          let auditPollAttempt = 0;
-
-          let completedAudits = 0;
-          let failedAudits = 0;
-          let doneAudits = 0;
-
-          while (Date.now() - auditWaitStarted < auditMaxWaitMs) {
-            const counts = await step.run(
-              `poll-audits-${runIdString}-${auditPollAttempt}`,
-              async () => {
-                const { prisma } = await import("../../shared/prisma.js");
-                const configIds = auditConfigIdsClean.map((id) => BigInt(Number(id)));
-                const cacheIds = Array.from(auditCacheIdByFicheId.values())
-                  .filter((v) => typeof v === "string" && /^\d+$/.test(v))
-                  .map((idStr) => BigInt(idStr));
-
-                const rows = await prisma.audit.groupBy({
-                  by: ["ficheCacheId", "status"],
-                  where: {
-                    ficheCacheId: { in: cacheIds },
-                    auditConfigId: { in: configIds },
-                    // Link audits to this automation run explicitly (more reliable than createdAt windows)
-                    automationRunId: runId,
-                    isLatest: true,
-                  },
-                  _count: { _all: true },
-                });
-
-                let completed = 0;
-                let failed = 0;
-                const doneByCacheId = new Map<string, number>();
-                for (const r of rows) {
-                  const n = typeof r._count?._all === "number" ? r._count._all : 0;
-                  const cacheKey = r.ficheCacheId.toString();
-                  if (r.status === "completed") {completed += n;}
-                  if (r.status === "failed") {failed += n;}
-                  if (r.status === "completed" || r.status === "failed") {
-                    doneByCacheId.set(cacheKey, (doneByCacheId.get(cacheKey) || 0) + n);
-                  }
-                }
-
-                let incomplete_fiches = 0;
-                const incomplete_fiches_sample: string[] = [];
-                for (const [ficheId, cacheIdStr] of auditCacheIdByFicheId.entries()) {
-                  if (!cacheIdStr || !/^\d+$/.test(cacheIdStr)) {
-                    incomplete_fiches++;
-                    if (incomplete_fiches_sample.length < 10) {
-                      incomplete_fiches_sample.push(ficheId);
-                    }
-                    continue;
-                  }
-                  const done = doneByCacheId.get(cacheIdStr) || 0;
-                  if (done < expectedAuditsPerFiche) {
-                    incomplete_fiches++;
-                    if (incomplete_fiches_sample.length < 10) {
-                      incomplete_fiches_sample.push(ficheId);
-                    }
-                  }
-                }
-
-                return { completed, failed, incomplete_fiches, incomplete_fiches_sample };
-              }
-            );
-
-            completedAudits =
-              isRecord(counts) && typeof counts.completed === "number"
-                ? counts.completed
-                : 0;
-            failedAudits =
-              isRecord(counts) && typeof counts.failed === "number"
-                ? counts.failed
-                : 0;
-            doneAudits = completedAudits + failedAudits;
-            const incompleteFiches =
-              isRecord(counts) && typeof counts.incomplete_fiches === "number"
-                ? counts.incomplete_fiches
-                : null;
-            const incompleteFichesSample =
-              isRecord(counts) && Array.isArray(counts.incomplete_fiches_sample)
-                ? (counts.incomplete_fiches_sample as unknown[])
-                    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
-                    .slice(0, 10)
-                : [];
-            const nextStableCount = doneAudits === lastDone ? auditStableCount + 1 : 0;
-
-            await log(
-              "info",
-              `Audit progress: ${doneAudits}/${auditTasks.length} (completed=${completedAudits}, failed=${failedAudits})`,
-              {
-                attempt: auditPollAttempt,
-                elapsed_ms: Date.now() - auditWaitStarted,
-                max_wait_ms: auditMaxWaitMs,
-                poll_interval_seconds: auditPollIntervalSeconds,
-                done: doneAudits,
-                total: auditTasks.length,
-                stable_count: nextStableCount,
-                stall_retries: auditStallRetries,
-                max_stall_retries: maxAuditStallRetries,
-                incomplete_audits: Math.max(0, auditTasks.length - doneAudits),
-                ...(typeof incompleteFiches === "number"
-                  ? { incomplete_fiches: incompleteFiches }
-                  : {}),
-                ...(incompleteFichesSample.length > 0
-                  ? { incomplete_fiches_sample: incompleteFichesSample }
-                  : {}),
-              }
-            );
-
-            if (doneAudits >= auditTasks.length) {
-              results.audits = doneAudits;
-              await log(
-                "info",
-                `All audits finished in ${Math.round(
-                  (Date.now() - auditWaitStarted) / 1000
-                )}s!`
-              );
-              break;
-            }
-
-            if (doneAudits === lastDone) {
-              // Only start stall detection after at least one audit has completed
-              // AND a minimum grace period has elapsed (audits fan out many GPT calls).
-              const auditElapsedMs = Date.now() - auditWaitStarted;
-              const auditGracePeriodMs = 5 * 60 * 1000; // 5 minutes
-              if (lastDone > 0 && auditElapsedMs >= auditGracePeriodMs) {
-                auditStableCount++;
-              }
-              if (auditStableCount >= 5) {
-                // Always allow at least 1 automatic retry extension, even if schedule.retryFailed is off.
-                const effectiveMaxAuditRetries = Math.max(1, maxAuditStallRetries);
-                if (auditStallRetries < effectiveMaxAuditRetries) {
-                  auditStallRetries++;
-                  auditStableCount = 0;
-                  await log("warning", "Audits stalled; extending wait", {
-                    done: doneAudits,
-                    total: auditTasks.length,
-                    stall_retry: `${auditStallRetries}/${effectiveMaxAuditRetries}`,
-                    auto_retry: maxAuditStallRetries === 0,
-                  });
-                } else {
-                  results.audits = doneAudits;
-                  await log(
-                    "info",
-                    `Audits stable at ${doneAudits}/${auditTasks.length} - proceeding (retries exhausted)`
-                  );
-                  break;
-                }
-              }
+          const batchResults = await Promise.all(batchPromises);
+          for (const raw of batchResults) {
+            const r = raw as unknown as ProcessFicheResultType;
+            if (!r || typeof r.ficheId !== "string") {continue;}
+            if (r.status === "success") {
+              results.successful.push(r.ficheId);
+              results.audits++;
+            } else if (r.status === "failed") {
+              results.failed.push({ ficheId: r.ficheId, error: r.error || "Unknown error" });
             } else {
-              auditStableCount = 0;
-              lastDone = doneAudits;
-            }
-
-            auditPollAttempt++;
-            await step.sleep(
-              `sleep-audits-${runIdString}-${auditPollAttempt}`,
-              `${auditPollIntervalSeconds}s`
-            );
-          }
-
-          if (results.audits === 0 && doneAudits > 0) {
-            results.audits = doneAudits;
-          }
-
-          if (results.audits < auditTasks.length) {
-            await log(
-              "warning",
-              `Audit timeout/stall - finished ${results.audits}/${auditTasks.length} (completed=${completedAudits}, failed=${failedAudits}) — starting final reconciliation`
-            );
-
-            // ── FINAL RECONCILIATION: find incomplete fiches and re-dispatch audit/run ──
-            // Identify which fiches still have incomplete audits and re-dispatch once more.
-            const incompleteFichesForAuditReconciliation: string[] = [];
-            for (const [ficheId, cacheIdStr] of auditCacheIdByFicheId.entries()) {
-              if (!cacheIdStr || !/^\d+$/.test(cacheIdStr)) {
-                incompleteFichesForAuditReconciliation.push(ficheId);
-                continue;
-              }
-            }
-
-            // Check which fiches are actually incomplete via DB.
-            const auditReconciliationCheck = await step.run(
-              `audit-reconciliation-check-${runIdString}`,
-              async () => {
-                const { prisma } = await import("../../shared/prisma.js");
-                const configIds = auditConfigIdsClean.map((id) => BigInt(Number(id)));
-                const cacheIds = Array.from(auditCacheIdByFicheId.values())
-                  .filter((v) => typeof v === "string" && /^\d+$/.test(v))
-                  .map((idStr) => BigInt(idStr));
-
-                const rows = await prisma.audit.groupBy({
-                  by: ["ficheCacheId", "status"],
-                  where: {
-                    ficheCacheId: { in: cacheIds },
-                    auditConfigId: { in: configIds },
-                    automationRunId: runId,
-                    isLatest: true,
-                  },
-                  _count: { _all: true },
-                });
-
-                const doneByCacheId = new Map<string, number>();
-                for (const r of rows) {
-                  if (r.status === "completed" || r.status === "failed") {
-                    const key = r.ficheCacheId.toString();
-                    const n = typeof r._count?._all === "number" ? r._count._all : 0;
-                    doneByCacheId.set(key, (doneByCacheId.get(key) || 0) + n);
-                  }
-                }
-
-                const incomplete: string[] = [];
-                for (const [ficheId, cacheIdStr] of auditCacheIdByFicheId.entries()) {
-                  if (!cacheIdStr || !/^\d+$/.test(cacheIdStr)) {incomplete.push(ficheId); continue;}
-                  const done = doneByCacheId.get(cacheIdStr) || 0;
-                  if (done < expectedAuditsPerFiche) {
-                    incomplete.push(ficheId);
-                  }
-                }
-                return incomplete;
-              }
-            );
-
-            const auditReconciliationIncomplete: string[] = Array.isArray(auditReconciliationCheck)
-              ? auditReconciliationCheck.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
-              : [];
-
-            if (auditReconciliationIncomplete.length > 0) {
-              await log("warning", `Final reconciliation: re-dispatching audits for ${auditReconciliationIncomplete.length} incomplete fiche(s)`, {
-                incomplete: auditReconciliationIncomplete.length,
-                incomplete_sample: auditReconciliationIncomplete.slice(0, 15),
-              });
-
-              // Re-dispatch audit events for incomplete fiches.
-              const finalAuditEvents = auditReconciliationIncomplete.flatMap((ficheId) =>
-                auditConfigIdsClean.map((configId) => ({
-                  name: "audit/run" as const,
-                  data: {
-                    fiche_id: ficheId,
-                    audit_config_id: Number(configId),
-                    automation_schedule_id: String(schedule_id),
-                    automation_run_id: String(runIdString),
-                    trigger_source: "automation",
-                    use_rlm: Boolean(selection.useRlm),
-                  },
-                  id: `automation-${runIdString}-audit-${ficheId}-${configId}-final`,
-                }))
-              );
-              const finalAuditChunks = chunkArray(finalAuditEvents, sendChunkSize);
-              for (let i = 0; i < finalAuditChunks.length; i++) {
-                await step.sendEvent(
-                  `final-retry-audits-${runIdString}-${i + 1}-of-${finalAuditChunks.length}`,
-                  finalAuditChunks[i]!
-                );
-              }
-
-              // Abbreviated wait: poll a few times to give stragglers a chance.
-              const finalAuditPollInterval = Math.max(10, Math.min(30, auditPollIntervalSeconds));
-              const finalAuditMaxPolls = 10; // ~5 min max extra wait at 30s intervals
-              for (let fp = 0; fp < finalAuditMaxPolls; fp++) {
-                await step.sleep(
-                  `sleep-audit-final-${runIdString}-${fp}`,
-                  `${finalAuditPollInterval}s`
-                );
-
-                const finalAuditPoll = await step.run(
-                  `poll-audit-final-${runIdString}-${fp}`,
-                  async () => {
-                    const { prisma } = await import("../../shared/prisma.js");
-                    const configIds = auditConfigIdsClean.map((id) => BigInt(Number(id)));
-                    const cacheIds = Array.from(auditCacheIdByFicheId.values())
-                      .filter((v) => typeof v === "string" && /^\d+$/.test(v))
-                      .map((idStr) => BigInt(idStr));
-
-                    const rows = await prisma.audit.groupBy({
-                      by: ["ficheCacheId", "status"],
-                      where: {
-                        ficheCacheId: { in: cacheIds },
-                        auditConfigId: { in: configIds },
-                        automationRunId: runId,
-                        isLatest: true,
-                      },
-                      _count: { _all: true },
-                    });
-
-                    let completed = 0;
-                    let failed = 0;
-                    for (const r of rows) {
-                      const n = typeof r._count?._all === "number" ? r._count._all : 0;
-                      if (r.status === "completed") {completed += n;}
-                      if (r.status === "failed") {failed += n;}
-                    }
-                    return { completed, failed, done: completed + failed };
-                  }
-                );
-
-                const finalDone = isRecord(finalAuditPoll) && typeof finalAuditPoll.done === "number" ? finalAuditPoll.done : 0;
-                const finalComp = isRecord(finalAuditPoll) && typeof finalAuditPoll.completed === "number" ? finalAuditPoll.completed : 0;
-                const finalFailed = isRecord(finalAuditPoll) && typeof finalAuditPoll.failed === "number" ? finalAuditPoll.failed : 0;
-                await log("info", `Final audit reconciliation poll ${fp + 1}/${finalAuditMaxPolls}: ${finalDone}/${auditTasks.length} done (completed=${finalComp}, failed=${finalFailed})`);
-
-                if (finalDone >= auditTasks.length) {
-                  results.audits = finalDone;
-                  doneAudits = finalDone;
-                  completedAudits = finalComp;
-                  failedAudits = finalFailed;
-                  await log("info", "Final reconciliation: all audits resolved");
-                  break;
-                }
-              }
-            }
-          }
-
-          // Attribute failures/incomplete work to fiches so run status is accurate.
-          const auditFicheOutcomes = await step.run(
-            `summarize-audit-outcomes-${runIdString}`,
-            async () => {
-              const { prisma } = await import("../../shared/prisma.js");
-              const configIds = auditConfigIdsClean.map((id) => BigInt(Number(id)));
-
-              const rows = await prisma.audit.findMany({
-                where: {
-                  ficheCache: { ficheId: { in: auditFicheTargets } },
-                  auditConfigId: { in: configIds },
-                  automationRunId: runId,
-                  isLatest: true,
-                },
-                select: {
-                  status: true,
-                  errorMessage: true,
-                  auditConfigId: true,
-                  ficheCache: { select: { ficheId: true } },
-                },
-              });
-
-              return rows.map((r) => ({
-                ficheId: r.ficheCache.ficheId,
-                status: r.status,
-                audit_config_id: r.auditConfigId.toString(),
-                error: r.errorMessage || null,
-              }));
-            }
-          );
-
-          const expectedConfigs = auditConfigIdsClean.map((id) => String(id));
-          const expectedCount = expectedConfigs.length;
-
-          const perFiche = new Map<
-            string,
-            { completed: Set<string>; failed: Set<string>; errors: string[] }
-          >();
-          for (const row of auditFicheOutcomes) {
-            const ficheId = isRecord(row) && typeof row.ficheId === "string" ? row.ficheId : null;
-            const status = isRecord(row) && typeof row.status === "string" ? row.status : null;
-            const cfg = isRecord(row) && typeof row.audit_config_id === "string" ? row.audit_config_id : null;
-            const err = isRecord(row) && typeof row.error === "string" ? row.error : null;
-            if (!ficheId || !status || !cfg) {continue;}
-
-            let agg = perFiche.get(ficheId);
-            if (!agg) {
-              agg = { completed: new Set(), failed: new Set(), errors: [] };
-              perFiche.set(ficheId, agg);
-            }
-
-            if (status === "completed") {agg.completed.add(cfg);}
-            if (status === "failed") {
-              agg.failed.add(cfg);
-              if (err) {agg.errors.push(err);}
-            }
-          }
-
-          // Terminal classification: a fiche can become NOT_FOUND after initial selection
-          // (e.g., CRM deletion between stages). Treat it as "ignored/skip" rather than a run failure.
-          const notFoundDuringAudits = await step.run(
-            `detect-notfound-audits-${runIdString}`,
-            async () => {
-              const { prisma } = await import("../../shared/prisma.js");
-              const rows = await prisma.ficheCache.findMany({
-                where: { ficheId: { in: auditFicheTargets } },
-                select: { ficheId: true, detailsSuccess: true, detailsMessage: true },
-              });
-              return rows
-                .filter((r) => isNotFoundMarker(r.detailsSuccess, r.detailsMessage))
-                .map((r) => r.ficheId);
-            }
-          );
-          const newlyNotFoundDuringAudits = notFoundDuringAudits.filter(
-            (id) => !terminalNotFoundFicheIds.has(id)
-          );
-          if (newlyNotFoundDuringAudits.length > 0) {
-            await log("warning", "Detected NOT_FOUND fiches during audits; skipping", {
-              not_found: newlyNotFoundDuringAudits.length,
-              not_found_sample: newlyNotFoundDuringAudits.slice(0, 10),
-            });
-
-            const notFoundSet = new Set(newlyNotFoundDuringAudits);
-            for (const ficheId of newlyNotFoundDuringAudits) {
-              terminalNotFoundFicheIds.add(ficheId);
-              results.ignored.push({ ficheId, reason: "Fiche not found (404)" });
-            }
-
-            const beforeTotal = ficheIds.length;
-            ficheIds = ficheIds.filter((id) => !notFoundSet.has(id));
-            if (ficheIds.length !== beforeTotal) {
-              await step.run(
-                `update-run-total-after-not-found-during-audits-${runIdString}`,
-                async () => {
-                  await automationRepository.updateAutomationRun(runId, {
-                    totalFiches: ficheIds.length,
-                  });
-                }
-              );
-            }
-          }
-          const notFoundAuditSet = new Set(notFoundDuringAudits);
-
-          for (const ficheId of auditFicheTargets) {
-            if (notFoundAuditSet.has(ficheId)) {
-              // Skip terminal NOT_FOUND fiches (do not treat as audit failure/incomplete).
-              continue;
-            }
-            const agg = perFiche.get(ficheId) || {
-              completed: new Set<string>(),
-              failed: new Set<string>(),
-              errors: [],
-            };
-
-            if (agg.failed.size > 0) {
-              results.failed.push({
-                ficheId,
-                error:
-                  agg.errors[0] ||
-                  `Audit failed (${agg.failed.size}/${expectedCount} config(s))`,
-              });
-              continue;
-            }
-
-            if (expectedCount > 0 && agg.completed.size < expectedCount) {
-              results.failed.push({
-                ficheId,
-                error: "Audit incomplete (timeout/stall)",
-              });
+              results.ignored.push({ ficheId: r.ficheId, reason: r.error || "Skipped" });
             }
           }
         }
       }
 
-      // Step 6: Finalize run
+      wlog.stepDone("process-fiches");
+      results.transcriptions = results.successful.length;
+
+
+      // Old fan-out/poll/reconcile code fully removed (2000+ lines).
+      // The per-fiche processing is now handled by:
+      //   - automation.day-worker.ts (per-day CRM fetch + fiche dispatch)
+      //   - automation.fiche-worker.ts (per-fiche: fetch -> transcribe -> analyze -> save)
+
+
+      // Step 7: Finalize run
       const durationMs = Date.now() - startTime!;
 
       // Deduplicate failures (same fiche can fail multiple stages) and compute successful list.
@@ -3742,4 +1566,4 @@ export const scheduledAutomationCheck = inngest.createFunction(
   }
 );
 
-export const functions = [runAutomationFunction, scheduledAutomationCheck];
+export const functions = [runAutomationFunction, scheduledAutomationCheck, registeredProcessDayFunction, registeredProcessFicheFunction];
